@@ -1,0 +1,220 @@
+package tmux
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os/exec"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+var ErrNotInstalled = errors.New("tmux not found in PATH")
+
+const paneFormat = "#{pane_id}\t#{pane_title}\t#{pane_active}\t#{pane_current_command}\t#{pane_pid}\t#{session_name}\t#{window_id}\t#{pane_top}\t#{pane_left}\t#{pane_height}\t#{pane_width}"
+
+type Pane struct {
+	ID             string
+	Title          string
+	Active         bool
+	CurrentCommand string
+	PID            int
+	SessionName    string
+	WindowID       string
+	Top            int
+	Left           int
+	Height         int
+	Width          int
+}
+
+type Client struct {
+	binary     string
+	socketName string
+}
+
+func NewClient(socketName string) (*Client, error) {
+	binary, err := exec.LookPath("tmux")
+	if err != nil {
+		return nil, ErrNotInstalled
+	}
+
+	return &Client{
+		binary:     binary,
+		socketName: socketName,
+	}, nil
+}
+
+func (c *Client) HasSession(ctx context.Context, sessionName string) (bool, error) {
+	_, err := c.run(ctx, "has-session", "-t", sessionName)
+	if err == nil {
+		return true, nil
+	}
+
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return false, nil
+	}
+
+	return false, err
+}
+
+func (c *Client) NewDetachedSession(ctx context.Context, sessionName string, startDir string, env map[string]string) error {
+	args := []string{"new-session", "-d", "-s", sessionName, "-c", startDir}
+	args = append(args, environmentArgs(env)...)
+	_, err := c.run(ctx, args...)
+	return err
+}
+
+func (c *Client) SplitBottom(ctx context.Context, target string, percent int, startDir string) error {
+	size := strconv.Itoa(percent) + "%"
+	_, err := c.run(ctx, "split-window", "-v", "-l", size, "-t", target, "-c", startDir)
+	return err
+}
+
+func (c *Client) ListPanes(ctx context.Context, target string) ([]Pane, error) {
+	output, err := c.run(ctx, "list-panes", "-t", target, "-F", paneFormat)
+	if err != nil {
+		return nil, err
+	}
+
+	return parsePanesOutput(output)
+}
+
+func (c *Client) SendKeys(ctx context.Context, target string, text string, enter bool) error {
+	args := []string{"send-keys", "-t", target, text}
+	if enter {
+		args = append(args, "C-m")
+	}
+
+	_, err := c.run(ctx, args...)
+	return err
+}
+
+func (c *Client) CapturePane(ctx context.Context, target string, startLine int) (string, error) {
+	if len(target) == 0 || target[0] != '%' {
+		return "", fmt.Errorf("invalid pane target %q", target)
+	}
+
+	if _, err := strconv.Atoi(target[1:]); err != nil {
+		return "", fmt.Errorf("invalid pane target %q", target)
+	}
+
+	output, err := c.run(ctx, "capture-pane", "-p", "-t", target, "-S", strconv.Itoa(startLine))
+	if err != nil {
+		return "", err
+	}
+
+	return output, nil
+}
+
+func (c *Client) KillSession(ctx context.Context, sessionName string) error {
+	_, err := c.run(ctx, "kill-session", "-t", sessionName)
+	return err
+}
+
+func (c *Client) run(ctx context.Context, args ...string) (string, error) {
+	commandArgs := make([]string, 0, len(args)+2)
+	if c.socketName != "" {
+		commandArgs = append(commandArgs, "-L", c.socketName)
+	}
+	commandArgs = append(commandArgs, args...)
+
+	command := exec.CommandContext(ctx, c.binary, commandArgs...)
+	output, err := command.CombinedOutput()
+	trimmed := strings.TrimSpace(string(output))
+	if err != nil {
+		if trimmed == "" {
+			return "", fmt.Errorf("tmux %s: %w", strings.Join(args, " "), err)
+		}
+
+		return "", fmt.Errorf("tmux %s: %w: %s", strings.Join(args, " "), err, trimmed)
+	}
+
+	return trimmed, nil
+}
+
+func parsePanesOutput(output string) ([]Pane, error) {
+	if strings.TrimSpace(output) == "" {
+		return nil, nil
+	}
+
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	panes := make([]Pane, 0, len(lines))
+
+	for _, line := range lines {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 11 {
+			return nil, fmt.Errorf("unexpected pane field count %d in %q", len(fields), line)
+		}
+
+		pane, err := parsePaneFields(fields)
+		if err != nil {
+			return nil, err
+		}
+
+		panes = append(panes, pane)
+	}
+
+	return panes, nil
+}
+
+func parsePaneFields(fields []string) (Pane, error) {
+	pid, err := strconv.Atoi(fields[4])
+	if err != nil {
+		return Pane{}, fmt.Errorf("parse pane pid %q: %w", fields[4], err)
+	}
+
+	top, err := strconv.Atoi(fields[7])
+	if err != nil {
+		return Pane{}, fmt.Errorf("parse pane top %q: %w", fields[7], err)
+	}
+
+	left, err := strconv.Atoi(fields[8])
+	if err != nil {
+		return Pane{}, fmt.Errorf("parse pane left %q: %w", fields[8], err)
+	}
+
+	height, err := strconv.Atoi(fields[9])
+	if err != nil {
+		return Pane{}, fmt.Errorf("parse pane height %q: %w", fields[9], err)
+	}
+
+	width, err := strconv.Atoi(fields[10])
+	if err != nil {
+		return Pane{}, fmt.Errorf("parse pane width %q: %w", fields[10], err)
+	}
+
+	return Pane{
+		ID:             fields[0],
+		Title:          fields[1],
+		Active:         fields[2] == "1",
+		CurrentCommand: fields[3],
+		PID:            pid,
+		SessionName:    fields[5],
+		WindowID:       fields[6],
+		Top:            top,
+		Left:           left,
+		Height:         height,
+		Width:          width,
+	}, nil
+}
+
+func environmentArgs(env map[string]string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	args := make([]string, 0, len(env)*2)
+	for _, key := range keys {
+		args = append(args, "-e", key+"="+env[key])
+	}
+
+	return args
+}
