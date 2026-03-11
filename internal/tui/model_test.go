@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"aiterm/internal/controller"
@@ -282,6 +283,214 @@ func TestTranscriptPinnedStateControlsAutoFollow(t *testing.T) {
 	}
 }
 
+func TestTranscriptEntrySelectionUsesAltArrows(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.entries = makeTranscriptEntries(5)
+	model.selectedEntry = 4
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
+	model = updated.(Model)
+	if model.selectedEntry != 3 {
+		t.Fatalf("expected selected entry 3, got %d", model.selectedEntry)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown, Alt: true})
+	model = updated.(Model)
+	if model.selectedEntry != 4 {
+		t.Fatalf("expected selected entry 4, got %d", model.selectedEntry)
+	}
+}
+
+func TestDetailViewOpensAndCloses(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.entries = []Entry{
+		{Title: "result", Body: "line 1\nline 2\nline 3"},
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	model = updated.(Model)
+	if !model.detailOpen {
+		t.Fatal("expected detail view to open")
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(Model)
+	if model.detailOpen {
+		t.Fatal("expected detail view to close")
+	}
+}
+
+func TestDetailViewScrolls(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.height = 20
+	model.entries = []Entry{
+		{Title: "result", Body: makeMultilineBody(20)},
+	}
+	model.selectedEntry = 0
+	model.detailOpen = true
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	model = updated.(Model)
+	if model.detailScroll == 0 {
+		t.Fatal("expected detail scroll to move down")
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyHome})
+	model = updated.(Model)
+	if model.detailScroll != 0 {
+		t.Fatalf("expected detail scroll reset to 0, got %d", model.detailScroll)
+	}
+}
+
+func TestCommandResultEntryIsCollapsedInTranscriptButPreservedInDetail(t *testing.T) {
+	events := []controller.TranscriptEvent{
+		{
+			Kind: controller.EventCommandResult,
+			Payload: controller.CommandResultSummary{
+				Command:  "seq 1 10",
+				ExitCode: 0,
+				Summary:  makeMultilineBody(10),
+			},
+		},
+	}
+
+	entries := eventsToEntries(events, true)
+	if len(entries) != 1 {
+		t.Fatalf("expected one entry, got %d", len(entries))
+	}
+
+	if !strings.Contains(entries[0].Body, "... (4 more lines, Ctrl+O to inspect)") {
+		t.Fatalf("expected collapsed preview, got %q", entries[0].Body)
+	}
+
+	if !strings.Contains(entries[0].Detail, "command: seq 1 10") {
+		t.Fatalf("expected detail to retain command metadata, got %q", entries[0].Detail)
+	}
+
+	if !strings.Contains(entries[0].Detail, "line 9") {
+		t.Fatalf("expected detail to retain full output, got %q", entries[0].Detail)
+	}
+}
+
+func TestCommandResultEntryCanRenderExpandedForDirectShellUse(t *testing.T) {
+	events := []controller.TranscriptEvent{
+		{
+			Kind: controller.EventCommandResult,
+			Payload: controller.CommandResultSummary{
+				Command:  "seq 1 10",
+				ExitCode: 0,
+				Summary:  makeMultilineBody(10),
+			},
+		},
+	}
+
+	entries := eventsToEntries(events, false)
+	if len(entries) != 1 {
+		t.Fatalf("expected one entry, got %d", len(entries))
+	}
+
+	if strings.Contains(entries[0].Body, "Ctrl+O to inspect") {
+		t.Fatalf("expected expanded shell result without inspect hint, got %q", entries[0].Body)
+	}
+
+	if !strings.Contains(entries[0].Body, "line 9") {
+		t.Fatalf("expected full shell result in transcript, got %q", entries[0].Body)
+	}
+}
+
+func TestPlanEntryIsCollapsedInTranscriptButPreservedInDetail(t *testing.T) {
+	events := []controller.TranscriptEvent{
+		{
+			Kind: controller.EventPlan,
+			Payload: controller.PlanPayload{
+				Summary: "Inspect and repair the workspace.",
+				Steps: []string{
+					"Review the current files.",
+					"Apply the next patch.",
+					"Run tests.",
+					"Summarize the result.",
+				},
+			},
+		},
+	}
+
+	entries := eventsToEntries(events, true)
+	if len(entries) != 1 {
+		t.Fatalf("expected one entry, got %d", len(entries))
+	}
+
+	if !strings.Contains(entries[0].Body, "... (2 more steps, Ctrl+O to inspect)") {
+		t.Fatalf("expected collapsed plan preview, got %q", entries[0].Body)
+	}
+
+	if !strings.Contains(entries[0].Detail, "4. Summarize the result.") {
+		t.Fatalf("expected full plan detail, got %q", entries[0].Detail)
+	}
+}
+
+func TestProposalEntryIsCollapsedInTranscriptButPreservedInDetail(t *testing.T) {
+	patch := strings.Join([]string{
+		"*** Begin Patch",
+		"*** Update File: app.go",
+		"+new line 1",
+		"+new line 2",
+		"+new line 3",
+		"*** End Patch",
+	}, "\n")
+	events := []controller.TranscriptEvent{
+		{
+			Kind: controller.EventProposal,
+			Payload: controller.ProposalPayload{
+				Kind:        controller.ProposalPatch,
+				Description: "Apply a targeted patch.",
+				Patch:       patch,
+			},
+		},
+	}
+
+	entries := eventsToEntries(events, true)
+	if len(entries) != 1 {
+		t.Fatalf("expected one entry, got %d", len(entries))
+	}
+
+	if !strings.Contains(entries[0].Body, "patch attached (6 lines, Ctrl+O to inspect)") {
+		t.Fatalf("expected collapsed proposal preview, got %q", entries[0].Body)
+	}
+
+	if !strings.Contains(entries[0].Detail, "kind: patch") || !strings.Contains(entries[0].Detail, "*** Begin Patch") {
+		t.Fatalf("expected full proposal detail, got %q", entries[0].Detail)
+	}
+}
+
+func TestApprovalEntryIsCollapsedInTranscriptButPreservedInDetail(t *testing.T) {
+	events := []controller.TranscriptEvent{
+		{
+			Kind: controller.EventApproval,
+			Payload: controller.ApprovalRequest{
+				ID:      "approval-1",
+				Kind:    controller.ApprovalCommand,
+				Title:   "Destructive command approval",
+				Summary: "Please review this carefully before execution.",
+				Command: "rm -rf tmp",
+				Risk:    controller.RiskHigh,
+			},
+		},
+	}
+
+	entries := eventsToEntries(events, true)
+	if len(entries) != 1 {
+		t.Fatalf("expected one entry, got %d", len(entries))
+	}
+
+	if !strings.Contains(entries[0].Body, "... (1 more lines, Ctrl+O to inspect)") {
+		t.Fatalf("expected collapsed approval preview, got %q", entries[0].Body)
+	}
+
+	if !strings.Contains(entries[0].Detail, "kind: command") || !strings.Contains(entries[0].Detail, "risk: high") {
+		t.Fatalf("expected full approval detail, got %q", entries[0].Detail)
+	}
+}
+
 func TestAgentProposalCanRunThroughController(t *testing.T) {
 	ctrl := &fakeController{
 		agentEvents: []controller.TranscriptEvent{
@@ -329,6 +538,107 @@ func TestAgentProposalCanRunThroughController(t *testing.T) {
 
 	if next.pendingProposal != nil {
 		t.Fatalf("expected pending proposal to clear after execution, got %#v", next.pendingProposal)
+	}
+}
+
+func TestDirectShellSubmissionShowsExpandedResultInTranscript(t *testing.T) {
+	ctrl := &fakeController{
+		shellEvents: []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventCommandStart,
+				Payload: controller.CommandStartPayload{Command: "ls"},
+			},
+			{
+				Kind: controller.EventCommandResult,
+				Payload: controller.CommandResultSummary{
+					Command:  "ls",
+					ExitCode: 0,
+					Summary:  "file-a\nfile-b\nfile-c\nfile-d\nfile-e\nfile-f\nfile-g",
+				},
+			},
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.input = "ls"
+
+	updated, cmd := model.submit()
+	model = updated.(Model)
+	msg := cmd().(controllerEventsMsg)
+	updated, _ = model.Update(msg)
+	model = updated.(Model)
+
+	last := model.entries[len(model.entries)-1]
+	if last.Title != "result" {
+		t.Fatalf("expected result entry, got %s", last.Title)
+	}
+
+	if strings.Contains(last.Body, "Ctrl+O to inspect") {
+		t.Fatalf("expected direct shell result to stay expanded, got %q", last.Body)
+	}
+
+	if !strings.Contains(last.Body, "file-g") {
+		t.Fatalf("expected full shell output in transcript, got %q", last.Body)
+	}
+}
+
+func TestAgentRunResultStaysCollapsedInTranscript(t *testing.T) {
+	ctrl := &fakeController{
+		agentEvents: []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventUserMessage,
+				Payload: controller.TextPayload{Text: "list files"},
+			},
+			{
+				Kind:    controller.EventAgentMessage,
+				Payload: controller.TextPayload{Text: "I can inspect the current directory contents."},
+			},
+			{
+				Kind: controller.EventProposal,
+				Payload: controller.ProposalPayload{
+					Kind:        controller.ProposalCommand,
+					Command:     "ls -lah",
+					Description: "List files with permissions and sizes.",
+				},
+			},
+		},
+		shellEvents: []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventCommandStart,
+				Payload: controller.CommandStartPayload{Command: "ls -lah"},
+			},
+			{
+				Kind: controller.EventCommandResult,
+				Payload: controller.CommandResultSummary{
+					Command:  "ls -lah",
+					ExitCode: 0,
+					Summary:  makeMultilineBody(10),
+				},
+			},
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.mode = AgentMode
+	model.input = "list files"
+
+	updated, cmd := model.submit()
+	model = updated.(Model)
+	msg := cmd().(controllerEventsMsg)
+	updated, _ = model.Update(msg)
+	model = updated.(Model)
+
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
+	model = updated.(Model)
+	msg = cmd().(controllerEventsMsg)
+	updated, _ = model.Update(msg)
+	model = updated.(Model)
+
+	last := model.entries[len(model.entries)-1]
+	if last.Title != "result" {
+		t.Fatalf("expected result entry, got %s", last.Title)
+	}
+
+	if !strings.Contains(last.Body, "Ctrl+O to inspect") {
+		t.Fatalf("expected agent-triggered result to stay collapsed, got %q", last.Body)
 	}
 }
 
@@ -504,6 +814,15 @@ func makeTranscriptEntries(count int) []Entry {
 	}
 
 	return entries
+}
+
+func makeMultilineBody(count int) string {
+	lines := make([]string, 0, count)
+	for index := 0; index < count; index++ {
+		lines = append(lines, fmt.Sprintf("line %d", index))
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 type fakeController struct {

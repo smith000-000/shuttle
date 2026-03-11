@@ -5,6 +5,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -14,15 +15,21 @@ const (
 )
 
 type Config struct {
-	SessionName string
-	StartDir    string
-	TmuxSocket  string
-	StateDir    string
-	LogPath     string
-	Inject      string
-	Track       string
-	TUI         bool
-	InjectEnter bool
+	SessionName          string
+	StartDir             string
+	TmuxSocket           string
+	StateDir             string
+	LogPath              string
+	Inject               string
+	Track                string
+	TUI                  bool
+	InjectEnter          bool
+	ProviderType         string
+	ProviderAuthMethod   string
+	ProviderModel        string
+	ProviderBaseURL      string
+	ProviderAPIKey       string
+	ProviderAPIKeyEnvVar string
 }
 
 func Parse(args []string) (Config, error) {
@@ -34,6 +41,10 @@ func Parse(args []string) (Config, error) {
 	stateDir := envOrDefault("SHUTTLE_STATE_DIR", filepath.Join(workingDir, defaultStateDir))
 	sessionName := envOrDefault("SHUTTLE_SESSION", defaultSessionName)
 	socketName := os.Getenv("SHUTTLE_TMUX_SOCKET")
+	providerType := envOrDefault("SHUTTLE_PROVIDER", "mock")
+	providerAuthMethod := envOrDefault("SHUTTLE_AUTH", "auto")
+	providerModel := os.Getenv("SHUTTLE_MODEL")
+	providerBaseURL := os.Getenv("SHUTTLE_BASE_URL")
 
 	fs := flag.NewFlagSet("shuttle", flag.ContinueOnError)
 
@@ -46,6 +57,10 @@ func Parse(args []string) (Config, error) {
 	fs.StringVar(&cfg.Track, "track", "", "inject a tracked shell command into the top pane and wait for its result")
 	fs.BoolVar(&cfg.TUI, "tui", false, "run the minimal interactive TUI shell")
 	fs.BoolVar(&cfg.InjectEnter, "enter", true, "append Enter when injecting a command")
+	fs.StringVar(&cfg.ProviderType, "provider", providerType, "agent provider to use: mock, openai, openrouter, or custom")
+	fs.StringVar(&cfg.ProviderAuthMethod, "auth", providerAuthMethod, "auth method for the selected provider: auto, api_key, or none")
+	fs.StringVar(&cfg.ProviderModel, "model", providerModel, "model name for the selected provider")
+	fs.StringVar(&cfg.ProviderBaseURL, "base-url", providerBaseURL, "base URL for the selected provider API")
 
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
@@ -67,6 +82,13 @@ func Parse(args []string) (Config, error) {
 	}
 	cfg.StateDir = stateDirAbs
 	cfg.LogPath = filepath.Join(cfg.StateDir, defaultLogName)
+	cfg.ProviderType = normalizeProviderType(cfg.ProviderType)
+	authMethod, err := normalizeProviderAuthMethod(cfg.ProviderAuthMethod)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.ProviderAuthMethod = authMethod
+	cfg.ProviderAPIKey, cfg.ProviderAPIKeyEnvVar = resolveProviderAPIKey(cfg.ProviderType, cfg.ProviderAuthMethod)
 
 	return cfg, nil
 }
@@ -77,4 +99,69 @@ func envOrDefault(key string, fallback string) string {
 	}
 
 	return fallback
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+
+	return ""
+}
+
+func normalizeProviderType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "":
+		return "mock"
+	case "openai-responses":
+		return "openai"
+	default:
+		return strings.ToLower(strings.TrimSpace(value))
+	}
+}
+
+func normalizeProviderAuthMethod(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "auto":
+		return "auto", nil
+	case "api_key":
+		return "api_key", nil
+	case "none":
+		return "none", nil
+	default:
+		return "", errors.New("auth method must be one of: auto, api_key, none")
+	}
+}
+
+func resolveProviderAPIKey(providerType string, authMethod string) (string, string) {
+	if authMethod == "none" {
+		return "", ""
+	}
+
+	switch normalizeProviderType(providerType) {
+	case "openrouter":
+		return firstNonEmptyEnv(
+			"SHUTTLE_API_KEY",
+			"OPENROUTER_API_KEY",
+		)
+	case "openai", "custom":
+		return firstNonEmptyEnv(
+			"SHUTTLE_API_KEY",
+			"OPENAI_API_KEY",
+		)
+	default:
+		return firstNonEmptyEnv("SHUTTLE_API_KEY")
+	}
+}
+
+func firstNonEmptyEnv(keys ...string) (string, string) {
+	for _, key := range keys {
+		if value := os.Getenv(key); value != "" {
+			return value, key
+		}
+	}
+
+	return "", ""
 }

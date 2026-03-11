@@ -21,8 +21,9 @@ const (
 )
 
 type Entry struct {
-	Title string
-	Body  string
+	Title  string
+	Body   string
+	Detail string
 }
 
 type controllerEventsMsg struct {
@@ -36,11 +37,14 @@ type Model struct {
 	mode               Mode
 	input              string
 	entries            []Entry
+	selectedEntry      int
 	width              int
 	height             int
 	busy               bool
 	transcriptScroll   int
 	transcriptFollow   bool
+	detailOpen         bool
+	detailScroll       int
 	shellHistory       composerHistory
 	agentHistory       composerHistory
 	pendingApproval    *controller.ApprovalRequest
@@ -48,6 +52,7 @@ type Model struct {
 	refiningApproval   *controller.ApprovalRequest
 	approvalInFlight   bool
 	proposalRunPending bool
+	directShellPending bool
 	styles             styles
 }
 
@@ -67,7 +72,8 @@ func NewModel(workspace tmux.Workspace, ctrl controller.Controller) Model {
 				Body:  "Tab mode. Up/Down history. PgUp/PgDn scroll. Enter submit. Esc clear. Ctrl+C quit.",
 			},
 		},
-		styles: newStyles(),
+		selectedEntry: 1,
+		styles:        newStyles(),
 	}
 }
 
@@ -81,6 +87,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.clampTranscriptScroll()
+		m.clampSelection()
+		m.clampDetailScroll()
 		return m, nil
 	case controllerEventsMsg:
 		pinned := m.isTranscriptPinned()
@@ -97,21 +105,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.clampTranscriptScroll()
 			}
+			m.selectedEntry = len(m.entries) - 1
+			m.clampSelection()
 			return m, nil
 		}
 
-		m.entries = append(m.entries, eventsToEntries(msg.events)...)
+		m.entries = append(m.entries, eventsToEntries(msg.events, !m.directShellPending)...)
 		m.syncActionState(msg.events)
 		if pinned {
 			m.scrollTranscriptToBottom()
 		} else {
 			m.clampTranscriptScroll()
 		}
+		m.selectedEntry = len(m.entries) - 1
+		m.clampSelection()
 		if containsEventKind(msg.events, controller.EventError) {
 			return m, nil
 		}
 		return m, nil
 	case tea.KeyMsg:
+		if m.detailOpen {
+			return m.updateDetail(msg)
+		}
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			return m, tea.Quit
@@ -127,9 +142,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case tea.KeyUp:
+			if msg.Alt {
+				m.selectPreviousEntry()
+				return m, nil
+			}
 			m.input = m.currentHistory().previous(m.input)
 			return m, nil
 		case tea.KeyDown:
+			if msg.Alt {
+				m.selectNextEntry()
+				return m, nil
+			}
 			m.input = m.currentHistory().next(m.input)
 			return m, nil
 		case tea.KeyPgUp:
@@ -150,6 +173,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlD:
 			m.scrollTranscriptBy(m.halfPageScrollSize())
 			return m, nil
+		case tea.KeyCtrlO:
+			return m.openDetail()
 		case tea.KeyCtrlJ:
 			m.input += "\n"
 			return m, nil
@@ -183,6 +208,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) View() string {
+	if m.detailOpen {
+		return m.renderDetailView()
+	}
+
 	width := m.width
 	if width <= 0 {
 		width = 100
@@ -270,6 +299,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	}
 
 	m.busy = true
+	m.directShellPending = true
 	command := text
 	return m, func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -285,14 +315,23 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 
 func (m Model) transcriptLines() []string {
 	lines := make([]string, 0, len(m.entries)*2)
-	for _, entry := range m.entries {
-		lines = append(lines, m.renderTag(entry.Title))
+	for index, entry := range m.entries {
+		lines = append(lines, m.renderEntryHeader(index, entry.Title))
 		for _, line := range strings.Split(entry.Body, "\n") {
 			lines = append(lines, m.styles.body.Render("  "+line))
 		}
 	}
 
 	return lines
+}
+
+func (m Model) renderEntryHeader(index int, title string) string {
+	prefix := "  "
+	if index == m.selectedEntry {
+		prefix = "› "
+	}
+
+	return prefix + m.renderTag(title)
 }
 
 func (m Model) renderHeader(width int) string {
@@ -454,6 +493,11 @@ func (m Model) renderComposer(width int) string {
 }
 
 func (m Model) renderFooter(width int) string {
+	if m.detailOpen {
+		parts := []string{"[Esc] close", "[Up/Down] scroll", "[PgUp/PgDn] page", "[Home/End] bounds", "[Ctrl+C] quit"}
+		return m.styles.footer.Width(width).Render(strings.Join(parts, "  "))
+	}
+
 	parts := m.footerParts(width)
 	return m.styles.footer.Width(width).Render(strings.Join(parts, "  "))
 }
@@ -461,7 +505,7 @@ func (m Model) renderFooter(width int) string {
 func (m Model) footerParts(width int) []string {
 	switch {
 	case width < 72:
-		parts := []string{"[Tab]", "[Pg]", "[Enter]", "[Esc]", "[Ctrl+C]"}
+		parts := []string{"[Tab]", "[Pg]", "[Enter]", "[Esc]", "[Ctrl+O]", "[Ctrl+C]"}
 		if m.pendingApproval != nil {
 			parts = append(parts, "[Y/N/R]")
 		} else if m.pendingProposal != nil && m.pendingProposal.Command != "" {
@@ -469,7 +513,7 @@ func (m Model) footerParts(width int) []string {
 		}
 		return parts
 	case width < 100:
-		parts := []string{"[Tab] mode", "[PgUp/PgDn] scroll", "[Enter] submit", "[Esc] clear", "[Ctrl+C] quit"}
+		parts := []string{"[Tab] mode", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Enter] submit", "[Esc] clear", "[Ctrl+C] quit"}
 		if m.pendingApproval != nil {
 			parts = append(parts, "[Ctrl+Y/N/R]")
 		} else if m.pendingProposal != nil && m.pendingProposal.Command != "" {
@@ -478,7 +522,7 @@ func (m Model) footerParts(width int) []string {
 		return parts
 	}
 
-	parts := []string{"[Tab] mode", "[Up/Down] history", "[PgUp/PgDn] scroll", "[Ctrl+U/D] half-page", "[Home/End] bounds", "[Enter] submit", "[Esc] clear", "[Ctrl+J] newline"}
+	parts := []string{"[Tab] mode", "[Up/Down] history", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Ctrl+U/D] half-page", "[Home/End] bounds", "[Enter] submit", "[Esc] clear", "[Ctrl+J] newline"}
 	if m.pendingProposal != nil && m.pendingProposal.Command != "" {
 		parts = append(parts, "[Ctrl+E] run proposal")
 	}
@@ -554,6 +598,10 @@ func (m Model) maxTranscriptScrollFor(lines []string, height int) int {
 }
 
 func (m Model) currentTranscriptHeight() int {
+	if m.detailOpen {
+		return max(4, m.height-4)
+	}
+
 	width := m.width
 	if width <= 0 {
 		width = 100
@@ -609,6 +657,346 @@ func renderWithSideRails(lines []string, width int) string {
 	}
 
 	return strings.Join(rendered, "\n")
+}
+
+func (m Model) selectedEntryValue() Entry {
+	if len(m.entries) == 0 {
+		return Entry{}
+	}
+
+	index := m.selectedEntry
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(m.entries) {
+		index = len(m.entries) - 1
+	}
+
+	return m.entries[index]
+}
+
+func (e Entry) DetailBody() string {
+	if strings.TrimSpace(e.Detail) != "" {
+		return e.Detail
+	}
+
+	return e.Body
+}
+
+func (m *Model) clampSelection() {
+	if len(m.entries) == 0 {
+		m.selectedEntry = 0
+		return
+	}
+	if m.selectedEntry < 0 {
+		m.selectedEntry = 0
+	}
+	if m.selectedEntry >= len(m.entries) {
+		m.selectedEntry = len(m.entries) - 1
+	}
+}
+
+func (m *Model) selectPreviousEntry() {
+	m.clampSelection()
+	if m.selectedEntry > 0 {
+		m.selectedEntry--
+	}
+}
+
+func (m *Model) selectNextEntry() {
+	m.clampSelection()
+	if m.selectedEntry < len(m.entries)-1 {
+		m.selectedEntry++
+	}
+}
+
+func (m Model) openDetail() (tea.Model, tea.Cmd) {
+	if len(m.entries) == 0 {
+		return m, nil
+	}
+
+	m.clampSelection()
+	m.detailOpen = true
+	m.detailScroll = 0
+	m.clampDetailScroll()
+	return m, nil
+}
+
+func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		return m, tea.Quit
+	case tea.KeyEsc:
+		m.detailOpen = false
+		m.detailScroll = 0
+		return m, nil
+	case tea.KeyUp:
+		if m.detailScroll > 0 {
+			m.detailScroll--
+		}
+		return m, nil
+	case tea.KeyDown:
+		m.detailScroll++
+		m.clampDetailScroll()
+		return m, nil
+	case tea.KeyPgUp:
+		m.detailScroll -= m.detailPageSize()
+		m.clampDetailScroll()
+		return m, nil
+	case tea.KeyPgDown:
+		m.detailScroll += m.detailPageSize()
+		m.clampDetailScroll()
+		return m, nil
+	case tea.KeyHome:
+		m.detailScroll = 0
+		return m, nil
+	case tea.KeyEnd:
+		m.detailScroll = m.maxDetailScroll()
+		return m, nil
+	default:
+		return m, nil
+	}
+}
+
+func (m Model) renderDetailView() string {
+	width := m.width
+	if width <= 0 {
+		width = 100
+	}
+	height := m.height
+	if height <= 0 {
+		height = 24
+	}
+
+	entry := m.selectedEntryValue()
+	contentWidth := m.contentWidthFor(width, m.styles.detail)
+	lines := []string{
+		m.styles.detailTitle.Render(strings.ToUpper(entry.Title)),
+		m.styles.detailMeta.Render(fmt.Sprintf("entry %d/%d", m.selectedEntry+1, max(1, len(m.entries)))),
+		"",
+	}
+	bodyLines := strings.Split(entry.DetailBody(), "\n")
+	viewportHeight := height - lipgloss.Height(strings.Join(lines, "\n")) - m.styles.detail.GetVerticalFrameSize() - 2
+	if viewportHeight < 4 {
+		viewportHeight = 4
+	}
+	bodyLines = detailWindow(bodyLines, m.detailScroll, viewportHeight)
+	for _, line := range bodyLines {
+		lines = append(lines, m.styles.detailBody.Render(line))
+	}
+	lines = append(lines, "", m.styles.detailMeta.Render("Esc close  Up/Down scroll  PgUp/PgDn page"))
+
+	return m.styles.detail.Width(contentWidth).Render(strings.Join(lines, "\n"))
+}
+
+func detailWindow(lines []string, start int, height int) []string {
+	if start < 0 {
+		start = 0
+	}
+	if start > len(lines) {
+		start = len(lines)
+	}
+	end := start + height
+	if end > len(lines) {
+		end = len(lines)
+	}
+
+	window := append([]string(nil), lines[start:end]...)
+	for len(window) < height {
+		window = append(window, "")
+	}
+
+	return window
+}
+
+func compactResultPreview(body string, maxLines int) string {
+	lines := strings.Split(strings.TrimSpace(body), "\n")
+	if len(lines) == 0 {
+		return "(no output)"
+	}
+
+	if len(lines) <= maxLines {
+		return strings.Join(lines, "\n")
+	}
+
+	preview := append([]string(nil), lines[:maxLines]...)
+	preview = append(preview, fmt.Sprintf("... (%d more lines, Ctrl+O to inspect)", len(lines)-maxLines))
+	return strings.Join(preview, "\n")
+}
+
+func compactPlanEntry(summary string, steps []string) Entry {
+	detailLines := make([]string, 0, len(steps)+2)
+	if strings.TrimSpace(summary) != "" {
+		detailLines = append(detailLines, summary)
+	}
+	for index, step := range steps {
+		detailLines = append(detailLines, fmt.Sprintf("%d. %s", index+1, step))
+	}
+	if len(detailLines) == 0 {
+		detailLines = append(detailLines, "(empty plan)")
+	}
+
+	previewLines := make([]string, 0, 3)
+	if strings.TrimSpace(summary) != "" {
+		previewLines = append(previewLines, summary)
+	}
+	visibleSteps := min(2, len(steps))
+	for index := 0; index < visibleSteps; index++ {
+		previewLines = append(previewLines, fmt.Sprintf("%d. %s", index+1, steps[index]))
+	}
+	if hiddenSteps := len(steps) - visibleSteps; hiddenSteps > 0 {
+		previewLines = append(previewLines, fmt.Sprintf("... (%d more steps, Ctrl+O to inspect)", hiddenSteps))
+	}
+	if len(previewLines) == 0 {
+		previewLines = append(previewLines, "(empty plan)")
+	}
+
+	return Entry{
+		Title:  "plan",
+		Body:   strings.Join(previewLines, "\n"),
+		Detail: strings.Join(detailLines, "\n"),
+	}
+}
+
+func compactProposalEntry(payload controller.ProposalPayload) Entry {
+	detailLines := make([]string, 0, 5)
+	if payload.Kind != "" {
+		detailLines = append(detailLines, "kind: "+string(payload.Kind))
+	}
+	if payload.Description != "" {
+		detailLines = append(detailLines, payload.Description)
+	}
+	if payload.Command != "" {
+		detailLines = append(detailLines, "command: "+payload.Command)
+	}
+	if payload.Patch != "" {
+		if len(detailLines) > 0 {
+			detailLines = append(detailLines, "")
+		}
+		detailLines = append(detailLines, "patch:")
+		detailLines = append(detailLines, payload.Patch)
+	}
+	if len(detailLines) == 0 {
+		detailLines = append(detailLines, "(empty proposal)")
+	}
+
+	previewLines := make([]string, 0, 3)
+	if payload.Description != "" {
+		previewLines = append(previewLines, payload.Description)
+	}
+	switch {
+	case payload.Command != "":
+		previewLines = append(previewLines, "command: "+payload.Command)
+	case payload.Patch != "":
+		previewLines = append(previewLines, fmt.Sprintf("patch attached (%d lines, Ctrl+O to inspect)", countNonEmptyLines(payload.Patch)))
+	case payload.Kind != "":
+		previewLines = append(previewLines, "kind: "+string(payload.Kind))
+	}
+	if len(previewLines) == 0 {
+		previewLines = append(previewLines, "(empty proposal)")
+	}
+
+	return Entry{
+		Title:  "proposal",
+		Body:   strings.Join(previewLines, "\n"),
+		Detail: strings.Join(detailLines, "\n"),
+	}
+}
+
+func compactApprovalEntry(payload controller.ApprovalRequest) Entry {
+	detailLines := make([]string, 0, 7)
+	if payload.Title != "" {
+		detailLines = append(detailLines, payload.Title)
+	}
+	if payload.Summary != "" {
+		detailLines = append(detailLines, payload.Summary)
+	}
+	if payload.Kind != "" {
+		detailLines = append(detailLines, "kind: "+string(payload.Kind))
+	}
+	if payload.Risk != "" {
+		detailLines = append(detailLines, "risk: "+string(payload.Risk))
+	}
+	if payload.Command != "" {
+		detailLines = append(detailLines, "command: "+payload.Command)
+	}
+	if payload.Patch != "" {
+		if len(detailLines) > 0 {
+			detailLines = append(detailLines, "")
+		}
+		detailLines = append(detailLines, "patch:")
+		detailLines = append(detailLines, payload.Patch)
+	}
+	if len(detailLines) == 0 {
+		detailLines = append(detailLines, "(empty approval)")
+	}
+
+	previewLines := make([]string, 0, 4)
+	if payload.Title != "" {
+		previewLines = append(previewLines, payload.Title)
+	}
+	if payload.Summary != "" {
+		previewLines = append(previewLines, payload.Summary)
+	}
+	if payload.Command != "" {
+		previewLines = append(previewLines, "command: "+payload.Command)
+	}
+	if payload.Risk != "" {
+		previewLines = append(previewLines, "risk: "+string(payload.Risk))
+	}
+	if len(previewLines) == 0 {
+		previewLines = append(previewLines, "(empty approval)")
+	}
+	if len(previewLines) > 3 {
+		previewLines = append(previewLines[:3], fmt.Sprintf("... (%d more lines, Ctrl+O to inspect)", len(previewLines)-3))
+	}
+
+	return Entry{
+		Title:  "approval",
+		Body:   strings.Join(previewLines, "\n"),
+		Detail: strings.Join(detailLines, "\n"),
+	}
+}
+
+func countNonEmptyLines(value string) int {
+	lines := strings.Split(strings.TrimSpace(value), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		return 0
+	}
+
+	return len(lines)
+}
+
+func (m Model) detailPageSize() int {
+	return max(1, m.height/2)
+}
+
+func (m *Model) clampDetailScroll() {
+	if m.detailScroll < 0 {
+		m.detailScroll = 0
+		return
+	}
+	if m.detailScroll > m.maxDetailScroll() {
+		m.detailScroll = m.maxDetailScroll()
+	}
+}
+
+func (m Model) maxDetailScroll() int {
+	entry := m.selectedEntryValue()
+	lines := strings.Split(entry.DetailBody(), "\n")
+	height := m.height
+	if height <= 0 {
+		height = 24
+	}
+	viewportHeight := height - 8
+	if viewportHeight < 4 {
+		viewportHeight = 4
+	}
+	if len(lines) <= viewportHeight {
+		return 0
+	}
+
+	return len(lines) - viewportHeight
 }
 
 func (m *Model) clampTranscriptScroll() {
@@ -777,10 +1165,18 @@ func (m *Model) syncActionState(events []controller.TranscriptEvent) {
 
 	m.approvalInFlight = false
 	m.proposalRunPending = false
+	m.directShellPending = false
 }
 
 func max(a int, b int) int {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a int, b int) int {
+	if a < b {
 		return a
 	}
 	return b
@@ -882,7 +1278,7 @@ func (h *composerHistory) reset() {
 	h.browsing = false
 }
 
-func eventsToEntries(events []controller.TranscriptEvent) []Entry {
+func eventsToEntries(events []controller.TranscriptEvent, collapseResults bool) []Entry {
 	entries := make([]Entry, 0, len(events))
 	for _, event := range events {
 		switch event.Kind {
@@ -894,53 +1290,30 @@ func eventsToEntries(events []controller.TranscriptEvent) []Entry {
 			entries = append(entries, Entry{Title: "agent", Body: payload.Text})
 		case controller.EventPlan:
 			payload, _ := event.Payload.(controller.PlanPayload)
-			body := payload.Summary
-			if len(payload.Steps) > 0 {
-				stepLines := make([]string, 0, len(payload.Steps))
-				for index, step := range payload.Steps {
-					stepLines = append(stepLines, fmt.Sprintf("%d. %s", index+1, step))
-				}
-				if body != "" {
-					body += "\n"
-				}
-				body += strings.Join(stepLines, "\n")
-			}
-			entries = append(entries, Entry{Title: "plan", Body: body})
+			entries = append(entries, compactPlanEntry(payload.Summary, payload.Steps))
 		case controller.EventProposal:
 			payload, _ := event.Payload.(controller.ProposalPayload)
-			bodyParts := make([]string, 0, 3)
-			if payload.Description != "" {
-				bodyParts = append(bodyParts, payload.Description)
-			}
-			if payload.Command != "" {
-				bodyParts = append(bodyParts, "command: "+payload.Command)
-			}
-			if payload.Patch != "" {
-				bodyParts = append(bodyParts, payload.Patch)
-			}
-			entries = append(entries, Entry{Title: "proposal", Body: strings.Join(bodyParts, "\n")})
+			entries = append(entries, compactProposalEntry(payload))
 		case controller.EventApproval:
 			payload, _ := event.Payload.(controller.ApprovalRequest)
-			bodyParts := []string{payload.Title, payload.Summary}
-			if payload.Command != "" {
-				bodyParts = append(bodyParts, "command: "+payload.Command)
-			}
-			if payload.Risk != "" {
-				bodyParts = append(bodyParts, "risk: "+string(payload.Risk))
-			}
-			entries = append(entries, Entry{Title: "approval", Body: strings.Join(bodyParts, "\n")})
+			entries = append(entries, compactApprovalEntry(payload))
 		case controller.EventCommandStart:
 			payload, _ := event.Payload.(controller.CommandStartPayload)
 			entries = append(entries, Entry{Title: "shell", Body: payload.Command})
 		case controller.EventCommandResult:
 			payload, _ := event.Payload.(controller.CommandResultSummary)
-			body := strings.TrimSpace(payload.Summary)
-			if body == "" {
-				body = "(no output)"
+			fullBody := strings.TrimSpace(payload.Summary)
+			if fullBody == "" {
+				fullBody = "(no output)"
+			}
+			body := fullBody
+			if collapseResults {
+				body = compactResultPreview(fullBody, 6)
 			}
 			entries = append(entries, Entry{
-				Title: "result",
-				Body:  fmt.Sprintf("exit=%d\n%s", payload.ExitCode, body),
+				Title:  "result",
+				Body:   fmt.Sprintf("exit=%d\n%s", payload.ExitCode, body),
+				Detail: fmt.Sprintf("command: %s\nexit=%d\n\n%s", payload.Command, payload.ExitCode, fullBody),
 			})
 		case controller.EventSystemNotice:
 			payload, _ := event.Payload.(controller.TextPayload)

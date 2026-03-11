@@ -3,6 +3,29 @@
 ## Purpose
 Translate the product docs into an execution plan that is practical for a small team, explicit about debugging strategy, and sequenced to prove the risky parts before building polish.
 
+## Current Status
+As of March 11, 2026, the implementation state is:
+- Milestone 0: complete
+- Milestone 1: complete
+- Milestone 2: complete
+- Milestone 3: materially complete for `P0`, including transcript drill-down, scrolling, composer history, approvals, refine flow, and the compact two-pane TUI shell
+- Milestone 4: complete for the mock-runtime path
+- Milestone 5: in progress
+
+Milestone 5 currently includes:
+- provider profile and resolver scaffolding
+- backend/auth abstraction layers
+- provider factory wiring
+- one real `responses_http` path for the standard OpenAI API endpoint with API-key auth
+- `httptest` coverage for the OpenAI-compatible adapter
+
+Milestone 5 still needs:
+- OpenRouter verification and preset-specific tests
+- onboarding and health checks
+- saved provider profiles
+- Codex CLI delegation path
+- provider switching UI
+
 ## Guiding Decisions
 - Build `P0` only first. That means Epics 1 through 4 in [requirements-mvp.md](requirements-mvp.md).
 - Prove the shell substrate before investing in the full TUI.
@@ -152,11 +175,25 @@ Replace the mock provider with a real provider while preserving the same control
 - profile-based model selection
 - request and response normalization
 
+### Current State
+Implemented now:
+- provider resolution and factory wiring in the app startup path
+- one real OpenAI-compatible Responses adapter using API-key auth
+- normalized mapping from structured provider output into Shuttle `AgentResponse`
+
+Next:
+- validate and harden the OpenRouter preset
+- add provider detection and health checks
+- add profile persistence
+- add the Codex CLI bridge
+
 ### Exit Criteria
 - the same loop used in Milestone 4 works with a real provider
 - provider failures are surfaced as structured errors rather than crashing the app
 
 Framework and ACP guidance: [agent-runtime-design.md](agent-runtime-design.md)
+Detailed provider decomposition: [provider-integration-design.md](provider-integration-design.md)
+Execution plan: [provider-integration-plan.md](provider-integration-plan.md)
 
 ---
 

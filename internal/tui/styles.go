@@ -17,6 +17,10 @@ type styles struct {
 	actionCard          lipgloss.Style
 	actionTitle         lipgloss.Style
 	actionBody          lipgloss.Style
+	detail              lipgloss.Style
+	detailTitle         lipgloss.Style
+	detailMeta          lipgloss.Style
+	detailBody          lipgloss.Style
 	composer            lipgloss.Style
 	composerShell       lipgloss.Style
 	composerAgent       lipgloss.Style
@@ -84,6 +88,17 @@ func newStyles() styles {
 			Foreground(lipgloss.Color("230")).
 			Bold(true),
 		actionBody: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("252")),
+		detail: lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(lipgloss.Color("63")).
+			Padding(0, 1),
+		detailTitle: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("230")).
+			Bold(true),
+		detailMeta: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("245")),
+		detailBody: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("252")),
 		composer: lipgloss.NewStyle().
 			Padding(0, 1),

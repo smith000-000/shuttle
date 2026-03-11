@@ -69,7 +69,19 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 
 	if a.cfg.TUI {
 		observer := shell.NewObserver(client)
-		agent := provider.NewMockAgent()
+		agent, profile, err := provider.NewFromConfig(a.cfg, provider.FactoryOptions{})
+		if err != nil {
+			return Result{}, fmt.Errorf("configure provider: %w", err)
+		}
+		a.logger.Info(
+			"provider ready",
+			"preset", profile.Preset,
+			"backend_family", profile.BackendFamily,
+			"auth_method", profile.AuthMethod,
+			"model", profile.Model,
+			"base_url", profile.BaseURL,
+			"api_key_env", profile.APIKeyEnvVar,
+		)
 		ctrl := controller.New(agent, observer, observer, controller.SessionContext{
 			SessionName:      workspace.SessionName,
 			TopPaneID:        workspace.TopPane.ID,

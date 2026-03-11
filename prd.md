@@ -18,6 +18,8 @@ Detailed material that used to live in the monolithic PRD is now split into focu
 - [Implementation Plan](implementation-plan.md)
 - [Milestone 1 Plan](milestone-1-workspace.md)
 - [Agent Runtime Design](agent-runtime-design.md)
+- [Provider Integration Design](provider-integration-design.md)
+- [Provider Integration Plan](provider-integration-plan.md)
 
 ---
 

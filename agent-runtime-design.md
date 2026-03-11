@@ -7,6 +7,8 @@ This document is the implementation-facing design note for Milestone 4 and Miles
 - Milestone 4: mock provider and controller-driven approval flow
 - Milestone 5: real provider or framework integration
 
+Detailed provider/auth decomposition and rollout sequencing live in [provider-integration-design.md](provider-integration-design.md) and [provider-integration-plan.md](provider-integration-plan.md).
+
 ---
 
 # 1. Core Position
