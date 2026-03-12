@@ -26,6 +26,7 @@ Milestone 5 still needs:
 - Codex CLI delegation path
 - provider switching UI
 - release-grade runtime management for socket/session lifecycle and crash recovery
+- execution-state redesign for long-running and interactive shell commands
 
 ## Guiding Decisions
 - Build `P0` only first. That means Epics 1 through 4 in [requirements-mvp.md](requirements-mvp.md).
@@ -197,6 +198,7 @@ Framework and ACP guidance: [agent-runtime-design.md](agent-runtime-design.md)
 Detailed provider decomposition: [provider-integration-design.md](provider-integration-design.md)
 Execution plan: [provider-integration-plan.md](provider-integration-plan.md)
 Runtime lifecycle design: [runtime-management-design.md](runtime-management-design.md)
+Shell and agent execution strategy: [shell-execution-strategy.md](shell-execution-strategy.md)
 
 ---
 

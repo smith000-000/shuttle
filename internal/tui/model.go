@@ -82,6 +82,7 @@ type Model struct {
 	resumeAfterHandoff bool
 	takeControl        takeControlConfig
 	liveShellTail      string
+	showShellTail      bool
 	styles             styles
 }
 
@@ -144,8 +145,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		m.busyStartedAt = time.Time{}
 		m.inFlightCancel = nil
+		if len(msg.events) > 0 {
+			m.entries = append(m.entries, eventsToEntries(msg.events, !m.directShellPending)...)
+			m.syncActionState(msg.events)
+			if pinned {
+				m.scrollTranscriptToBottom()
+			} else {
+				m.clampTranscriptScroll()
+			}
+			m.selectedEntry = len(m.entries) - 1
+			m.clampSelection()
+		}
 		if msg.err != nil {
-			if m.suppressCancelErr && errors.Is(msg.err, context.Canceled) {
+			if errors.Is(msg.err, context.Canceled) {
 				m.suppressCancelErr = false
 				return m, nil
 			}
@@ -167,22 +179,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.pollShellTailCmd()
 		}
 
-		m.entries = append(m.entries, eventsToEntries(msg.events, !m.directShellPending)...)
 		m.suppressCancelErr = false
-		m.syncActionState(msg.events)
-		if pinned {
-			m.scrollTranscriptToBottom()
-		} else {
-			m.clampTranscriptScroll()
-		}
-		m.selectedEntry = len(m.entries) - 1
-		m.clampSelection()
 		if containsEventKind(msg.events, controller.EventError) {
 			return m, m.pollShellTailCmd()
 		}
 		if autoContinue {
 			m.busy = true
 			m.busyStartedAt = time.Now()
+			m.showShellTail = false
+			m.liveShellTail = ""
 			ctx, cancel := context.WithTimeout(context.Background(), agentTurnTimeout)
 			m.inFlightCancel = cancel
 			return m, tea.Batch(func() tea.Msg {
@@ -210,6 +215,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resumeAfterHandoff = false
 			m.busy = true
 			m.busyStartedAt = time.Now()
+			m.showShellTail = false
+			m.liveShellTail = ""
 			ctx, cancel := context.WithTimeout(context.Background(), agentTurnTimeout)
 			m.inFlightCancel = cancel
 			return m, tea.Batch(func() tea.Msg {
@@ -399,6 +406,8 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 
 		m.busy = true
 		m.busyStartedAt = time.Now()
+		m.showShellTail = false
+		m.liveShellTail = ""
 		prompt := text
 		refining := m.refiningApproval
 		m.refiningApproval = nil
@@ -434,6 +443,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	m.busy = true
 	m.busyStartedAt = time.Now()
 	m.directShellPending = true
+	m.showShellTail = true
 	command := text
 	ctx, cancel := context.WithTimeout(context.Background(), shell.CommandTimeout(command))
 	m.inFlightCancel = cancel
@@ -479,6 +489,8 @@ func (m Model) continueActivePlan() (tea.Model, tea.Cmd) {
 
 	m.busy = true
 	m.busyStartedAt = time.Now()
+	m.showShellTail = false
+	m.liveShellTail = ""
 	ctx, cancel := context.WithTimeout(context.Background(), agentTurnTimeout)
 	m.inFlightCancel = cancel
 	return m, tea.Batch(func() tea.Msg {
@@ -509,6 +521,10 @@ func (m Model) takeControlNow() (tea.Model, tea.Cmd) {
 	m.approvalInFlight = false
 	m.proposalRunPending = false
 	m.directShellPending = false
+	if !m.resumeAfterHandoff {
+		m.showShellTail = false
+		m.liveShellTail = ""
+	}
 
 	return m, newTakeControlCmd(m.takeControl)
 }
@@ -531,7 +547,7 @@ func (m Model) refreshShellContextCmd() tea.Cmd {
 }
 
 func (m Model) pollShellTailCmd() tea.Cmd {
-	if m.ctrl == nil {
+	if m.ctrl == nil || !m.showShellTail {
 		return nil
 	}
 
@@ -862,6 +878,10 @@ func (m Model) renderStatusLine(width int) string {
 }
 
 func (m Model) renderShellTail(width int) string {
+	if !m.showShellTail {
+		return ""
+	}
+
 	tail := strings.TrimSpace(m.liveShellTail)
 	if tail == "" {
 		return ""
@@ -1528,6 +1548,7 @@ func (m Model) runProposalCommand() (tea.Model, tea.Cmd) {
 	m.busy = true
 	m.busyStartedAt = time.Now()
 	m.proposalRunPending = true
+	m.showShellTail = true
 	command := m.pendingProposal.Command
 	ctx, cancel := context.WithTimeout(context.Background(), shell.CommandTimeout(command))
 	m.inFlightCancel = cancel
@@ -1551,6 +1572,10 @@ func (m Model) decideApproval(decision controller.ApprovalDecision) (tea.Model, 
 	m.busy = true
 	m.busyStartedAt = time.Now()
 	m.approvalInFlight = true
+	m.showShellTail = decision == controller.DecisionApprove
+	if !m.showShellTail {
+		m.liveShellTail = ""
+	}
 	approvalID := m.pendingApproval.ID
 	command := m.pendingApproval.Command
 	ctx, cancel := context.WithTimeout(context.Background(), shell.CommandTimeout(command))
@@ -1579,6 +1604,8 @@ func (m Model) refineApproval() (tea.Model, tea.Cmd) {
 	m.busy = true
 	m.busyStartedAt = time.Now()
 	m.approvalInFlight = true
+	m.showShellTail = false
+	m.liveShellTail = ""
 	approvalID := m.pendingApproval.ID
 	command := m.pendingApproval.Command
 	ctx, cancel := context.WithTimeout(context.Background(), shell.CommandTimeout(command))

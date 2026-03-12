@@ -148,7 +148,6 @@ type Controller interface {
 	ContinueActivePlan(ctx context.Context) ([]TranscriptEvent, error)
 	ContinueAfterCommand(ctx context.Context) ([]TranscriptEvent, error)
 	ResumeAfterTakeControl(ctx context.Context) ([]TranscriptEvent, error)
-	SubmitInteractiveShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error)
 	SubmitShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error)
 	DecideApproval(ctx context.Context, approvalID string, decision ApprovalDecision, refineText string) ([]TranscriptEvent, error)
 	RefreshShellContext(ctx context.Context) (*shell.PromptContext, error)

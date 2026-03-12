@@ -145,3 +145,4 @@ This is a recommended direction, not a hard product requirement. It aligns with 
 - Agent runtime boundaries and integration guidance are specified in [agent-runtime-design.md](agent-runtime-design.md).
 - Provider onboarding and multi-backend integration guidance are specified in [provider-integration-design.md](provider-integration-design.md) and [provider-integration-plan.md](provider-integration-plan.md).
 - Runtime socket/session lifecycle and crash-recovery guidance are specified in [runtime-management-design.md](runtime-management-design.md).
+- Long-running, interactive, and agent-owned shell execution redesign guidance is specified in [shell-execution-strategy.md](shell-execution-strategy.md).

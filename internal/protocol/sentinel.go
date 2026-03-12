@@ -30,18 +30,37 @@ func NewMarkers() Markers {
 func WrapCommand(command string, markers Markers) string {
 	var builder strings.Builder
 
-	builder.WriteString("echo ")
-	builder.WriteString(markers.BeginLine)
-	builder.WriteString("\n")
-	builder.WriteString(command)
-	if !strings.HasSuffix(command, "\n") {
-		builder.WriteString("\n")
+	builder.WriteString("printf '%s\\n' ")
+	builder.WriteString(shellQuote(markers.BeginLine))
+	builder.WriteString("; eval \"$(printf '%s\\n'")
+	for _, line := range splitCommandLines(command) {
+		builder.WriteString(" ")
+		builder.WriteString(shellQuote(line))
 	}
-	builder.WriteString("echo ")
-	builder.WriteString(markers.EndPrefix)
-	builder.WriteString("$?")
+	builder.WriteString(")\"; __shuttle_status=$?; printf '%s%s\\n' ")
+	builder.WriteString(shellQuote(markers.EndPrefix))
+	builder.WriteString(" \"$__shuttle_status\"")
 
 	return builder.String()
+}
+
+func splitCommandLines(command string) []string {
+	normalized := strings.ReplaceAll(command, "\r\n", "\n")
+	lines := strings.Split(normalized, "\n")
+	if len(lines) > 1 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	return lines
+}
+
+func shellQuote(value string) string {
+	if value == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
 func shortCommandID(value int64) string {

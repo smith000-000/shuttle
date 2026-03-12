@@ -32,7 +32,12 @@ func ParseCommandResult(captured string, markers Markers) (CommandResult, bool, 
 	for index := beginIndex + 1; index < len(lines); index++ {
 		line := strings.TrimSpace(lines[index])
 		if strings.HasPrefix(line, markers.EndPrefix) {
-			parsedExitCode, err := strconv.Atoi(strings.TrimPrefix(line, markers.EndPrefix))
+			exitValue := strings.TrimPrefix(line, markers.EndPrefix)
+			if exitValue == "" {
+				return CommandResult{}, false, nil
+			}
+
+			parsedExitCode, err := strconv.Atoi(exitValue)
 			if err != nil {
 				return CommandResult{}, false, fmt.Errorf("parse end marker exit code from %q: %w", line, err)
 			}

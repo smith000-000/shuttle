@@ -130,6 +130,7 @@ func TestCanceledControllerEventSuppressedAfterTakeControl(t *testing.T) {
 func TestControllerErrorIncludesShellTail(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.liveShellTail = "[sudo] password for jsmith:"
+	model.showShellTail = true
 
 	updated, _ := model.Update(controllerEventsMsg{err: context.DeadlineExceeded})
 	next := updated.(Model)
@@ -143,6 +144,36 @@ func TestControllerErrorIncludesShellTail(t *testing.T) {
 	}
 	if !strings.Contains(last.Body, "[sudo] password for jsmith:") {
 		t.Fatalf("expected error body to include shell tail, got %q", last.Body)
+	}
+}
+
+func TestAgentSubmitClearsShellTailPreview(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.mode = AgentMode
+	model.input = "summarize this repo"
+	model.showShellTail = true
+	model.liveShellTail = "old shell output"
+
+	updated, _ := model.submit()
+	next := updated.(Model)
+
+	if next.showShellTail {
+		t.Fatal("expected agent submit to hide shell tail")
+	}
+	if next.liveShellTail != "" {
+		t.Fatalf("expected agent submit to clear shell tail, got %q", next.liveShellTail)
+	}
+}
+
+func TestShellSubmitEnablesShellTailPreview(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.input = "ls"
+
+	updated, _ := model.submit()
+	next := updated.(Model)
+
+	if !next.showShellTail {
+		t.Fatal("expected shell submit to enable shell tail")
 	}
 }
 
@@ -1428,10 +1459,6 @@ func (f *fakeController) ResumeAfterTakeControl(_ context.Context) ([]controller
 		}, nil
 	}
 	return append([]controller.TranscriptEvent(nil), f.continueEvents...), nil
-}
-
-func (f *fakeController) SubmitInteractiveShellCommand(_ context.Context, command string) ([]controller.TranscriptEvent, error) {
-	return f.SubmitShellCommand(context.Background(), command)
 }
 
 func (f *fakeController) ContinueActivePlan(_ context.Context) ([]controller.TranscriptEvent, error) {

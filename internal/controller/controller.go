@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -112,10 +113,6 @@ func (c *LocalController) ResumeAfterTakeControl(ctx context.Context) ([]Transcr
 	return c.submitAgentTurn(ctx, resumeAfterTakeControlPrompt, nil, false)
 }
 
-func (c *LocalController) SubmitInteractiveShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error) {
-	return c.SubmitShellCommand(ctx, command)
-}
-
 func (c *LocalController) submitAgentTurn(ctx context.Context, prompt string, refinement *ApprovalRequest, emitUserMessage bool) ([]TranscriptEvent, error) {
 	recentOutput := ""
 	if c.reader != nil && c.session.TopPaneID != "" {
@@ -158,6 +155,10 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, prompt string, re
 
 	response, err := c.agent.Respond(ctx, input)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			c.appendEvents(events...)
+			return append([]TranscriptEvent(nil), events...), err
+		}
 		errEvent := c.newEvent(EventError, TextPayload{Text: err.Error()})
 		c.appendEvents(events...)
 		c.appendEvents(errEvent)
@@ -285,6 +286,9 @@ func (c *LocalController) SubmitShellCommand(ctx context.Context, command string
 	defer c.mu.Unlock()
 
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return []TranscriptEvent{startEvent}, err
+		}
 		errEvent := c.newEvent(EventError, TextPayload{Text: err.Error()})
 		c.appendEvents(errEvent)
 		return []TranscriptEvent{startEvent, errEvent}, nil

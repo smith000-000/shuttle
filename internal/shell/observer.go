@@ -198,15 +198,6 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID strin
 	}
 
 	probeResult, err := o.runProbeCommand(ctx, paneID, 10*time.Second)
-	if err != nil {
-		return TrackedExecution{}, fmt.Errorf("refresh shell context: %w", err)
-	}
-
-	probeOutput, parsedContext, exitCode := parseShellContextProbeOutput(probeResult.Captured, promptContext)
-	if parsedContext.PromptLine() != "" {
-		promptContext = parsedContext
-	}
-
 	delta := sanitizeCapturedBody(capturePaneDelta(beforeCapture, promptCapture))
 	delta = stripTrailingPromptLine(delta, promptContext)
 	delta = strings.TrimSpace(delta)
@@ -218,12 +209,23 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID strin
 			delta = "shell context updated"
 		}
 	}
-	if probeOutput != "" {
-		delta = strings.TrimSpace(delta + "\n" + probeOutput)
+
+	exitCode := 0
+	commandID := ""
+	if err == nil {
+		commandID = probeResult.CommandID
+		probeOutput, parsedContext, parsedExitCode := parseShellContextProbeOutput(probeResult.Captured, promptContext)
+		if parsedContext.PromptLine() != "" {
+			promptContext = parsedContext
+		}
+		exitCode = parsedExitCode
+		if probeOutput != "" {
+			delta = strings.TrimSpace(delta + "\n" + probeOutput)
+		}
 	}
 
 	return TrackedExecution{
-		CommandID:    probeResult.CommandID,
+		CommandID:    commandID,
 		Command:      command,
 		ExitCode:     exitCode,
 		Captured:     delta,

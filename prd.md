@@ -21,6 +21,7 @@ Detailed material that used to live in the monolithic PRD is now split into focu
 - [Provider Integration Design](provider-integration-design.md)
 - [Provider Integration Plan](provider-integration-plan.md)
 - [Runtime Management Design](runtime-management-design.md)
+- [Shell Execution Strategy](shell-execution-strategy.md)
 
 ---
 

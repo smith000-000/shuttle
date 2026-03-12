@@ -34,6 +34,14 @@ func TestWrapCommandIncludesMarkers(t *testing.T) {
 	if !strings.Contains(wrapped, markers.EndPrefix) {
 		t.Fatalf("wrapped command missing end marker prefix: %q", wrapped)
 	}
+
+	if strings.Contains(wrapped, "\n") {
+		t.Fatalf("wrapped command should be a single shell line: %q", wrapped)
+	}
+
+	if !strings.Contains(wrapped, `eval "$(printf '%s\n'`) {
+		t.Fatalf("wrapped command should reconstruct the original command via printf/eval: %q", wrapped)
+	}
 }
 
 func TestParseCommandResult(t *testing.T) {
@@ -76,5 +84,22 @@ func TestParseCommandResultIncomplete(t *testing.T) {
 
 	if complete {
 		t.Fatal("expected incomplete result")
+	}
+}
+
+func TestParseCommandResultIncompletePartialEndMarker(t *testing.T) {
+	markers := Markers{
+		CommandID: "cmd-123",
+		BeginLine: "__SHUTTLE_B__:cmd-123",
+		EndPrefix: "__SHUTTLE_E__:cmd-123:",
+	}
+
+	_, complete, err := ParseCommandResult("__SHUTTLE_B__:cmd-123\nhello\n__SHUTTLE_E__:cmd-123:", markers)
+	if err != nil {
+		t.Fatalf("ParseCommandResult() error = %v", err)
+	}
+
+	if complete {
+		t.Fatal("expected incomplete result for partial end marker")
 	}
 }
