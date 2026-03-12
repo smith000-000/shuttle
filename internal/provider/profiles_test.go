@@ -25,8 +25,8 @@ func TestResolveProfileOpenAIDefaults(t *testing.T) {
 		t.Fatalf("expected default OpenAI base URL, got %q", profile.BaseURL)
 	}
 
-	if profile.Model != "gpt-5" {
-		t.Fatalf("expected default model gpt-5, got %q", profile.Model)
+	if profile.Model != "gpt-5-nano-2025-08-07" {
+		t.Fatalf("expected default model gpt-5-nano-2025-08-07, got %q", profile.Model)
 	}
 
 	if profile.AuthMethod != AuthAPIKey {
@@ -50,7 +50,7 @@ func TestNewFromProfileRejectsMissingAPIKey(t *testing.T) {
 		Preset:        PresetOpenAI,
 		AuthMethod:    AuthAPIKey,
 		BaseURL:       "https://api.openai.com/v1",
-		Model:         "gpt-5",
+		Model:         "gpt-5-nano-2025-08-07",
 		APIKeyEnvVar:  "OPENAI_API_KEY",
 	}, FactoryOptions{})
 	if err == nil {

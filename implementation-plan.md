@@ -25,6 +25,7 @@ Milestone 5 still needs:
 - saved provider profiles
 - Codex CLI delegation path
 - provider switching UI
+- release-grade runtime management for socket/session lifecycle and crash recovery
 
 ## Guiding Decisions
 - Build `P0` only first. That means Epics 1 through 4 in [requirements-mvp.md](requirements-mvp.md).
@@ -186,6 +187,7 @@ Next:
 - add provider detection and health checks
 - add profile persistence
 - add the Codex CLI bridge
+- add runtime-management work so release builds do not expose raw tmux socket/session details
 
 ### Exit Criteria
 - the same loop used in Milestone 4 works with a real provider
@@ -194,6 +196,7 @@ Next:
 Framework and ACP guidance: [agent-runtime-design.md](agent-runtime-design.md)
 Detailed provider decomposition: [provider-integration-design.md](provider-integration-design.md)
 Execution plan: [provider-integration-plan.md](provider-integration-plan.md)
+Runtime lifecycle design: [runtime-management-design.md](runtime-management-design.md)
 
 ---
 

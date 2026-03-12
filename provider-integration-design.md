@@ -223,7 +223,7 @@ Shuttle should own a small resolver that maps `{preset, auth method}` into defau
 
 | Preset | Backend | Auth | Default Base URL | Default Model | Notes |
 | --- | --- | --- | --- | --- | --- |
-| `openai` | `responses_http` | `api_key` | `https://api.openai.com/v1` | `gpt-5` | Use Responses API |
+| `openai` | `responses_http` | `api_key` | `https://api.openai.com/v1` | `gpt-5-nano-2025-08-07` | Use Responses API |
 | `openrouter` | `responses_http` | `api_key` | `https://openrouter.ai/api/v1` | user-selected | Use OpenAI-compatible Responses API |
 | `custom` | `responses_http` | `api_key` or `none` | user-supplied | user-supplied | Treat as Responses-compatible |
 | `codex_cli` | `cli_agent` | `codex_login` or `inherited_env` | n/a | CLI-managed | Delegate to installed Codex CLI |

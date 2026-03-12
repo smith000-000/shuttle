@@ -105,7 +105,7 @@ func NewResponsesAgent(profile Profile, client *http.Client) (*ResponsesAgent, e
 		return nil, ErrMissingAPIKey
 	}
 	if client == nil {
-		client = &http.Client{Timeout: 45 * time.Second}
+		client = &http.Client{Timeout: 75 * time.Second}
 	}
 
 	return &ResponsesAgent{
@@ -378,6 +378,12 @@ func buildTurnContext(input controller.AgentInput) string {
 	sections = append(sections, "User prompt:\n"+strings.TrimSpace(input.Prompt))
 
 	sessionLines := []string{}
+	if input.Session.CurrentShell != nil && strings.TrimSpace(input.Session.CurrentShell.PromptLine()) != "" {
+		sessionLines = append(sessionLines, "prompt="+input.Session.CurrentShell.PromptLine())
+		if input.Session.CurrentShell.Remote {
+			sessionLines = append(sessionLines, "remote=true")
+		}
+	}
 	if input.Session.SessionName != "" {
 		sessionLines = append(sessionLines, "session="+input.Session.SessionName)
 	}
@@ -406,6 +412,10 @@ func buildTurnContext(input controller.AgentInput) string {
 			last.ExitCode,
 			clipText(last.Summary, 800),
 		))
+	}
+
+	if input.Task.ActivePlan != nil {
+		sections = append(sections, "Active plan:\n"+formatActivePlan(*input.Task.ActivePlan))
 	}
 
 	if input.Task.PendingApproval != nil {
@@ -460,7 +470,17 @@ func summarizeTranscriptEvent(event controller.TranscriptEvent) string {
 		return string(event.Kind) + ": " + clipText(payload.Text, 240)
 	case controller.EventPlan:
 		payload, _ := event.Payload.(controller.PlanPayload)
-		return string(event.Kind) + ": " + clipText(payload.Summary, 240)
+		progress := ""
+		if len(payload.Steps) > 0 {
+			done := 0
+			for _, step := range payload.Steps {
+				if step.Status == controller.PlanStepDone {
+					done++
+				}
+			}
+			progress = fmt.Sprintf(" (%d/%d done)", done, len(payload.Steps))
+		}
+		return string(event.Kind) + progress + ": " + clipText(payload.Summary, 240)
 	case controller.EventProposal:
 		payload, _ := event.Payload.(controller.ProposalPayload)
 		text := payload.Description
@@ -496,6 +516,27 @@ func clipText(value string, maxLen int) string {
 	}
 
 	return value[:maxLen] + "...(truncated)"
+}
+
+func formatActivePlan(plan controller.ActivePlan) string {
+	lines := make([]string, 0, len(plan.Steps)+1)
+	if strings.TrimSpace(plan.Summary) != "" {
+		lines = append(lines, "summary="+plan.Summary)
+	}
+
+	for index, step := range plan.Steps {
+		status := string(step.Status)
+		if status == "" {
+			status = string(controller.PlanStepPending)
+		}
+		lines = append(lines, fmt.Sprintf("%d. [%s] %s", index+1, status, step.Text))
+	}
+
+	if len(lines) == 0 {
+		return "(empty)"
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 func shuttleAgentResponseSchema() map[string]any {
@@ -573,7 +614,12 @@ Return only the JSON object required by the schema.
 
 Rules:
 - Keep "message" concise and useful.
-- If you have a plan, put its summary in "plan_summary" and its ordered steps in "plan_steps".
+- Only use "plan_summary" and "plan_steps" when the user is asking for a plan, next steps, strategy, troubleshooting, or how to fix/approach something, or when a multi-step plan is genuinely necessary to answer well.
+- Do not emit a plan for simple descriptive, factual, or status-summary requests.
+- If an active plan is present in context, prefer continuing it from the current in-progress or pending step instead of inventing a new unrelated plan.
+- For requests to inspect the current directory, repository, files, environment, or system state, prefer a "proposal_command" over answering from stale context.
+- Only answer directly from shell state when the current turn already includes the necessary command result, or when the user is explicitly asking for a summary of a result that is already in context.
+- Never imply that you executed a shell command unless Shuttle has actual command/result context for it.
 - If you propose a shell action, set "proposal_kind" to "command" and fill "proposal_command".
 - If you propose a patch, set "proposal_kind" to "patch" and fill "proposal_patch".
 - If no proposal is needed, leave proposal fields empty.

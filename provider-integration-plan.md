@@ -267,5 +267,5 @@ go test -count=1 ./...
 
 ```bash
 export OPENAI_API_KEY=your_key_here
-go run ./cmd/shuttle --socket shuttle-openai --session shuttle-openai --tui --provider openai --auth api_key --model gpt-5
+go run ./cmd/shuttle --socket shuttle-openai --session shuttle-openai --tui --provider openai --auth api_key --model gpt-5-nano-2025-08-07
 ```

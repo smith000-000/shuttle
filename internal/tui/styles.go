@@ -3,39 +3,50 @@ package tui
 import "github.com/charmbracelet/lipgloss"
 
 type styles struct {
-	screen              lipgloss.Style
-	header              lipgloss.Style
-	headerRule          lipgloss.Style
-	headerTitle         lipgloss.Style
-	headerMeta          lipgloss.Style
-	modeShell           lipgloss.Style
-	modeAgent           lipgloss.Style
-	modeBusy            lipgloss.Style
-	modeApproval        lipgloss.Style
-	modeProposal        lipgloss.Style
-	transcript          lipgloss.Style
-	actionCard          lipgloss.Style
-	actionTitle         lipgloss.Style
-	actionBody          lipgloss.Style
-	detail              lipgloss.Style
-	detailTitle         lipgloss.Style
-	detailMeta          lipgloss.Style
-	detailBody          lipgloss.Style
-	composer            lipgloss.Style
-	composerShell       lipgloss.Style
-	composerAgent       lipgloss.Style
-	composerRefine      lipgloss.Style
-	composerBadgeShell  lipgloss.Style
-	composerBadgeAgent  lipgloss.Style
-	composerBadgeRefine lipgloss.Style
-	input               lipgloss.Style
-	footer              lipgloss.Style
-	tagSystem           lipgloss.Style
-	tagShell            lipgloss.Style
-	tagResult           lipgloss.Style
-	tagAgent            lipgloss.Style
-	tagError            lipgloss.Style
-	body                lipgloss.Style
+	screen               lipgloss.Style
+	header               lipgloss.Style
+	headerRule           lipgloss.Style
+	headerTitle          lipgloss.Style
+	headerMeta           lipgloss.Style
+	modeShell            lipgloss.Style
+	modeAgent            lipgloss.Style
+	modeBusy             lipgloss.Style
+	modeApproval         lipgloss.Style
+	modeProposal         lipgloss.Style
+	transcript           lipgloss.Style
+	actionCard           lipgloss.Style
+	actionTitle          lipgloss.Style
+	actionBody           lipgloss.Style
+	detail               lipgloss.Style
+	detailTitle          lipgloss.Style
+	detailMeta           lipgloss.Style
+	detailBody           lipgloss.Style
+	composer             lipgloss.Style
+	composerShell        lipgloss.Style
+	composerAgent        lipgloss.Style
+	composerRefine       lipgloss.Style
+	composerPromptShell  lipgloss.Style
+	composerPromptAgent  lipgloss.Style
+	composerPromptRefine lipgloss.Style
+	input                lipgloss.Style
+	status               lipgloss.Style
+	statusBusy           lipgloss.Style
+	statusRemote         lipgloss.Style
+	tail                 lipgloss.Style
+	tailLabel            lipgloss.Style
+	tailBody             lipgloss.Style
+	tailHint             lipgloss.Style
+	footer               lipgloss.Style
+	tagSystem            lipgloss.Style
+	tagShell             lipgloss.Style
+	tagResult            lipgloss.Style
+	tagAgent             lipgloss.Style
+	tagError             lipgloss.Style
+	bodySystem           lipgloss.Style
+	bodyShell            lipgloss.Style
+	bodyResult           lipgloss.Style
+	bodyAgent            lipgloss.Style
+	bodyError            lipgloss.Style
 }
 
 func newStyles() styles {
@@ -114,23 +125,48 @@ func newStyles() styles {
 			Background(lipgloss.Color("100")).
 			Foreground(lipgloss.Color("255")).
 			Padding(0, 1),
-		composerBadgeShell: lipgloss.NewStyle().
+		composerPromptShell: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("230")).
 			Background(lipgloss.Color("30")).
 			Bold(true).
 			Padding(0, 1),
-		composerBadgeAgent: lipgloss.NewStyle().
+		composerPromptAgent: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("230")).
 			Background(lipgloss.Color("166")).
 			Bold(true).
 			Padding(0, 1),
-		composerBadgeRefine: lipgloss.NewStyle().
+		composerPromptRefine: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("230")).
 			Background(lipgloss.Color("136")).
 			Bold(true).
 			Padding(0, 1),
 		input: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("255")),
+		status: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("246")).
+			Padding(0, 1),
+		statusBusy: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("230")).
+			Background(lipgloss.Color("160")).
+			Bold(true).
+			Padding(0, 1),
+		statusRemote: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("230")).
+			Background(lipgloss.Color("62")).
+			Bold(true).
+			Padding(0, 1),
+		tail: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("248")).
+			Padding(0, 1),
+		tailLabel: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("230")).
+			Background(lipgloss.Color("238")).
+			Bold(true).
+			Padding(0, 1),
+		tailBody: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("248")),
+		tailHint: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("221")),
 		footer: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("245")),
 		tagSystem: lipgloss.NewStyle().
@@ -158,7 +194,15 @@ func newStyles() styles {
 			Background(lipgloss.Color("160")).
 			Bold(true).
 			Padding(0, 1),
-		body: lipgloss.NewStyle().
+		bodySystem: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("246")),
+		bodyShell: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("252")),
+		bodyResult: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("151")),
+		bodyAgent: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("230")),
+		bodyError: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("252")),
 	}
 }

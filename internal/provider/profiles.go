@@ -97,7 +97,7 @@ func ResolveProfile(cfg config.Config) (Profile, error) {
 			PresetOpenAI,
 			"OpenAI Responses",
 			"https://api.openai.com/v1",
-			"gpt-5",
+			"gpt-5-nano-2025-08-07",
 		), nil
 	case PresetOpenRouter:
 		return resolveResponsesProfile(
@@ -116,7 +116,7 @@ func ResolveProfile(cfg config.Config) (Profile, error) {
 			PresetCustom,
 			"Custom Responses Endpoint",
 			cfg.ProviderBaseURL,
-			defaultModel(cfg.ProviderModel, "gpt-5"),
+			defaultModel(cfg.ProviderModel, "gpt-5-nano-2025-08-07"),
 		), nil
 	default:
 		return Profile{}, fmt.Errorf("unsupported provider preset %q", cfg.ProviderType)

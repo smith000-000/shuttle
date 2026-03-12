@@ -20,6 +20,7 @@ type Config struct {
 	TmuxSocket           string
 	StateDir             string
 	LogPath              string
+	AgentPrompt          string
 	Inject               string
 	Track                string
 	TUI                  bool
@@ -53,6 +54,7 @@ func Parse(args []string) (Config, error) {
 	fs.StringVar(&cfg.StartDir, "dir", workingDir, "working directory for new panes")
 	fs.StringVar(&cfg.TmuxSocket, "socket", socketName, "tmux socket name for an isolated server")
 	fs.StringVar(&cfg.StateDir, "state-dir", stateDir, "state directory for logs and future local state")
+	fs.StringVar(&cfg.AgentPrompt, "agent", "", "submit a single agent prompt and print the structured response")
 	fs.StringVar(&cfg.Inject, "inject", "", "inject a shell command into the top pane after bootstrap")
 	fs.StringVar(&cfg.Track, "track", "", "inject a tracked shell command into the top pane and wait for its result")
 	fs.BoolVar(&cfg.TUI, "tui", false, "run the minimal interactive TUI shell")

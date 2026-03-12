@@ -17,6 +17,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+const (
+	agentPromptTimeout = 60 * time.Second
+)
+
 type App struct {
 	cfg    config.Config
 	logger *slog.Logger
@@ -25,6 +29,7 @@ type App struct {
 type Result struct {
 	Workspace       tmux.Workspace
 	Created         bool
+	AgentEvents     []controller.TranscriptEvent
 	InjectedCommand string
 	Tracked         *shell.TrackedExecution
 	Interactive     bool
@@ -67,8 +72,9 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 		Created:   created,
 	}
 
-	if a.cfg.TUI {
+	if a.cfg.AgentPrompt != "" {
 		observer := shell.NewObserver(client)
+		initialShellContext := initialPromptContext(ctx, observer, workspace.TopPane.ID, a.cfg.StartDir)
 		agent, profile, err := provider.NewFromConfig(a.cfg, provider.FactoryOptions{})
 		if err != nil {
 			return Result{}, fmt.Errorf("configure provider: %w", err)
@@ -87,8 +93,50 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			TopPaneID:        workspace.TopPane.ID,
 			BottomPaneID:     workspace.BottomPane.ID,
 			WorkingDirectory: a.cfg.StartDir,
+			CurrentShell:     initialShellContextPtr(initialShellContext),
 		})
-		program := tea.NewProgram(tui.NewModel(workspace, ctrl), tea.WithAltScreen())
+		agentCtx, cancel := context.WithTimeout(ctx, agentPromptTimeout)
+		defer cancel()
+
+		events, err := ctrl.SubmitAgentPrompt(agentCtx, a.cfg.AgentPrompt)
+		if err != nil {
+			return Result{}, fmt.Errorf("submit agent prompt: %w", err)
+		}
+
+		result.AgentEvents = events
+		return result, nil
+	}
+
+	if a.cfg.TUI {
+		observer := shell.NewObserver(client)
+		if err := client.BindNoPrefixKey(ctx, tui.TakeControlKey, "detach-client"); err != nil {
+			return Result{}, fmt.Errorf("configure take-control key: %w", err)
+		}
+		initialShellContext := initialPromptContext(ctx, observer, workspace.TopPane.ID, a.cfg.StartDir)
+		agent, profile, err := provider.NewFromConfig(a.cfg, provider.FactoryOptions{})
+		if err != nil {
+			return Result{}, fmt.Errorf("configure provider: %w", err)
+		}
+		a.logger.Info(
+			"provider ready",
+			"preset", profile.Preset,
+			"backend_family", profile.BackendFamily,
+			"auth_method", profile.AuthMethod,
+			"model", profile.Model,
+			"base_url", profile.BaseURL,
+			"api_key_env", profile.APIKeyEnvVar,
+		)
+		ctrl := controller.New(agent, observer, observer, controller.SessionContext{
+			SessionName:      workspace.SessionName,
+			TopPaneID:        workspace.TopPane.ID,
+			BottomPaneID:     workspace.BottomPane.ID,
+			WorkingDirectory: a.cfg.StartDir,
+			CurrentShell:     initialShellContextPtr(initialShellContext),
+		})
+		model := tui.NewModel(workspace, ctrl).
+			WithShellContext(initialShellContext).
+			WithTakeControl(a.cfg.TmuxSocket, workspace.SessionName, workspace.TopPane.ID, tui.TakeControlKey)
+		program := tea.NewProgram(model, tea.WithAltScreen())
 		_, runErr := program.Run()
 		cleanupErr := cleanupTUISession(created, client, workspace.SessionName)
 		if runErr != nil {
@@ -118,7 +166,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 
 	if a.cfg.Track != "" {
 		observer := shell.NewObserver(client)
-		tracked, err := observer.RunTrackedCommand(ctx, workspace.TopPane.ID, a.cfg.Track, 10*time.Second)
+		tracked, err := observer.RunTrackedCommand(ctx, workspace.TopPane.ID, a.cfg.Track, shell.CommandTimeout(a.cfg.Track))
 		if err != nil {
 			return Result{}, fmt.Errorf("track command: %w", err)
 		}
@@ -133,6 +181,25 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	}
 
 	return result, nil
+}
+
+func initialPromptContext(ctx context.Context, observer *shell.Observer, paneID string, startDir string) shell.PromptContext {
+	if observer != nil && paneID != "" {
+		if promptContext, err := observer.CaptureShellContext(ctx, paneID); err == nil && promptContext.PromptLine() != "" {
+			return promptContext
+		}
+	}
+
+	return shell.GuessLocalContext(startDir)
+}
+
+func initialShellContextPtr(promptContext shell.PromptContext) *shell.PromptContext {
+	if promptContext.PromptLine() == "" {
+		return nil
+	}
+
+	contextCopy := promptContext
+	return &contextCopy
 }
 
 func cleanupTUISession(created bool, client *tmux.Client, sessionName string) error {

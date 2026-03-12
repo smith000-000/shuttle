@@ -113,6 +113,13 @@ func (c *Client) KillSession(ctx context.Context, sessionName string) error {
 	return err
 }
 
+func (c *Client) BindNoPrefixKey(ctx context.Context, key string, command ...string) error {
+	args := []string{"bind-key", "-n", key}
+	args = append(args, command...)
+	_, err := c.run(ctx, args...)
+	return err
+}
+
 func (c *Client) run(ctx context.Context, args ...string) (string, error) {
 	commandArgs := make([]string, 0, len(args)+2)
 	if c.socketName != "" {

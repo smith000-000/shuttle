@@ -32,6 +32,10 @@ func (m *MockAgent) Respond(_ context.Context, input controller.AgentInput) (con
 		return controller.AgentResponse{
 			Message: summarizeRecentContext(input),
 		}, nil
+	case containsAny(lower, "previously approved or proposed command has completed", "continue the task using the latest shell output"):
+		return continueActivePlanResponse(input), nil
+	case containsAny(lower, "continue the active plan from the current step"):
+		return continueActivePlanResponse(input), nil
 	case input.Task.PendingApproval != nil:
 		return refineApprovalResponse(m, prompt, *input.Task.PendingApproval), nil
 	case containsAny(lower, "delete", "remove", "rm ", "drop ", "destroy"):
@@ -132,6 +136,48 @@ func summarizeRecentContext(input controller.AgentInput) string {
 	}
 
 	return strings.Join(parts, "\n\n")
+}
+
+func continueActivePlanResponse(input controller.AgentInput) controller.AgentResponse {
+	if input.Task.ActivePlan == nil {
+		return controller.AgentResponse{
+			Message: summarizeRecentContext(input),
+		}
+	}
+
+	next := nextPlanStep(*input.Task.ActivePlan)
+	if next == "" {
+		return controller.AgentResponse{
+			Message: "The active plan appears complete.",
+		}
+	}
+
+	lower := strings.ToLower(next)
+	switch {
+	case containsAny(lower, "inspect", "review", "list", "directory", "files", "status"):
+		return controller.AgentResponse{
+			Message: "Continuing the active plan with the next inspection step.",
+			Proposal: &controller.Proposal{
+				Kind:        controller.ProposalCommand,
+				Command:     "ls -lah",
+				Description: next,
+			},
+		}
+	default:
+		return controller.AgentResponse{
+			Message: "Next active plan step: " + next,
+		}
+	}
+}
+
+func nextPlanStep(plan controller.ActivePlan) string {
+	for _, step := range plan.Steps {
+		if step.Status == controller.PlanStepInProgress || step.Status == controller.PlanStepPending {
+			return strings.TrimSpace(step.Text)
+		}
+	}
+
+	return ""
 }
 
 func (m *MockAgent) nextID(prefix string) string {

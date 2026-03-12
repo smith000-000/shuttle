@@ -12,3 +12,74 @@ func TestSanitizeCapturedBody(t *testing.T) {
 		t.Fatalf("sanitizeCapturedBody() = %q, want %q", got, want)
 	}
 }
+
+func TestStripEchoedSingleLineCommand(t *testing.T) {
+	body := "jsmith@host % ls\nfile-a\nfile-b"
+
+	got := stripEchoedCommand(body, "ls")
+	want := "file-a\nfile-b"
+
+	if got != want {
+		t.Fatalf("stripEchoedCommand() = %q, want %q", got, want)
+	}
+}
+
+func TestStripEchoedMultiLineQuotedCommand(t *testing.T) {
+	body := "jsmith@host % bash -lc '\nquote> set -e\nquote> printf \"## PWD\\n\"; pwd\nquote> '\n## PWD\n/home/jsmith/source/repos/aiterm"
+	command := "bash -lc '\nset -e\nprintf \"## PWD\\n\"; pwd\n'"
+
+	got := stripEchoedCommand(body, command)
+	want := "## PWD\n/home/jsmith/source/repos/aiterm"
+
+	if got != want {
+		t.Fatalf("stripEchoedCommand() = %q, want %q", got, want)
+	}
+}
+
+func TestIsContextTransitionCommand(t *testing.T) {
+	cases := map[string]bool{
+		"ssh prod":                   true,
+		"telnet 10.0.0.5":            true,
+		"sudo -i":                    true,
+		"docker exec -it app sh":     true,
+		"kubectl exec -it pod -- sh": true,
+		"exit":                       true,
+		"ls -lah":                    false,
+		"git status":                 false,
+		"sudo ls":                    false,
+	}
+
+	for command, want := range cases {
+		if got := isContextTransitionCommand(command); got != want {
+			t.Fatalf("isContextTransitionCommand(%q) = %v, want %v", command, got, want)
+		}
+	}
+}
+
+func TestCommandTimeout(t *testing.T) {
+	if got := CommandTimeout("ssh prod"); got != ContextTransitionCommandTimeout {
+		t.Fatalf("CommandTimeout(ssh) = %v, want %v", got, ContextTransitionCommandTimeout)
+	}
+
+	if got := CommandTimeout("ls -lah"); got != DefaultCommandTimeout {
+		t.Fatalf("CommandTimeout(ls -lah) = %v, want %v", got, DefaultCommandTimeout)
+	}
+}
+
+func TestParseShellContextProbeOutput(t *testing.T) {
+	body := "__SHUTTLE_CTX_EXIT__=0\n__SHUTTLE_CTX_USER__=root\n__SHUTTLE_CTX_HOST__=web01\n__SHUTTLE_CTX_UNAME__=Linux 6.8\n__SHUTTLE_CTX_PWD__=/srv/app"
+
+	clean, context, exitCode := parseShellContextProbeOutput(body, PromptContext{})
+	if clean != "" {
+		t.Fatalf("expected empty clean output, got %q", clean)
+	}
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", exitCode)
+	}
+	if context.User != "root" || context.Host != "web01" || context.Directory != "/srv/app" {
+		t.Fatalf("unexpected prompt context %#v", context)
+	}
+	if !context.Root {
+		t.Fatalf("expected root prompt context %#v", context)
+	}
+}

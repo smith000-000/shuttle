@@ -36,8 +36,8 @@ func TestResponsesAgentRespondMapsStructuredOutput(t *testing.T) {
 			t.Fatalf("Unmarshal() error = %v", err)
 		}
 
-		if payload["model"] != "gpt-5" {
-			t.Fatalf("expected model gpt-5, got %#v", payload["model"])
+		if payload["model"] != "gpt-5-nano-2025-08-07" {
+			t.Fatalf("expected model gpt-5-nano-2025-08-07, got %#v", payload["model"])
 		}
 
 		text, ok := payload["text"].(map[string]any)
@@ -72,7 +72,7 @@ func TestResponsesAgentRespondMapsStructuredOutput(t *testing.T) {
 		Preset:        PresetOpenAI,
 		AuthMethod:    AuthAPIKey,
 		BaseURL:       server.URL + "/v1",
-		Model:         "gpt-5",
+		Model:         "gpt-5-nano-2025-08-07",
 		APIKey:        "test-key",
 		APIKeyEnvVar:  "OPENAI_API_KEY",
 	}, server.Client())
@@ -120,7 +120,7 @@ func TestResponsesAgentReturnsProviderErrors(t *testing.T) {
 		Preset:        PresetOpenAI,
 		AuthMethod:    AuthAPIKey,
 		BaseURL:       server.URL + "/v1",
-		Model:         "gpt-5",
+		Model:         "gpt-5-nano-2025-08-07",
 		APIKey:        "bad-key",
 		APIKeyEnvVar:  "OPENAI_API_KEY",
 	}, server.Client())
@@ -161,7 +161,7 @@ func TestResponsesAgentMapsApprovalAndPlan(t *testing.T) {
 		Preset:        PresetOpenAI,
 		AuthMethod:    AuthAPIKey,
 		BaseURL:       server.URL + "/v1",
-		Model:         "gpt-5",
+		Model:         "gpt-5-nano-2025-08-07",
 		APIKey:        "test-key",
 		APIKeyEnvVar:  "OPENAI_API_KEY",
 	}, server.Client())

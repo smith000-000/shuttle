@@ -41,6 +41,40 @@ func TestLocalControllerSubmitAgentPrompt(t *testing.T) {
 	}
 }
 
+func TestLocalControllerSubmitAgentPromptCreatesActivePlan(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Plan: &Plan{
+				Summary: "Inspect and repair the workspace.",
+				Steps: []string{
+					"Review the current files.",
+					"Apply the next patch.",
+					"Run tests.",
+				},
+			},
+		},
+	}
+	controller := New(agent, nil, nil, SessionContext{TopPaneID: "%0"})
+
+	events, err := controller.SubmitAgentPrompt(context.Background(), "make a plan")
+	if err != nil {
+		t.Fatalf("SubmitAgentPrompt() error = %v", err)
+	}
+
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+
+	planEvent, ok := events[1].Payload.(PlanPayload)
+	if !ok {
+		t.Fatalf("expected plan payload, got %#v", events[1].Payload)
+	}
+
+	if len(planEvent.Steps) != 3 || planEvent.Steps[0].Status != PlanStepInProgress || planEvent.Steps[1].Status != PlanStepPending {
+		t.Fatalf("unexpected active plan state: %#v", planEvent.Steps)
+	}
+}
+
 func TestLocalControllerSubmitShellCommand(t *testing.T) {
 	controller := New(nil, &stubRunner{
 		result: shell.TrackedExecution{
@@ -205,6 +239,130 @@ func TestLocalControllerSubmitRefinementIncludesApprovalContext(t *testing.T) {
 	}
 }
 
+func TestLocalControllerContinueAfterCommandUsesLastResultWithoutUserEvent(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "I reviewed the command result.",
+		},
+	}
+	controller := New(agent, &stubRunner{
+		result: shell.TrackedExecution{
+			CommandID: "cmd-1",
+			Command:   "ls",
+			ExitCode:  0,
+			Captured:  "file.txt",
+		},
+	}, &stubContextReader{
+		output: "file.txt",
+	}, SessionContext{TopPaneID: "%0"})
+
+	if _, err := controller.SubmitShellCommand(context.Background(), "ls"); err != nil {
+		t.Fatalf("SubmitShellCommand() error = %v", err)
+	}
+
+	events, err := controller.ContinueAfterCommand(context.Background())
+	if err != nil {
+		t.Fatalf("ContinueAfterCommand() error = %v", err)
+	}
+
+	if len(events) != 1 {
+		t.Fatalf("expected only agent events, got %#v", events)
+	}
+
+	if events[0].Kind != EventAgentMessage {
+		t.Fatalf("expected agent message, got %#v", events)
+	}
+
+	if agent.lastInput.Prompt != autoContinuePrompt {
+		t.Fatalf("expected auto-continue prompt, got %q", agent.lastInput.Prompt)
+	}
+
+	if agent.lastInput.Task.LastCommandResult == nil || agent.lastInput.Task.LastCommandResult.Command != "ls" {
+		t.Fatalf("expected last command result in agent input, got %#v", agent.lastInput.Task.LastCommandResult)
+	}
+}
+
+func TestLocalControllerContinueAfterCommandAdvancesActivePlan(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "Continuing the plan.",
+		},
+	}
+	controller := New(agent, &stubRunner{
+		result: shell.TrackedExecution{
+			CommandID: "cmd-1",
+			Command:   "ls",
+			ExitCode:  0,
+			Captured:  "file.txt",
+		},
+	}, &stubContextReader{
+		output: "file.txt",
+	}, SessionContext{TopPaneID: "%0"})
+
+	if _, err := controller.SubmitAgentPrompt(context.Background(), "make a plan"); err != nil {
+		t.Fatalf("SubmitAgentPrompt() error = %v", err)
+	}
+	controller.task.ActivePlan = &ActivePlan{
+		Summary: "Inspect and repair the workspace.",
+		Steps: []PlanStep{
+			{Text: "Review the current files.", Status: PlanStepInProgress},
+			{Text: "Apply the next patch.", Status: PlanStepPending},
+		},
+	}
+
+	if _, err := controller.SubmitShellCommand(context.Background(), "ls"); err != nil {
+		t.Fatalf("SubmitShellCommand() error = %v", err)
+	}
+
+	events, err := controller.ContinueAfterCommand(context.Background())
+	if err != nil {
+		t.Fatalf("ContinueAfterCommand() error = %v", err)
+	}
+
+	if len(events) != 2 {
+		t.Fatalf("expected plan progress event plus continuation, got %#v", events)
+	}
+
+	planEvent, ok := events[0].Payload.(PlanPayload)
+	if !ok {
+		t.Fatalf("expected leading plan payload, got %#v", events[0].Payload)
+	}
+	if planEvent.Steps[0].Status != PlanStepDone || planEvent.Steps[1].Status != PlanStepInProgress {
+		t.Fatalf("expected plan advancement, got %#v", planEvent.Steps)
+	}
+}
+
+func TestLocalControllerContinueActivePlanUsesActivePlanContext(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "Continuing the active plan.",
+		},
+	}
+	controller := New(agent, nil, nil, SessionContext{TopPaneID: "%0"})
+	controller.task.ActivePlan = &ActivePlan{
+		Summary: "Inspect and repair the workspace.",
+		Steps: []PlanStep{
+			{Text: "Review the current files.", Status: PlanStepInProgress},
+			{Text: "Apply the next patch.", Status: PlanStepPending},
+		},
+	}
+
+	events, err := controller.ContinueActivePlan(context.Background())
+	if err != nil {
+		t.Fatalf("ContinueActivePlan() error = %v", err)
+	}
+
+	if len(events) != 1 || events[0].Kind != EventAgentMessage {
+		t.Fatalf("expected agent continuation event, got %#v", events)
+	}
+	if agent.lastInput.Task.ActivePlan == nil || agent.lastInput.Task.ActivePlan.Steps[0].Status != PlanStepInProgress {
+		t.Fatalf("expected active plan in agent input, got %#v", agent.lastInput.Task.ActivePlan)
+	}
+	if agent.lastInput.Prompt != continuePlanPrompt {
+		t.Fatalf("expected continue-plan prompt, got %q", agent.lastInput.Prompt)
+	}
+}
+
 type stubContextReader struct {
 	output string
 	err    error
@@ -216,4 +374,16 @@ func (s *stubContextReader) CaptureRecentOutput(context.Context, string, int) (s
 	}
 
 	return s.output, nil
+}
+
+func (s *stubContextReader) CaptureShellContext(context.Context, string) (shell.PromptContext, error) {
+	if s.err != nil {
+		return shell.PromptContext{}, s.err
+	}
+
+	return shell.PromptContext{
+		User:      "jsmith",
+		Host:      "linuxdesktop",
+		Directory: "/home/jsmith/source/repos/aiterm",
+	}, nil
 }

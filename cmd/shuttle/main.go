@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"aiterm/internal/app"
 	"aiterm/internal/config"
+	"aiterm/internal/controller"
 	"aiterm/internal/logging"
 )
 
@@ -57,6 +59,12 @@ func main() {
 		fmt.Printf("injected=%q target=%s\n", result.InjectedCommand, result.Workspace.TopPane.ID)
 	}
 
+	if len(result.AgentEvents) > 0 {
+		for _, event := range result.AgentEvents {
+			fmt.Println(formatAgentEvent(event))
+		}
+	}
+
 	if result.Tracked != nil {
 		fmt.Printf(
 			"tracked command_id=%s exit_code=%d\n%s\n",
@@ -64,5 +72,50 @@ func main() {
 			result.Tracked.ExitCode,
 			result.Tracked.Captured,
 		)
+	}
+}
+
+func formatAgentEvent(event controller.TranscriptEvent) string {
+	switch event.Kind {
+	case controller.EventUserMessage, controller.EventAgentMessage, controller.EventSystemNotice, controller.EventError:
+		payload, _ := event.Payload.(controller.TextPayload)
+		return fmt.Sprintf("[%s]\n%s", strings.ToUpper(string(event.Kind)), payload.Text)
+	case controller.EventPlan:
+		payload, _ := event.Payload.(controller.PlanPayload)
+		lines := []string{payload.Summary}
+		for index, step := range payload.Steps {
+			lines = append(lines, fmt.Sprintf("%d. %s", index+1, step))
+		}
+		return fmt.Sprintf("[PLAN]\n%s", strings.Join(lines, "\n"))
+	case controller.EventProposal:
+		payload, _ := event.Payload.(controller.ProposalPayload)
+		lines := []string{"kind: " + string(payload.Kind)}
+		if payload.Description != "" {
+			lines = append(lines, payload.Description)
+		}
+		if payload.Command != "" {
+			lines = append(lines, "command: "+payload.Command)
+		}
+		if payload.Patch != "" {
+			lines = append(lines, "patch:\n"+payload.Patch)
+		}
+		return fmt.Sprintf("[PROPOSAL]\n%s", strings.Join(lines, "\n"))
+	case controller.EventApproval:
+		payload, _ := event.Payload.(controller.ApprovalRequest)
+		lines := []string{
+			"title: " + payload.Title,
+			"kind: " + string(payload.Kind),
+			"risk: " + string(payload.Risk),
+			"summary: " + payload.Summary,
+		}
+		if payload.Command != "" {
+			lines = append(lines, "command: "+payload.Command)
+		}
+		if payload.Patch != "" {
+			lines = append(lines, "patch:\n"+payload.Patch)
+		}
+		return fmt.Sprintf("[APPROVAL]\n%s", strings.Join(lines, "\n"))
+	default:
+		return fmt.Sprintf("[%s]", strings.ToUpper(string(event.Kind)))
 	}
 }

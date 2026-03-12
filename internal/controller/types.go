@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"time"
+
+	"aiterm/internal/shell"
 )
 
 type Agent interface {
@@ -21,6 +23,7 @@ type SessionContext struct {
 	BottomPaneID      string
 	WorkingDirectory  string
 	RecentShellOutput string
+	CurrentShell      *shell.PromptContext
 }
 
 type TaskContext struct {
@@ -28,6 +31,7 @@ type TaskContext struct {
 	PriorTranscript   []TranscriptEvent
 	PendingApproval   *ApprovalRequest
 	LastCommandResult *CommandResultSummary
+	ActivePlan        *ActivePlan
 }
 
 type AgentResponse struct {
@@ -40,6 +44,24 @@ type AgentResponse struct {
 type Plan struct {
 	Summary string
 	Steps   []string
+}
+
+type PlanStepStatus string
+
+const (
+	PlanStepPending    PlanStepStatus = "pending"
+	PlanStepInProgress PlanStepStatus = "in_progress"
+	PlanStepDone       PlanStepStatus = "done"
+)
+
+type PlanStep struct {
+	Text   string
+	Status PlanStepStatus
+}
+
+type ActivePlan struct {
+	Summary string
+	Steps   []PlanStep
 }
 
 type Proposal struct {
@@ -113,15 +135,22 @@ const (
 )
 
 type CommandResultSummary struct {
-	CommandID string
-	Command   string
-	ExitCode  int
-	Summary   string
+	CommandID    string
+	Command      string
+	ExitCode     int
+	Summary      string
+	ShellContext *shell.PromptContext
 }
 
 type Controller interface {
 	SubmitAgentPrompt(ctx context.Context, prompt string) ([]TranscriptEvent, error)
 	SubmitRefinement(ctx context.Context, approval ApprovalRequest, note string) ([]TranscriptEvent, error)
+	ContinueActivePlan(ctx context.Context) ([]TranscriptEvent, error)
+	ContinueAfterCommand(ctx context.Context) ([]TranscriptEvent, error)
+	ResumeAfterTakeControl(ctx context.Context) ([]TranscriptEvent, error)
+	SubmitInteractiveShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error)
 	SubmitShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error)
 	DecideApproval(ctx context.Context, approvalID string, decision ApprovalDecision, refineText string) ([]TranscriptEvent, error)
+	RefreshShellContext(ctx context.Context) (*shell.PromptContext, error)
+	PeekShellTail(ctx context.Context, lines int) (string, error)
 }

@@ -76,6 +76,7 @@ Expected responsibilities:
 - transcript history
 - command results
 - provider profile references
+- runtime registry data for workspace recovery and reconciliation
 
 ## 2.6 Command Registry
 The application should define an internal command registry early.
@@ -95,6 +96,8 @@ This keeps:
 3. Initialize controller state for pane IDs and session metadata.
 4. Start the TUI in the bottom pane.
 5. Render initial transcript, mode state, and key hints.
+
+Release-oriented socket/session lifecycle guidance lives in [runtime-management-design.md](runtime-management-design.md).
 
 ## 3.2 Agent Loop
 1. Gather recent shell context and task state.
@@ -141,3 +144,4 @@ This is a recommended direction, not a hard product requirement. It aligns with 
 - Detailed product acceptance criteria are specified in [requirements-mvp.md](requirements-mvp.md).
 - Agent runtime boundaries and integration guidance are specified in [agent-runtime-design.md](agent-runtime-design.md).
 - Provider onboarding and multi-backend integration guidance are specified in [provider-integration-design.md](provider-integration-design.md) and [provider-integration-plan.md](provider-integration-plan.md).
+- Runtime socket/session lifecycle and crash-recovery guidance are specified in [runtime-management-design.md](runtime-management-design.md).

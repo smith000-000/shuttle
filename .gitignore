@@ -9,3 +9,6 @@ Thumbs.db
 
 # Local Shuttle state
 .shuttle/
+
+# Local auth/bootstrap helpers
+env.sh

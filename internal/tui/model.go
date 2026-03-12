@@ -2,15 +2,18 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"aiterm/internal/controller"
+	"aiterm/internal/shell"
 	"aiterm/internal/tmux"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 )
 
 type Mode string
@@ -31,6 +34,24 @@ type controllerEventsMsg struct {
 	err    error
 }
 
+type busyTickMsg time.Time
+
+type refreshedShellContextMsg struct {
+	context *shell.PromptContext
+	err     error
+}
+
+type shellTailMsg struct {
+	tail string
+	err  error
+}
+
+const (
+	agentTurnTimeout     = 60 * time.Second
+	shellTailPollLines   = 40
+	shellTailPollTimeout = 750 * time.Millisecond
+)
+
 type Model struct {
 	workspace          tmux.Workspace
 	ctrl               controller.Controller
@@ -41,18 +62,26 @@ type Model struct {
 	width              int
 	height             int
 	busy               bool
+	busyStartedAt      time.Time
 	transcriptScroll   int
 	transcriptFollow   bool
 	detailOpen         bool
 	detailScroll       int
 	shellHistory       composerHistory
 	agentHistory       composerHistory
+	activePlan         *controller.ActivePlan
+	shellContext       shell.PromptContext
 	pendingApproval    *controller.ApprovalRequest
 	pendingProposal    *controller.ProposalPayload
 	refiningApproval   *controller.ApprovalRequest
 	approvalInFlight   bool
 	proposalRunPending bool
 	directShellPending bool
+	inFlightCancel     context.CancelFunc
+	suppressCancelErr  bool
+	resumeAfterHandoff bool
+	takeControl        takeControlConfig
+	liveShellTail      string
 	styles             styles
 }
 
@@ -69,12 +98,31 @@ func NewModel(workspace tmux.Workspace, ctrl controller.Controller) Model {
 			},
 			{
 				Title: "system",
-				Body:  "Tab mode. Up/Down history. PgUp/PgDn scroll. Enter submit. Esc clear. Ctrl+C quit.",
+				Body:  "Tab mode. Up/Down history. PgUp/PgDn scroll. Enter submit. F2 take control. Esc clear. Ctrl+C quit.",
 			},
 		},
 		selectedEntry: 1,
 		styles:        newStyles(),
 	}
+}
+
+func (m Model) WithShellContext(promptContext shell.PromptContext) Model {
+	if promptContext.PromptLine() != "" {
+		m.shellContext = promptContext
+	}
+
+	return m
+}
+
+func (m Model) WithTakeControl(socketName string, sessionName string, topPaneID string, detachKey string) Model {
+	m.takeControl = takeControlConfig{
+		SocketName:  socketName,
+		SessionName: sessionName,
+		TopPaneID:   topPaneID,
+		DetachKey:   detachKey,
+	}
+
+	return m
 }
 
 func (m Model) Init() tea.Cmd {
@@ -92,13 +140,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case controllerEventsMsg:
 		pinned := m.isTranscriptPinned()
+		autoContinue := m.shouldAutoContinue(msg.events)
 		m.busy = false
+		m.busyStartedAt = time.Time{}
+		m.inFlightCancel = nil
 		if msg.err != nil {
+			if m.suppressCancelErr && errors.Is(msg.err, context.Canceled) {
+				m.suppressCancelErr = false
+				return m, nil
+			}
+			m.suppressCancelErr = false
 			m.approvalInFlight = false
 			m.proposalRunPending = false
+			m.directShellPending = false
 			m.entries = append(m.entries, Entry{
 				Title: "error",
-				Body:  msg.err.Error(),
+				Body:  m.formatShellError(msg.err),
 			})
 			if pinned {
 				m.scrollTranscriptToBottom()
@@ -107,10 +164,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.selectedEntry = len(m.entries) - 1
 			m.clampSelection()
-			return m, nil
+			return m, m.pollShellTailCmd()
 		}
 
 		m.entries = append(m.entries, eventsToEntries(msg.events, !m.directShellPending)...)
+		m.suppressCancelErr = false
 		m.syncActionState(msg.events)
 		if pinned {
 			m.scrollTranscriptToBottom()
@@ -120,9 +178,67 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.selectedEntry = len(m.entries) - 1
 		m.clampSelection()
 		if containsEventKind(msg.events, controller.EventError) {
+			return m, m.pollShellTailCmd()
+		}
+		if autoContinue {
+			m.busy = true
+			m.busyStartedAt = time.Now()
+			ctx, cancel := context.WithTimeout(context.Background(), agentTurnTimeout)
+			m.inFlightCancel = cancel
+			return m, tea.Batch(func() tea.Msg {
+				defer cancel()
+
+				events, err := m.ctrl.ContinueAfterCommand(ctx)
+				return controllerEventsMsg{
+					events: events,
+					err:    err,
+				}
+			}, tickBusy(), m.pollShellTailCmd())
+		}
+		return m, m.pollShellTailCmd()
+	case takeControlFinishedMsg:
+		if msg.err != nil {
+			m.entries = append(m.entries, Entry{
+				Title: "error",
+				Body:  msg.err.Error(),
+			})
+			m.selectedEntry = len(m.entries) - 1
+			m.clampSelection()
 			return m, nil
 		}
+		if m.resumeAfterHandoff && m.ctrl != nil {
+			m.resumeAfterHandoff = false
+			m.busy = true
+			m.busyStartedAt = time.Now()
+			ctx, cancel := context.WithTimeout(context.Background(), agentTurnTimeout)
+			m.inFlightCancel = cancel
+			return m, tea.Batch(func() tea.Msg {
+				defer cancel()
+
+				events, err := m.ctrl.ResumeAfterTakeControl(ctx)
+				return controllerEventsMsg{
+					events: events,
+					err:    err,
+				}
+			}, tickBusy(), m.refreshShellContextCmd(), m.pollShellTailCmd())
+		}
+		return m, tea.Batch(m.refreshShellContextCmd(), m.pollShellTailCmd())
+	case refreshedShellContextMsg:
+		if msg.context != nil {
+			m.shellContext = *msg.context
+		}
 		return m, nil
+	case shellTailMsg:
+		if msg.err == nil {
+			m.liveShellTail = msg.tail
+		}
+		return m, nil
+	case busyTickMsg:
+		if !m.busy {
+			return m, nil
+		}
+
+		return m, tea.Batch(tickBusy(), m.pollShellTailCmd())
 	case tea.KeyMsg:
 		if m.detailOpen {
 			return m.updateDetail(msg)
@@ -130,6 +246,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			return m, tea.Quit
+		case tea.KeyF2:
+			return m.takeControlNow()
 		case tea.KeyEsc:
 			m.input = ""
 			return m, nil
@@ -175,13 +293,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case tea.KeyCtrlO:
 			return m.openDetail()
+		case tea.KeyCtrlG:
+			return m.primaryAction()
 		case tea.KeyCtrlJ:
 			m.input += "\n"
 			return m, nil
 		case tea.KeyCtrlE:
-			return m.runProposalCommand()
+			return m.primaryAction()
 		case tea.KeyCtrlY:
-			return m.decideApproval(controller.DecisionApprove)
+			return m.primaryAction()
 		case tea.KeyCtrlN:
 			return m.decideApproval(controller.DecisionReject)
 		case tea.KeyCtrlR:
@@ -217,14 +337,16 @@ func (m Model) View() string {
 		width = 100
 	}
 	screenWidth := max(40, width)
-	headerWidth := m.contentWidthFor(screenWidth, m.styles.header)
-	transcriptWidth := m.contentWidthFor(screenWidth, m.styles.transcript)
+	transcriptWidth := screenWidth
 	actionWidth := m.contentWidthFor(screenWidth, m.styles.actionCard)
+	statusWidth := m.contentWidthFor(screenWidth, m.styles.status)
 	composerWidth := m.contentWidthFor(screenWidth, m.activeComposerStyle())
-	footerWidth := m.contentWidthFor(screenWidth, m.styles.footer)
+	footerWidth := screenWidth
 
-	header := m.renderHeader(headerWidth)
 	actionCard := m.renderActionCard(actionWidth)
+	planCard := m.renderPlanCard(actionWidth)
+	statusLine := m.renderStatusLine(statusWidth)
+	shellTail := m.renderShellTail(statusWidth)
 	composer := m.renderComposer(composerWidth)
 	footer := m.renderFooter(footerWidth)
 
@@ -233,13 +355,22 @@ func (m Model) View() string {
 		screenHeight = 24
 	}
 
-	transcriptHeight := m.transcriptViewportHeight(header, actionCard, composer, footer, screenHeight)
+	transcriptHeight := m.transcriptViewportHeight(actionCard, planCard, statusLine, shellTail, composer, footer, screenHeight)
 
-	transcript := m.renderTranscript(transcriptWidth, transcriptHeight, header)
+	transcript := m.renderTranscript(transcriptWidth, transcriptHeight)
 
 	sections := []string{transcript}
 	if actionCard != "" {
 		sections = append(sections, actionCard)
+	}
+	if planCard != "" {
+		sections = append(sections, planCard)
+	}
+	if statusLine != "" {
+		sections = append(sections, statusLine)
+	}
+	if shellTail != "" {
+		sections = append(sections, shellTail)
 	}
 	sections = append(sections, composer, footer)
 
@@ -267,11 +398,13 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		}
 
 		m.busy = true
+		m.busyStartedAt = time.Now()
 		prompt := text
 		refining := m.refiningApproval
 		m.refiningApproval = nil
-		return m, func() tea.Msg {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), agentTurnTimeout)
+		m.inFlightCancel = cancel
+		return m, tea.Batch(func() tea.Msg {
 			defer cancel()
 
 			var (
@@ -287,7 +420,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 				events: events,
 				err:    err,
 			}
-		}
+		}, tickBusy(), m.pollShellTailCmd())
 	}
 
 	if m.ctrl == nil {
@@ -299,10 +432,12 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	}
 
 	m.busy = true
+	m.busyStartedAt = time.Now()
 	m.directShellPending = true
 	command := text
-	return m, func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), shell.CommandTimeout(command))
+	m.inFlightCancel = cancel
+	return m, tea.Batch(func() tea.Msg {
 		defer cancel()
 
 		events, err := m.ctrl.SubmitShellCommand(ctx, command)
@@ -310,28 +445,191 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 			events: events,
 			err:    err,
 		}
+	}, tickBusy(), m.pollShellTailCmd())
+}
+
+func (m Model) primaryAction() (tea.Model, tea.Cmd) {
+	switch {
+	case m.pendingApproval != nil:
+		return m.decideApproval(controller.DecisionApprove)
+	case m.pendingProposal != nil && m.pendingProposal.Command != "":
+		return m.runProposalCommand()
+	case m.activePlan != nil:
+		return m.continueActivePlan()
+	default:
+		return m, nil
 	}
 }
 
-func (m Model) transcriptLines() []string {
+func (m Model) shouldAutoContinue(events []controller.TranscriptEvent) bool {
+	if m.ctrl == nil || m.directShellPending {
+		return false
+	}
+	if !containsEventKind(events, controller.EventCommandResult) {
+		return false
+	}
+
+	return m.proposalRunPending || m.approvalInFlight
+}
+
+func (m Model) continueActivePlan() (tea.Model, tea.Cmd) {
+	if m.busy || m.ctrl == nil || m.activePlan == nil {
+		return m, nil
+	}
+
+	m.busy = true
+	m.busyStartedAt = time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), agentTurnTimeout)
+	m.inFlightCancel = cancel
+	return m, tea.Batch(func() tea.Msg {
+		defer cancel()
+
+		events, err := m.ctrl.ContinueActivePlan(ctx)
+		return controllerEventsMsg{
+			events: events,
+			err:    err,
+		}
+	}, tickBusy(), m.pollShellTailCmd())
+}
+
+func (m Model) takeControlNow() (tea.Model, tea.Cmd) {
+	if !m.takeControl.enabled() {
+		return m, nil
+	}
+
+	if m.inFlightCancel != nil {
+		m.resumeAfterHandoff = !m.directShellPending && (m.approvalInFlight || m.proposalRunPending || m.mode == AgentMode || m.activePlan != nil)
+		m.suppressCancelErr = true
+		m.inFlightCancel()
+		m.inFlightCancel = nil
+	}
+
+	m.busy = false
+	m.busyStartedAt = time.Time{}
+	m.approvalInFlight = false
+	m.proposalRunPending = false
+	m.directShellPending = false
+
+	return m, newTakeControlCmd(m.takeControl)
+}
+
+func (m Model) refreshShellContextCmd() tea.Cmd {
+	if m.ctrl == nil {
+		return nil
+	}
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		promptContext, err := m.ctrl.RefreshShellContext(ctx)
+		return refreshedShellContextMsg{
+			context: promptContext,
+			err:     err,
+		}
+	}
+}
+
+func (m Model) pollShellTailCmd() tea.Cmd {
+	if m.ctrl == nil {
+		return nil
+	}
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), shellTailPollTimeout)
+		defer cancel()
+
+		tail, err := m.ctrl.PeekShellTail(ctx, shellTailPollLines)
+		return shellTailMsg{
+			tail: tail,
+			err:  err,
+		}
+	}
+}
+
+func (m Model) formatShellError(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	message := err.Error()
+	tail := strings.TrimSpace(m.liveShellTail)
+	if tail == "" {
+		return message
+	}
+
+	lines := strings.Split(tail, "\n")
+	if len(lines) > 3 {
+		lines = lines[len(lines)-3:]
+	}
+
+	return strings.TrimSpace(message + "\nlast shell output:\n" + strings.Join(lines, "\n"))
+}
+
+func (m Model) transcriptLines(width int) []string {
 	lines := make([]string, 0, len(m.entries)*2)
 	for index, entry := range m.entries {
-		lines = append(lines, m.renderEntryHeader(index, entry.Title))
-		for _, line := range strings.Split(entry.Body, "\n") {
-			lines = append(lines, m.styles.body.Render("  "+line))
-		}
+		lines = append(lines, m.renderEntryLines(index, entry, width)...)
 	}
 
 	return lines
 }
 
-func (m Model) renderEntryHeader(index int, title string) string {
+func (m Model) renderEntryLines(index int, entry Entry, width int) []string {
 	prefix := "  "
 	if index == m.selectedEntry {
 		prefix = "› "
 	}
 
-	return prefix + m.renderTag(title)
+	tag := m.renderTag(entry.Title)
+	tagWidth := lipgloss.Width(tag)
+	bodyWidth := max(10, width-lipgloss.Width(prefix)-tagWidth-1)
+	bodyStyle := m.renderBodyStyle(entry.Title)
+	indent := strings.Repeat(" ", lipgloss.Width(prefix)+tagWidth+1)
+
+	rawLines := strings.Split(entry.Body, "\n")
+	if len(rawLines) == 0 {
+		rawLines = []string{""}
+	}
+
+	rendered := make([]string, 0, len(rawLines))
+	firstBody := wrapText(rawLines[0], bodyWidth)
+	if len(firstBody) == 0 {
+		firstBody = []string{""}
+	}
+	rendered = append(rendered, prefix+tag+" "+bodyStyle.Render(firstBody[0]))
+	for _, wrapped := range firstBody[1:] {
+		rendered = append(rendered, indent+bodyStyle.Render(wrapped))
+	}
+
+	for _, rawLine := range rawLines[1:] {
+		wrappedLines := wrapText(rawLine, bodyWidth)
+		if len(wrappedLines) == 0 {
+			wrappedLines = []string{""}
+		}
+		for _, wrapped := range wrappedLines {
+			rendered = append(rendered, indent+bodyStyle.Render(wrapped))
+		}
+	}
+
+	return rendered
+}
+
+func (m Model) renderBodyStyle(title string) lipgloss.Style {
+	switch title {
+	case "system":
+		return m.styles.bodySystem
+	case "user", "shell":
+		return m.styles.bodyShell
+	case "result":
+		return m.styles.bodyResult
+	case "agent", "plan", "proposal":
+		return m.styles.bodyAgent
+	case "approval", "error":
+		return m.styles.bodyError
+	default:
+		return m.styles.bodyShell
+	}
 }
 
 func (m Model) renderHeader(width int) string {
@@ -387,7 +685,7 @@ func (m Model) renderActionCard(width int) string {
 		if m.pendingApproval.Risk != "" {
 			body = append(body, "risk: "+string(m.pendingApproval.Risk))
 		}
-		body = append(body, "Ctrl+Y approve  Ctrl+N reject  Ctrl+R refine")
+		body = append(body, "Ctrl+E continue  Ctrl+N reject  Ctrl+R refine")
 		content := lipgloss.JoinVertical(
 			lipgloss.Left,
 			m.styles.actionTitle.Render("Approval Required"),
@@ -422,7 +720,7 @@ func (m Model) renderActionCard(width int) string {
 			body = append(body, m.pendingProposal.Description)
 		}
 		body = append(body, "command: "+m.pendingProposal.Command)
-		body = append(body, "Ctrl+E run command")
+		body = append(body, "Ctrl+E continue")
 		content := lipgloss.JoinVertical(
 			lipgloss.Left,
 			m.styles.actionTitle.Render("Proposed Command"),
@@ -434,27 +732,41 @@ func (m Model) renderActionCard(width int) string {
 	return ""
 }
 
-func (m Model) renderTranscript(width int, height int, header string) string {
-	lines := m.transcriptLines()
-	if header != "" {
-		headerLines := strings.Split(header, "\n")
-		bodyHeight := height - len(headerLines)
-		if bodyHeight < 0 {
-			bodyHeight = 0
-		}
-		lines = append(headerLines, m.transcriptWindow(lines, bodyHeight)...)
-	} else {
-		lines = m.transcriptWindow(lines, height)
+func (m Model) renderPlanCard(width int) string {
+	if m.activePlan == nil {
+		return ""
 	}
 
-	for len(lines) < height {
-		lines = append(lines, "")
-	}
-	if len(lines) > height {
-		lines = lines[:height]
+	body := make([]string, 0, len(m.activePlan.Steps)+2)
+	if strings.TrimSpace(m.activePlan.Summary) != "" {
+		body = append(body, m.activePlan.Summary)
 	}
 
-	return renderWithSideRails(lines, width)
+	visibleSteps := len(m.activePlan.Steps)
+	if visibleSteps > 6 {
+		visibleSteps = 6
+	}
+	for index := 0; index < visibleSteps; index++ {
+		step := m.activePlan.Steps[index]
+		body = append(body, fmt.Sprintf("%s %d. %s", planStepMarker(step.Status), index+1, step.Text))
+	}
+	if hiddenSteps := len(m.activePlan.Steps) - visibleSteps; hiddenSteps > 0 {
+		body = append(body, fmt.Sprintf("... (%d more steps)", hiddenSteps))
+	}
+	body = append(body, m.planProgressSummary())
+	body = append(body, "Ctrl+E continue")
+
+	content := lipgloss.JoinVertical(
+		lipgloss.Left,
+		m.styles.actionTitle.Render("Active Plan"),
+		m.styles.actionBody.Render(strings.Join(body, "\n")),
+	)
+	return m.styles.actionCard.BorderForeground(lipgloss.Color("63")).Width(width).Render(content)
+}
+
+func (m Model) renderTranscript(width int, height int) string {
+	lines := m.transcriptWindow(m.transcriptLines(width), height)
+	return m.styles.transcript.Width(width).MaxWidth(width).Render(strings.Join(lines, "\n"))
 }
 
 func (m Model) renderComposer(width int) string {
@@ -469,24 +781,32 @@ func (m Model) renderComposer(width int) string {
 		firstLine = ""
 	}
 
-	badgeStyle := m.styles.composerBadgeShell
 	composerStyle := m.styles.composerShell
-	label := "SHELL"
 	if m.refiningApproval != nil {
-		badgeStyle = m.styles.composerBadgeRefine
 		composerStyle = m.styles.composerRefine
-		label = "REFINE"
 	} else if m.mode == AgentMode {
-		badgeStyle = m.styles.composerBadgeAgent
 		composerStyle = m.styles.composerAgent
-		label = "AGENT"
+	}
+
+	promptStyle := m.styles.composerPromptShell
+	prompt := "$>"
+	switch {
+	case m.refiningApproval != nil:
+		promptStyle = m.styles.composerPromptRefine
+		prompt = "Œ>"
+	case m.mode == AgentMode:
+		promptStyle = m.styles.composerPromptAgent
+		prompt = "Œ>"
+	case m.shellContext.Root:
+		promptStyle = m.styles.composerPromptShell
+		prompt = "#>"
 	}
 
 	rendered := []string{
-		lipgloss.JoinHorizontal(lipgloss.Left, badgeStyle.Render(label), m.styles.input.Render(" > "+firstLine)),
+		lipgloss.JoinHorizontal(lipgloss.Left, promptStyle.Render(prompt), m.styles.input.Render(" "+firstLine)),
 	}
 	for _, line := range lines[1:] {
-		rendered = append(rendered, m.styles.input.Render("   "+line))
+		rendered = append(rendered, m.styles.input.Render(strings.Repeat(" ", lipgloss.Width(prompt)+1)+line))
 	}
 
 	return composerStyle.Width(width).Render(strings.Join(rendered, "\n"))
@@ -494,7 +814,7 @@ func (m Model) renderComposer(width int) string {
 
 func (m Model) renderFooter(width int) string {
 	if m.detailOpen {
-		parts := []string{"[Esc] close", "[Up/Down] scroll", "[PgUp/PgDn] page", "[Home/End] bounds", "[Ctrl+C] quit"}
+		parts := []string{"[Esc] close", "[Up/Down] scroll", "[PgUp/PgDn] page", "[Home/End] bounds", "[F2] shell", "[Ctrl+C] quit"}
 		return m.styles.footer.Width(width).Render(strings.Join(parts, "  "))
 	}
 
@@ -502,34 +822,116 @@ func (m Model) renderFooter(width int) string {
 	return m.styles.footer.Width(width).Render(strings.Join(parts, "  "))
 }
 
+func (m Model) renderStatusLine(width int) string {
+	left := m.renderShellContext()
+	rightParts := make([]string, 0, 3)
+	if m.shellContext.Remote {
+		rightParts = append(rightParts, m.styles.statusRemote.Render("REMOTE"))
+	}
+	if m.busy {
+		elapsed := 0
+		if !m.busyStartedAt.IsZero() {
+			elapsed = int(time.Since(m.busyStartedAt).Seconds())
+		}
+		rightParts = append(rightParts, m.styles.statusBusy.Render(fmt.Sprintf("Working (%ds)", elapsed)))
+	}
+	right := strings.Join(rightParts, " ")
+
+	if left == "" && right == "" {
+		return ""
+	}
+
+	if right == "" {
+		return m.styles.status.Render(runewidth.Truncate(left, width, "…"))
+	}
+	if left == "" {
+		return m.styles.status.Render(right)
+	}
+
+	availableLeft := width - lipgloss.Width(right) - 1
+	if availableLeft < 0 {
+		availableLeft = 0
+	}
+	left = runewidth.Truncate(left, availableLeft, "…")
+	padding := width - lipgloss.Width(left) - lipgloss.Width(right)
+	if padding < 1 {
+		padding = 1
+	}
+
+	return m.styles.status.Render(left + strings.Repeat(" ", padding) + right)
+}
+
+func (m Model) renderShellTail(width int) string {
+	tail := strings.TrimSpace(m.liveShellTail)
+	if tail == "" {
+		return ""
+	}
+
+	lines := strings.Split(tail, "\n")
+	if len(lines) > 3 {
+		lines = lines[len(lines)-3:]
+	}
+
+	contentWidth := max(10, width-2)
+	rendered := make([]string, 0, len(lines)+1)
+	rendered = append(rendered, m.styles.tailLabel.Render("shell"))
+	for _, line := range lines {
+		wrapped := wrapText(strings.TrimRight(line, "\r"), contentWidth)
+		if len(wrapped) == 0 {
+			wrapped = []string{""}
+		}
+		for _, part := range wrapped {
+			rendered = append(rendered, m.styles.tailBody.Render(part))
+		}
+	}
+	if m.busy {
+		rendered = append(rendered, m.styles.tailHint.Render("F2 to take control"))
+	}
+
+	return m.styles.tail.Width(width).Render(strings.Join(rendered, "\n"))
+}
+
+func (m Model) renderShellContext() string {
+	return strings.TrimSpace(m.shellContext.PromptLine())
+}
+
 func (m Model) footerParts(width int) []string {
 	switch {
 	case width < 72:
-		parts := []string{"[Tab]", "[Pg]", "[Enter]", "[Esc]", "[Ctrl+O]", "[Ctrl+C]"}
+		parts := []string{"[Tab]", "[Pg]", "[Enter]", "[Esc]", "[F2]", "[Ctrl+O]", "[Ctrl+C]"}
 		if m.pendingApproval != nil {
-			parts = append(parts, "[Y/N/R]")
+			parts = append(parts, "[E/N/R]")
+		} else if m.refiningApproval != nil {
+			parts = append(parts, "[Enter]")
 		} else if m.pendingProposal != nil && m.pendingProposal.Command != "" {
+			parts = append(parts, "[Ctrl+E]")
+		} else if m.activePlan != nil {
 			parts = append(parts, "[Ctrl+E]")
 		}
 		return parts
 	case width < 100:
-		parts := []string{"[Tab] mode", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Enter] submit", "[Esc] clear", "[Ctrl+C] quit"}
+		parts := []string{"[Tab] mode", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Enter] submit", "[Esc] clear", "[F2] shell", "[Ctrl+C] quit"}
 		if m.pendingApproval != nil {
-			parts = append(parts, "[Ctrl+Y/N/R]")
+			parts = append(parts, "[Ctrl+E/N/R]")
+		} else if m.refiningApproval != nil {
+			parts = append(parts, "[Enter] refine")
 		} else if m.pendingProposal != nil && m.pendingProposal.Command != "" {
-			parts = append(parts, "[Ctrl+E] run")
+			parts = append(parts, "[Ctrl+E] continue")
+		} else if m.activePlan != nil {
+			parts = append(parts, "[Ctrl+E] plan")
 		}
 		return parts
 	}
 
-	parts := []string{"[Tab] mode", "[Up/Down] history", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Ctrl+U/D] half-page", "[Home/End] bounds", "[Enter] submit", "[Esc] clear", "[Ctrl+J] newline"}
-	if m.pendingProposal != nil && m.pendingProposal.Command != "" {
-		parts = append(parts, "[Ctrl+E] run proposal")
-	}
+	parts := []string{"[Tab] mode", "[Up/Down] history", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Ctrl+U/D] half-page", "[Home/End] bounds", "[Enter] submit", "[Esc] clear", "[Ctrl+J] newline", "[F2] shell"}
 	if m.pendingApproval != nil {
-		parts = append(parts, "[Ctrl+Y] approve", "[Ctrl+N] reject", "[Ctrl+R] refine")
+		parts = append(parts, "[Ctrl+E] continue", "[Ctrl+N] reject", "[Ctrl+R] refine")
 	} else if m.refiningApproval != nil {
 		parts = append(parts, "[Enter] submit refine note")
+	} else if m.pendingProposal != nil && m.pendingProposal.Command != "" {
+		parts = append(parts, "[Ctrl+E] continue")
+	} else if m.activePlan != nil {
+		parts = append(parts, "[Ctrl+E] continue plan")
 	}
 	parts = append(parts, "[Ctrl+C] quit")
 	return parts
@@ -543,8 +945,8 @@ func (m *Model) currentHistory() *composerHistory {
 	return &m.shellHistory
 }
 
-func (m Model) transcriptViewportHeight(header string, actionCard string, composer string, footer string, screenHeight int) int {
-	reservedHeight := lipgloss.Height(actionCard) + lipgloss.Height(composer) + lipgloss.Height(footer)
+func (m Model) transcriptViewportHeight(actionCard string, planCard string, statusLine string, shellTail string, composer string, footer string, screenHeight int) int {
+	reservedHeight := lipgloss.Height(actionCard) + lipgloss.Height(planCard) + lipgloss.Height(statusLine) + lipgloss.Height(shellTail) + lipgloss.Height(composer) + lipgloss.Height(footer)
 	transcriptChromeHeight := m.styles.transcript.GetVerticalFrameSize()
 	transcriptHeight := screenHeight - reservedHeight - transcriptChromeHeight
 	if transcriptHeight < 4 {
@@ -582,11 +984,11 @@ func (m Model) transcriptWindow(lines []string, height int) []string {
 }
 
 func (m Model) transcriptLineCount() int {
-	return len(m.transcriptLines())
+	return len(m.transcriptLines(m.currentTranscriptWidth()))
 }
 
 func (m Model) maxTranscriptScroll() int {
-	return m.maxTranscriptScrollFor(m.transcriptLines(), m.currentTranscriptHeight())
+	return m.maxTranscriptScrollFor(m.transcriptLines(m.currentTranscriptWidth()), m.currentTranscriptHeight())
 }
 
 func (m Model) maxTranscriptScrollFor(lines []string, height int) int {
@@ -602,22 +1004,29 @@ func (m Model) currentTranscriptHeight() int {
 		return max(4, m.height-4)
 	}
 
-	width := m.width
-	if width <= 0 {
-		width = 100
-	}
-	screenWidth := max(40, width)
-	header := m.renderHeader(m.contentWidthFor(screenWidth, m.styles.header))
-	actionCard := m.renderActionCard(m.contentWidthFor(screenWidth, m.styles.actionCard))
-	composer := m.renderComposer(m.contentWidthFor(screenWidth, m.activeComposerStyle()))
-	footer := m.renderFooter(m.contentWidthFor(screenWidth, m.styles.footer))
+	width := m.currentTranscriptWidth()
+	actionCard := m.renderActionCard(m.contentWidthFor(width, m.styles.actionCard))
+	planCard := m.renderPlanCard(m.contentWidthFor(width, m.styles.actionCard))
+	statusLine := m.renderStatusLine(m.contentWidthFor(width, m.styles.status))
+	shellTail := m.renderShellTail(m.contentWidthFor(width, m.styles.tail))
+	composer := m.renderComposer(m.contentWidthFor(width, m.activeComposerStyle()))
+	footer := m.renderFooter(width)
 
 	screenHeight := m.height
 	if screenHeight <= 0 {
 		screenHeight = 24
 	}
 
-	return m.transcriptViewportHeight(header, actionCard, composer, footer, screenHeight)
+	return m.transcriptViewportHeight(actionCard, planCard, statusLine, shellTail, composer, footer, screenHeight)
+}
+
+func (m Model) currentTranscriptWidth() int {
+	width := m.width
+	if width <= 0 {
+		width = 100
+	}
+
+	return max(40, width)
 }
 
 func (m Model) activeComposerStyle() lipgloss.Style {
@@ -638,25 +1047,6 @@ func (m Model) contentWidthFor(totalWidth int, style lipgloss.Style) int {
 	}
 
 	return width
-}
-
-func renderWithSideRails(lines []string, width int) string {
-	innerWidth := width - 2
-	if innerWidth < 0 {
-		innerWidth = 0
-	}
-
-	rendered := make([]string, 0, len(lines))
-	for _, line := range lines {
-		renderedLine := lipgloss.NewStyle().Width(innerWidth).MaxWidth(innerWidth).Render(line)
-		lineWidth := lipgloss.Width(renderedLine)
-		if lineWidth < innerWidth {
-			renderedLine += strings.Repeat(" ", innerWidth-lineWidth)
-		}
-		rendered = append(rendered, "│"+renderedLine+"│")
-	}
-
-	return strings.Join(rendered, "\n")
 }
 
 func (m Model) selectedEntryValue() Entry {
@@ -726,6 +1116,8 @@ func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyCtrlC:
 		return m, tea.Quit
+	case tea.KeyF2:
+		return m.takeControlNow()
 	case tea.KeyEsc:
 		m.detailOpen = false
 		m.detailScroll = 0
@@ -775,7 +1167,7 @@ func (m Model) renderDetailView() string {
 		m.styles.detailMeta.Render(fmt.Sprintf("entry %d/%d", m.selectedEntry+1, max(1, len(m.entries)))),
 		"",
 	}
-	bodyLines := strings.Split(entry.DetailBody(), "\n")
+	bodyLines := wrapParagraphs(entry.DetailBody(), max(10, contentWidth))
 	viewportHeight := height - lipgloss.Height(strings.Join(lines, "\n")) - m.styles.detail.GetVerticalFrameSize() - 2
 	if viewportHeight < 4 {
 		viewportHeight = 4
@@ -784,9 +1176,40 @@ func (m Model) renderDetailView() string {
 	for _, line := range bodyLines {
 		lines = append(lines, m.styles.detailBody.Render(line))
 	}
-	lines = append(lines, "", m.styles.detailMeta.Render("Esc close  Up/Down scroll  PgUp/PgDn page"))
+	lines = append(lines, "", m.styles.detailMeta.Render(m.renderDetailFooter(contentWidth)))
 
 	return m.styles.detail.Width(contentWidth).Render(strings.Join(lines, "\n"))
+}
+
+func (m Model) renderDetailFooter(width int) string {
+	left := "Esc close  Up/Down scroll  PgUp/PgDn page"
+	right := m.detailScrollIndicator()
+	if right == "" {
+		return left
+	}
+
+	padding := width - lipgloss.Width(left) - lipgloss.Width(right)
+	if padding < 1 {
+		return left + " " + right
+	}
+
+	return left + strings.Repeat(" ", padding) + right
+}
+
+func (m Model) detailScrollIndicator() string {
+	maxScroll := m.maxDetailScroll()
+	if maxScroll <= 0 {
+		return ""
+	}
+
+	switch {
+	case m.detailScroll <= 0:
+		return "↓"
+	case m.detailScroll >= maxScroll:
+		return "↑"
+	default:
+		return "↑↓"
+	}
 }
 
 func detailWindow(lines []string, start int, height int) []string {
@@ -824,13 +1247,32 @@ func compactResultPreview(body string, maxLines int) string {
 	return strings.Join(preview, "\n")
 }
 
-func compactPlanEntry(summary string, steps []string) Entry {
+func formatResultDetail(command string, exitCode int, output string) string {
+	command = strings.TrimSpace(command)
+	output = strings.TrimSpace(output)
+	if output == "" {
+		output = "(no output)"
+	}
+
+	sections := []string{
+		"command:",
+		command,
+		"",
+		fmt.Sprintf("exit=%d", exitCode),
+		"",
+		output,
+	}
+
+	return strings.Join(sections, "\n")
+}
+
+func compactPlanEntry(summary string, steps []controller.PlanStep) Entry {
 	detailLines := make([]string, 0, len(steps)+2)
 	if strings.TrimSpace(summary) != "" {
 		detailLines = append(detailLines, summary)
 	}
 	for index, step := range steps {
-		detailLines = append(detailLines, fmt.Sprintf("%d. %s", index+1, step))
+		detailLines = append(detailLines, fmt.Sprintf("%s %d. %s", planStepMarker(step.Status), index+1, step.Text))
 	}
 	if len(detailLines) == 0 {
 		detailLines = append(detailLines, "(empty plan)")
@@ -842,7 +1284,7 @@ func compactPlanEntry(summary string, steps []string) Entry {
 	}
 	visibleSteps := min(2, len(steps))
 	for index := 0; index < visibleSteps; index++ {
-		previewLines = append(previewLines, fmt.Sprintf("%d. %s", index+1, steps[index]))
+		previewLines = append(previewLines, fmt.Sprintf("%s %d. %s", planStepMarker(steps[index].Status), index+1, steps[index].Text))
 	}
 	if hiddenSteps := len(steps) - visibleSteps; hiddenSteps > 0 {
 		previewLines = append(previewLines, fmt.Sprintf("... (%d more steps, Ctrl+O to inspect)", hiddenSteps))
@@ -983,7 +1425,12 @@ func (m *Model) clampDetailScroll() {
 
 func (m Model) maxDetailScroll() int {
 	entry := m.selectedEntryValue()
-	lines := strings.Split(entry.DetailBody(), "\n")
+	width := m.width
+	if width <= 0 {
+		width = 100
+	}
+	contentWidth := m.contentWidthFor(max(40, width), m.styles.detail)
+	lines := wrapParagraphs(entry.DetailBody(), max(10, contentWidth))
 	height := m.height
 	if height <= 0 {
 		height = 24
@@ -1079,11 +1526,13 @@ func (m Model) runProposalCommand() (tea.Model, tea.Cmd) {
 	}
 
 	m.busy = true
+	m.busyStartedAt = time.Now()
 	m.proposalRunPending = true
 	command := m.pendingProposal.Command
+	ctx, cancel := context.WithTimeout(context.Background(), shell.CommandTimeout(command))
+	m.inFlightCancel = cancel
 
-	return m, func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	return m, tea.Batch(func() tea.Msg {
 		defer cancel()
 
 		events, err := m.ctrl.SubmitShellCommand(ctx, command)
@@ -1091,7 +1540,7 @@ func (m Model) runProposalCommand() (tea.Model, tea.Cmd) {
 			events: events,
 			err:    err,
 		}
-	}
+	}, tickBusy(), m.pollShellTailCmd())
 }
 
 func (m Model) decideApproval(decision controller.ApprovalDecision) (tea.Model, tea.Cmd) {
@@ -1100,11 +1549,14 @@ func (m Model) decideApproval(decision controller.ApprovalDecision) (tea.Model, 
 	}
 
 	m.busy = true
+	m.busyStartedAt = time.Now()
 	m.approvalInFlight = true
 	approvalID := m.pendingApproval.ID
+	command := m.pendingApproval.Command
+	ctx, cancel := context.WithTimeout(context.Background(), shell.CommandTimeout(command))
+	m.inFlightCancel = cancel
 
-	return m, func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	return m, tea.Batch(func() tea.Msg {
 		defer cancel()
 
 		events, err := m.ctrl.DecideApproval(ctx, approvalID, decision, "")
@@ -1112,7 +1564,7 @@ func (m Model) decideApproval(decision controller.ApprovalDecision) (tea.Model, 
 			events: events,
 			err:    err,
 		}
-	}
+	}, tickBusy(), m.pollShellTailCmd())
 }
 
 func (m Model) refineApproval() (tea.Model, tea.Cmd) {
@@ -1125,11 +1577,14 @@ func (m Model) refineApproval() (tea.Model, tea.Cmd) {
 	m.input = ""
 	m.mode = AgentMode
 	m.busy = true
+	m.busyStartedAt = time.Now()
 	m.approvalInFlight = true
 	approvalID := m.pendingApproval.ID
+	command := m.pendingApproval.Command
+	ctx, cancel := context.WithTimeout(context.Background(), shell.CommandTimeout(command))
+	m.inFlightCancel = cancel
 
-	return m, func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	return m, tea.Batch(func() tea.Msg {
 		defer cancel()
 
 		events, err := m.ctrl.DecideApproval(ctx, approvalID, controller.DecisionRefine, "")
@@ -1137,10 +1592,19 @@ func (m Model) refineApproval() (tea.Model, tea.Cmd) {
 			events: events,
 			err:    err,
 		}
-	}
+	}, tickBusy())
 }
 
 func (m *Model) syncActionState(events []controller.TranscriptEvent) {
+	if shellContext := latestShellContext(events); shellContext != nil {
+		m.shellContext = *shellContext
+	}
+
+	newPlan := latestPlan(events)
+	if newPlan != nil {
+		m.activePlan = newPlan
+	}
+
 	newApproval := latestApproval(events)
 	if newApproval != nil {
 		m.pendingApproval = newApproval
@@ -1168,6 +1632,42 @@ func (m *Model) syncActionState(events []controller.TranscriptEvent) {
 	m.directShellPending = false
 }
 
+func (m Model) planProgressSummary() string {
+	if m.activePlan == nil || len(m.activePlan.Steps) == 0 {
+		return "Active plan ready"
+	}
+
+	done := 0
+	current := 0
+	for index, step := range m.activePlan.Steps {
+		if step.Status == controller.PlanStepDone {
+			done++
+		}
+		if step.Status == controller.PlanStepInProgress {
+			current = index + 1
+		}
+	}
+	if current == 0 && done < len(m.activePlan.Steps) {
+		current = done + 1
+	}
+	if done == len(m.activePlan.Steps) {
+		return fmt.Sprintf("Plan complete (%d/%d)", done, len(m.activePlan.Steps))
+	}
+
+	return fmt.Sprintf("Plan %d/%d", current, len(m.activePlan.Steps))
+}
+
+func planStepMarker(status controller.PlanStepStatus) string {
+	switch status {
+	case controller.PlanStepDone:
+		return "[x]"
+	case controller.PlanStepInProgress:
+		return "[>]"
+	default:
+		return "[ ]"
+	}
+}
+
 func max(a int, b int) int {
 	if a > b {
 		return a
@@ -1180,6 +1680,73 @@ func min(a int, b int) int {
 		return a
 	}
 	return b
+}
+
+func tickBusy() tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+		return busyTickMsg(t)
+	})
+}
+
+func wrapParagraphs(value string, width int) []string {
+	paragraphs := strings.Split(value, "\n")
+	lines := make([]string, 0, len(paragraphs))
+	for _, paragraph := range paragraphs {
+		lines = append(lines, wrapText(paragraph, width)...)
+	}
+	return lines
+}
+
+func wrapText(value string, width int) []string {
+	if width <= 0 {
+		return []string{value}
+	}
+	if value == "" {
+		return []string{""}
+	}
+
+	remaining := value
+	lines := make([]string, 0, 2)
+	for runewidth.StringWidth(remaining) > width {
+		cut := 0
+		currentWidth := 0
+		lastSpace := -1
+		for index, r := range remaining {
+			runeWidth := runewidth.RuneWidth(r)
+			if currentWidth+runeWidth > width {
+				break
+			}
+			currentWidth += runeWidth
+			cut = index + len(string(r))
+			if r == ' ' || r == '\t' {
+				lastSpace = cut
+			}
+		}
+
+		if cut <= 0 {
+			break
+		}
+
+		breakAt := cut
+		if lastSpace > 0 {
+			breakAt = lastSpace
+		}
+
+		chunk := strings.TrimRight(remaining[:breakAt], " \t")
+		if chunk == "" {
+			chunk = remaining[:cut]
+			breakAt = cut
+		}
+
+		lines = append(lines, chunk)
+		remaining = strings.TrimLeft(remaining[breakAt:], " \t")
+		if remaining == "" {
+			return lines
+		}
+	}
+
+	lines = append(lines, remaining)
+	return lines
 }
 
 func latestApproval(events []controller.TranscriptEvent) *controller.ApprovalRequest {
@@ -1195,6 +1762,45 @@ func latestApproval(events []controller.TranscriptEvent) *controller.ApprovalReq
 
 		approval := payload
 		return &approval
+	}
+
+	return nil
+}
+
+func latestPlan(events []controller.TranscriptEvent) *controller.ActivePlan {
+	for index := len(events) - 1; index >= 0; index-- {
+		if events[index].Kind != controller.EventPlan {
+			continue
+		}
+
+		payload, ok := events[index].Payload.(controller.PlanPayload)
+		if !ok {
+			continue
+		}
+
+		plan := controller.ActivePlan{
+			Summary: payload.Summary,
+			Steps:   append([]controller.PlanStep(nil), payload.Steps...),
+		}
+		return &plan
+	}
+
+	return nil
+}
+
+func latestShellContext(events []controller.TranscriptEvent) *shell.PromptContext {
+	for index := len(events) - 1; index >= 0; index-- {
+		if events[index].Kind != controller.EventCommandResult {
+			continue
+		}
+
+		payload, ok := events[index].Payload.(controller.CommandResultSummary)
+		if !ok || payload.ShellContext == nil {
+			continue
+		}
+
+		context := *payload.ShellContext
+		return &context
 	}
 
 	return nil
@@ -1313,7 +1919,7 @@ func eventsToEntries(events []controller.TranscriptEvent, collapseResults bool) 
 			entries = append(entries, Entry{
 				Title:  "result",
 				Body:   fmt.Sprintf("exit=%d\n%s", payload.ExitCode, body),
-				Detail: fmt.Sprintf("command: %s\nexit=%d\n\n%s", payload.Command, payload.ExitCode, fullBody),
+				Detail: formatResultDetail(payload.Command, payload.ExitCode, fullBody),
 			})
 		case controller.EventSystemNotice:
 			payload, _ := event.Payload.(controller.TextPayload)

@@ -20,6 +20,7 @@ Detailed material that used to live in the monolithic PRD is now split into focu
 - [Agent Runtime Design](agent-runtime-design.md)
 - [Provider Integration Design](provider-integration-design.md)
 - [Provider Integration Plan](provider-integration-plan.md)
+- [Runtime Management Design](runtime-management-design.md)
 
 ---
 

@@ -49,6 +49,7 @@ Focus on broadening configuration and preparing the architecture for controlled 
 Included work:
 - provider and model profile management
 - project-level and global config hardening
+- runtime registry and workspace recovery
 - internal command registry maturity
 - extension-ready seams for commands, views, tools, and event subscribers
 
