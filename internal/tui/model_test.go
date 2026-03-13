@@ -1717,6 +1717,96 @@ func TestApprovalApproveUsesControllerDecision(t *testing.T) {
 	}
 }
 
+func TestApprovalHidesSameTurnProposalCard(t *testing.T) {
+	ctrl := &fakeController{
+		agentEvents: []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventUserMessage,
+				Payload: controller.TextPayload{Text: "search for foo"},
+			},
+			{
+				Kind:    controller.EventAgentMessage,
+				Payload: controller.TextPayload{Text: "This needs approval."},
+			},
+			{
+				Kind: controller.EventProposal,
+				Payload: controller.ProposalPayload{
+					Kind:        controller.ProposalCommand,
+					Description: "Search the home directory for foo.",
+					Command:     "rg -l foo ~",
+				},
+			},
+			{
+				Kind: controller.EventApproval,
+				Payload: controller.ApprovalRequest{
+					ID:      "approval-1",
+					Kind:    controller.ApprovalCommand,
+					Title:   "Approve ripgrep search",
+					Command: "rg -l foo ~",
+					Risk:    controller.RiskLow,
+				},
+			},
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.mode = AgentMode
+	model.input = "search for foo"
+
+	updated, cmd := model.submit()
+	next := updated.(Model)
+	msg := controllerEventsFromCmd(t, cmd)
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+
+	if next.pendingApproval == nil || next.pendingApproval.ID != "approval-1" {
+		t.Fatalf("expected pending approval, got %#v", next.pendingApproval)
+	}
+	if next.pendingProposal != nil {
+		t.Fatalf("expected same-turn proposal to stay hidden behind approval, got %#v", next.pendingProposal)
+	}
+}
+
+func TestApprovalApproveClearsStaleProposalState(t *testing.T) {
+	ctrl := &fakeController{
+		decisionEvents: []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventCommandStart,
+				Payload: controller.CommandStartPayload{Command: "rg -l foo ~"},
+			},
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.pendingApproval = &controller.ApprovalRequest{
+		ID:      "approval-1",
+		Kind:    controller.ApprovalCommand,
+		Title:   "Approve ripgrep search",
+		Command: "rg -l foo ~",
+		Risk:    controller.RiskLow,
+	}
+	model.pendingProposal = &controller.ProposalPayload{
+		Kind:        controller.ProposalCommand,
+		Description: "Search the home directory for foo.",
+		Command:     "rg -l foo ~",
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	next := updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected approval command")
+	}
+	if next.pendingProposal != nil {
+		t.Fatalf("expected stale proposal to clear on approval, got %#v", next.pendingProposal)
+	}
+
+	msg := controllerEventsFromCmd(t, cmd)
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+
+	if next.pendingProposal != nil {
+		t.Fatalf("expected stale proposal to stay cleared after approval events, got %#v", next.pendingProposal)
+	}
+}
+
 func TestApprovalApproveAutomaticallyContinuesAgentLoop(t *testing.T) {
 	ctrl := &fakeController{
 		agentEvents: []controller.TranscriptEvent{

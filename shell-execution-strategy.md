@@ -279,8 +279,25 @@ Available signals:
 
 This is the strongest mode and should provide the best execution guarantees.
 
-#### Tier B. `text_observed`
-Shuttle can see terminal output and prompt-like returns, but cannot rely on shell hooks or remote helpers.
+#### Tier B. `stream_observed`
+Shuttle can observe the live pane output stream closely enough to detect terminal behavior, not just visible text.
+
+Available signals:
+- alternate-screen transitions
+- fullscreen redraw behavior
+- mouse-mode or cursor-mode changes
+- shell-tail changes
+
+Why this matters:
+- it catches aliases, functions, and wrappers that eventually launch fullscreen apps
+- it works for remote shells because the remote program still emits terminal control behavior into the local pane
+- it is a better source of truth for fullscreen-app detection than a command-name list
+
+Important constraint:
+- this requires tmux-side pane stream observation, not just periodic capture of cooked pane text
+
+#### Tier C. `text_observed`
+Shuttle can see terminal output and prompt-like returns, but cannot rely on shell hooks, pane-stream parsing, or remote helpers.
 
 Available signals:
 - terminal stream text
@@ -295,7 +312,7 @@ Unavailable or untrusted signals:
 
 This tier should remain usable, but Shuttle must treat completion and interruption as lower-confidence inferences.
 
-#### Tier C. `hook_integrated`
+#### Tier D. `hook_integrated`
 Shuttle has shell-aware hooks inside the current shell session, for example prompt or command lifecycle hooks.
 
 Available signals:
@@ -305,7 +322,7 @@ Available signals:
 
 This is likely the best long-term answer for local shells, but it requires shell-specific integration.
 
-#### Tier D. `remote_enhanced`
+#### Tier E. `remote_enhanced`
 Shuttle successfully bootstrapped a temporary remote helper or session integration for the current remote shell.
 
 Important constraints:
@@ -360,6 +377,18 @@ Design implication:
 - feed that state into agent check-ins so the agent can say "waiting for shell input" instead of "still running"
 - do not classify a quiet long-running command as `lost` just because it is silent
 
+### Phase 5b. Fullscreen and Alternate-Screen Detection
+- add a pane-stream observer for active executions in `local_managed` mode
+- detect fullscreen terminal apps from terminal behavior rather than command names
+- introduce a stronger interactive/fullscreen state so commands like `btop`, `vim`, and wrapped aliases do not get reconciled from weak prompt heuristics
+- keep command-name classification only as a hint, not as the correctness path
+- use this state to decide when Shuttle should recommend or eventually auto-enter take-control mode
+
+This should improve:
+- fullscreen TUIs launched directly or through aliases/functions
+- remote fullscreen apps inside SSH sessions
+- correctness when there is little or no line-oriented shell output
+
 ### Phase 6. Runtime Durability
 - align with the runtime-management design
 - keep tracked executions recoverable across Shuttle restarts
@@ -373,12 +402,14 @@ The next meaningful work should be:
 2. timeout redesign
 3. active command UI
 4. agent check-ins
+5. pane-stream/fullscreen detection as the next execution-monitor slice
 
 That will reduce the current whack-a-mole around:
 - `context canceled`
 - long command timeouts
 - interactive prompts
 - shell tail confusion
+- fullscreen TUI false completions
 
 ## References
 - Warp Full Terminal Use: https://docs.warp.dev/agent-platform/capabilities/full-terminal-use

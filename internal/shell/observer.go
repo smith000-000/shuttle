@@ -192,7 +192,7 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 			)
 		}
 		if started {
-			monitor.setState(classifyActiveMonitorState(tail))
+			monitor.setState(classifyActiveMonitorState(command, tail))
 		}
 
 		result, complete, err := protocol.ParseCommandResult(captured, markers)
@@ -256,7 +256,7 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 			return
 		}
 
-		if started {
+		if started && allowPromptReturnInference(command) {
 			promptContext := monitor.Snapshot().ShellContext
 			if TailSuggestsPromptReturn(captured, promptContext) {
 				cleanBody := sanitizeCapturedBody(capturePaneDelta(beforeCapture, captured))
@@ -316,11 +316,18 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 	}
 }
 
-func classifyActiveMonitorState(tail string) MonitorState {
+func classifyActiveMonitorState(command string, tail string) MonitorState {
 	if TailSuggestsAwaitingInput(tail) {
 		return MonitorStateAwaitingInput
 	}
+	if IsInteractiveCommand(command) {
+		return MonitorStateAwaitingInput
+	}
 	return MonitorStateRunning
+}
+
+func allowPromptReturnInference(command string) bool {
+	return !IsInteractiveCommand(command)
 }
 
 func monitorStateFromError(err error) MonitorState {

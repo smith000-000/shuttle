@@ -9,6 +9,7 @@ var awaitingInputPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)password(?: for [^:]+)?:\s*$`),
 	regexp.MustCompile(`(?i)passphrase(?: for [^:]+)?:\s*$`),
 	regexp.MustCompile(`(?i)press any key`),
+	regexp.MustCompile(`(?i)^press\b`),
 	regexp.MustCompile(`(?i)press enter`),
 	regexp.MustCompile(`(?i)press return`),
 	regexp.MustCompile(`(?i)continue connecting.*\(yes/no`),
@@ -26,7 +27,7 @@ func TailSuggestsAwaitingInput(tail string) bool {
 	}
 
 	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
+		trimmed := normalizeAwaitingInputLine(line)
 		if trimmed == "" {
 			continue
 		}
@@ -38,4 +39,10 @@ func TailSuggestsAwaitingInput(tail string) bool {
 	}
 
 	return false
+}
+
+func normalizeAwaitingInputLine(line string) string {
+	trimmed := strings.TrimSpace(line)
+	trimmed = strings.Trim(trimmed, `"'`)
+	return strings.TrimSpace(trimmed)
 }

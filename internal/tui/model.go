@@ -2249,7 +2249,10 @@ func (m Model) decideApproval(decision controller.ApprovalDecision) (tea.Model, 
 	command := m.pendingApproval.Command
 	if decision == controller.DecisionApprove {
 		m.pendingApproval = nil
+		m.pendingProposal = nil
 		m.refiningApproval = nil
+		m.refiningProposal = nil
+		m.editingProposal = nil
 		m.syncActiveExecution(newLocalExecution(command, controller.CommandOriginAgentApproval))
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2397,13 +2400,11 @@ func (m *Model) syncActionState(events []controller.TranscriptEvent) {
 	}
 
 	newProposal := latestProposal(events)
-	if newProposal != nil {
+	if newProposal != nil && newApproval == nil {
 		m.pendingProposal = newProposal
 		m.refiningProposal = nil
 		m.editingProposal = nil
-		if newApproval == nil {
-			m.pendingApproval = nil
-		}
+		m.pendingApproval = nil
 	}
 
 	if m.approvalInFlight && !containsEventKind(events, controller.EventApproval) {

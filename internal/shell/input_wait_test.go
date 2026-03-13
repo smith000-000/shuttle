@@ -16,6 +16,13 @@ func TestTailSuggestsAwaitingInputDetectsPressAnyKey(t *testing.T) {
 	}
 }
 
+func TestTailSuggestsAwaitingInputDetectsTruncatedQuotedPressPrompt(t *testing.T) {
+	tail := `"Press`
+	if !TailSuggestsAwaitingInput(tail) {
+		t.Fatal("expected truncated quoted press prompt to be detected")
+	}
+}
+
 func TestTailSuggestsAwaitingInputIgnoresNormalOutput(t *testing.T) {
 	tail := "1\n2\n3\n4"
 	if TailSuggestsAwaitingInput(tail) {

@@ -82,6 +82,21 @@ func TestCommandTimeout(t *testing.T) {
 	}
 }
 
+func TestClassifyActiveMonitorStateTreatsInteractiveCommandAsAwaitingInput(t *testing.T) {
+	if got := classifyActiveMonitorState("btop", ""); got != MonitorStateAwaitingInput {
+		t.Fatalf("classifyActiveMonitorState(btop) = %s, want %s", got, MonitorStateAwaitingInput)
+	}
+}
+
+func TestAllowPromptReturnInferenceDisablesInteractiveCommands(t *testing.T) {
+	if allowPromptReturnInference("btop") {
+		t.Fatal("expected fullscreen interactive command to disable prompt-return inference")
+	}
+	if !allowPromptReturnInference("bash -lc 'sleep 5; echo ready'") {
+		t.Fatal("expected ordinary shell command to allow prompt-return inference")
+	}
+}
+
 func TestParseShellContextProbeOutput(t *testing.T) {
 	body := "__SHUTTLE_CTX_EXIT__=0\n__SHUTTLE_CTX_USER__=root\n__SHUTTLE_CTX_HOST__=web01\n__SHUTTLE_CTX_UNAME__=Linux 6.8\n__SHUTTLE_CTX_PWD__=/srv/app"
 
