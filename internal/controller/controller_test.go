@@ -352,6 +352,31 @@ func TestLocalControllerCheckActiveExecutionUsesAgentContext(t *testing.T) {
 	}
 }
 
+func TestLocalControllerCheckActiveExecutionPreservesAwaitingInputState(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "The command is waiting for input.",
+		},
+	}
+	controller := New(agent, nil, nil, SessionContext{TopPaneID: "%0"})
+	controller.task.CurrentExecution = &CommandExecution{
+		ID:               "cmd-agent",
+		Command:          "python3 -c \"input('name: ')\"",
+		Origin:           CommandOriginAgentProposal,
+		State:            CommandExecutionAwaitingInput,
+		StartedAt:        time.Now().Add(-15 * time.Second),
+		LatestOutputTail: "name:",
+	}
+
+	_, err := controller.CheckActiveExecution(context.Background())
+	if err != nil {
+		t.Fatalf("CheckActiveExecution() error = %v", err)
+	}
+	if agent.lastInput.Task.CurrentExecution == nil || agent.lastInput.Task.CurrentExecution.State != CommandExecutionAwaitingInput {
+		t.Fatalf("expected awaiting_input state to be preserved, got %#v", agent.lastInput.Task.CurrentExecution)
+	}
+}
+
 func TestLocalControllerMonitorUpdatesActiveExecutionTail(t *testing.T) {
 	monitor := newManualMonitor()
 	runner := &monitoringRunner{
@@ -393,6 +418,55 @@ func TestLocalControllerMonitorUpdatesActiveExecutionTail(t *testing.T) {
 		ExitCode:  0,
 		Captured:  "done",
 	}, nil)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for monitored command to finish")
+	}
+}
+
+func TestLocalControllerMonitorMapsAwaitingInputState(t *testing.T) {
+	monitor := newManualMonitor()
+	runner := &monitoringRunner{
+		monitor: monitor,
+		started: make(chan struct{}, 1),
+	}
+	controller := New(nil, runner, nil, SessionContext{TopPaneID: "%0"})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = controller.SubmitShellCommand(context.Background(), "python3 -c \"input('name: ')\"")
+	}()
+
+	runner.waitForStart(t)
+	monitor.publish(shell.MonitorSnapshot{
+		CommandID:        "cmd-monitor",
+		Command:          "python3 -c \"input('name: ')\"",
+		State:            shell.MonitorStateAwaitingInput,
+		StartedAt:        time.Now(),
+		LatestOutputTail: "name:",
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		active := controller.ActiveExecution()
+		if active != nil && active.State == CommandExecutionAwaitingInput && active.LatestOutputTail == "name:" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected active execution to enter awaiting_input, got %#v", active)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	monitor.finish(shell.TrackedExecution{
+		CommandID: "cmd-monitor",
+		Command:   "python3 -c \"input('name: ')\"",
+		ExitCode:  shell.InterruptedExitCode,
+		Captured:  "name:\n",
+	}, context.Canceled)
 
 	select {
 	case <-done:

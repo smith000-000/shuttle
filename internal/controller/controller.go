@@ -16,7 +16,7 @@ import (
 const autoContinuePrompt = "The previously approved or proposed command has completed. First summarize the result briefly. If there is an active plan, continue it from the current step. If there is no active plan, do not propose another command unless the user's request clearly still requires more shell work. For one-off commands, demos, or tests, prefer stopping after reporting the outcome. If another action is truly needed, propose it. If risky, request approval."
 const continuePlanPrompt = "Continue the active plan from the current step. Propose the next safe action if one is needed. If the next action is risky, request approval. If the plan is complete, answer briefly."
 const resumeAfterTakeControlPrompt = "The user temporarily took control of the shell to handle an interactive step such as a password prompt, remote login, or fullscreen terminal app. Reassess the latest shell state and continue the task. If another action is needed, propose it. If risky, request approval. If the task is complete, answer briefly."
-const activeExecutionCheckInPrompt = "An agent-started shell command is still running. Give a brief status update based only on facts visible in the latest shell output and command context. If there is no new output, say that no new shell output has appeared yet. Do not claim the command has completed or that the shell returned to a prompt unless the context shows that. Do not propose a new command, plan, or approval unless the shell is clearly blocked and needs user intervention; if so, say that the user should press F2 to take control."
+const activeExecutionCheckInPrompt = "An agent-started shell command is still active. Use the execution state and latest shell output to decide whether it is running normally or waiting for input. If there is no new output, say that no new shell output has appeared yet. Do not claim the command has completed or that the shell returned to a prompt unless the context shows that. Do not propose a new command, plan, or approval unless the shell is clearly blocked and needs user intervention; if so, say that the user should press F2 to take control."
 
 type ShellRunner interface {
 	RunTrackedCommand(ctx context.Context, paneID string, command string, timeout time.Duration) (shell.TrackedExecution, error)
@@ -146,7 +146,9 @@ func (c *LocalController) CheckActiveExecution(ctx context.Context) ([]Transcrip
 		return nil, nil
 	}
 
-	c.task.CurrentExecution.State = CommandExecutionBackgroundMonitor
+	if c.task.CurrentExecution.State != CommandExecutionAwaitingInput {
+		c.task.CurrentExecution.State = CommandExecutionBackgroundMonitor
+	}
 	session := c.session
 	task := c.task
 	recentOutput := strings.TrimSpace(c.task.CurrentExecution.LatestOutputTail)
@@ -165,7 +167,9 @@ func (c *LocalController) CheckActiveExecution(ctx context.Context) ([]Transcrip
 		c.mu.Unlock()
 		return nil, nil
 	}
-	c.task.CurrentExecution.State = CommandExecutionBackgroundMonitor
+	if c.task.CurrentExecution.State != CommandExecutionAwaitingInput {
+		c.task.CurrentExecution.State = CommandExecutionBackgroundMonitor
+	}
 	if strings.TrimSpace(recentOutput) != "" {
 		c.task.CurrentExecution.LatestOutputTail = recentOutput
 		c.session.RecentShellOutput = recentOutput
@@ -611,6 +615,10 @@ func (c *LocalController) applyMonitorSnapshot(executionID string, snapshot shel
 	case shell.MonitorStateRunning:
 		if execution.State != CommandExecutionHandoffActive && execution.State != CommandExecutionBackgroundMonitor {
 			execution.State = CommandExecutionRunning
+		}
+	case shell.MonitorStateAwaitingInput:
+		if execution.State != CommandExecutionHandoffActive {
+			execution.State = CommandExecutionAwaitingInput
 		}
 	case shell.MonitorStateCanceled:
 		execution.State = CommandExecutionCanceled

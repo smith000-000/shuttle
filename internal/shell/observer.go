@@ -164,7 +164,8 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 			return
 		}
 		lastCapture = captured
-		monitor.updateTail(monitorTail(captured, transportCommand))
+		tail := monitorTail(captured, transportCommand)
+		monitor.updateTail(tail)
 		if shellContext, ok := ParsePromptContextFromCapture(captured); ok {
 			monitor.updateShellContext(shellContext)
 		}
@@ -182,7 +183,6 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 		}
 		if !started && trackedCommandLikelyStarted(beforeCapture, captured) {
 			started = true
-			monitor.setState(MonitorStateRunning)
 			logging.Trace(
 				"shell.tracked.started_inferred",
 				"pane", paneID,
@@ -190,6 +190,9 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 				"command_id", markers.CommandID,
 				"delta_preview", logging.Preview(capturePaneDelta(beforeCapture, captured), 1000),
 			)
+		}
+		if started {
+			monitor.setState(classifyActiveMonitorState(tail))
 		}
 
 		result, complete, err := protocol.ParseCommandResult(captured, markers)
@@ -311,6 +314,13 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+}
+
+func classifyActiveMonitorState(tail string) MonitorState {
+	if TailSuggestsAwaitingInput(tail) {
+		return MonitorStateAwaitingInput
+	}
+	return MonitorStateRunning
 }
 
 func monitorStateFromError(err error) MonitorState {

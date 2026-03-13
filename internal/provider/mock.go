@@ -162,7 +162,7 @@ func summarizeActiveExecution(input controller.AgentInput) string {
 	}
 
 	lines := []string{
-		fmt.Sprintf("Still waiting on `%s`.", current.Command),
+		fmt.Sprintf("Active command `%s` is in state `%s`.", current.Command, current.State),
 	}
 
 	if trimmed := strings.TrimSpace(current.LatestOutputTail); trimmed != "" {
