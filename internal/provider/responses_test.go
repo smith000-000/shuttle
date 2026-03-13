@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -13,13 +12,13 @@ import (
 )
 
 func TestResponsesAgentRespondMapsStructuredOutput(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("expected POST, got %s", r.Method)
 		}
 
-		if r.URL.Path != "/v1/responses" {
-			t.Fatalf("expected /v1/responses, got %s", r.URL.Path)
+		if r.URL.String() != "https://provider.test/v1/responses" {
+			t.Fatalf("expected provider responses endpoint, got %q", r.URL.String())
 		}
 
 		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
@@ -49,7 +48,7 @@ func TestResponsesAgentRespondMapsStructuredOutput(t *testing.T) {
 			t.Fatalf("expected json_schema format, got %#v", text["format"])
 		}
 
-		io.WriteString(w, `{
+		return jsonResponse(http.StatusOK, `{
 			"id":"resp_123",
 			"object":"response",
 			"output":[
@@ -63,19 +62,18 @@ func TestResponsesAgentRespondMapsStructuredOutput(t *testing.T) {
 					]
 				}
 			]
-		}`)
-	}))
-	defer server.Close()
+		}`), nil
+	})}
 
 	agent, err := NewResponsesAgent(Profile{
 		BackendFamily: BackendResponsesHTTP,
 		Preset:        PresetOpenAI,
 		AuthMethod:    AuthAPIKey,
-		BaseURL:       server.URL + "/v1",
+		BaseURL:       "https://provider.test/v1",
 		Model:         "gpt-5-nano-2025-08-07",
 		APIKey:        "test-key",
 		APIKeyEnvVar:  "OPENAI_API_KEY",
-	}, server.Client())
+	}, client)
 	if err != nil {
 		t.Fatalf("NewResponsesAgent() error = %v", err)
 	}
@@ -94,36 +92,31 @@ func TestResponsesAgentRespondMapsStructuredOutput(t *testing.T) {
 	if response.Message != "I can inspect the current directory." {
 		t.Fatalf("expected message, got %q", response.Message)
 	}
-
 	if response.Proposal == nil {
 		t.Fatal("expected command proposal")
 	}
-
 	if response.Proposal.Kind != controller.ProposalCommand {
 		t.Fatalf("expected command proposal, got %s", response.Proposal.Kind)
 	}
-
 	if response.Proposal.Command != "ls -lah" {
 		t.Fatalf("expected ls -lah, got %q", response.Proposal.Command)
 	}
 }
 
 func TestResponsesAgentReturnsProviderErrors(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		io.WriteString(w, `{"error":{"message":"bad API key"}}`)
-	}))
-	defer server.Close()
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(http.StatusUnauthorized, `{"error":{"message":"bad API key"}}`), nil
+	})}
 
 	agent, err := NewResponsesAgent(Profile{
 		BackendFamily: BackendResponsesHTTP,
 		Preset:        PresetOpenAI,
 		AuthMethod:    AuthAPIKey,
-		BaseURL:       server.URL + "/v1",
+		BaseURL:       "https://provider.test/v1",
 		Model:         "gpt-5-nano-2025-08-07",
 		APIKey:        "bad-key",
 		APIKeyEnvVar:  "OPENAI_API_KEY",
-	}, server.Client())
+	}, client)
 	if err != nil {
 		t.Fatalf("NewResponsesAgent() error = %v", err)
 	}
@@ -139,8 +132,8 @@ func TestResponsesAgentReturnsProviderErrors(t *testing.T) {
 }
 
 func TestResponsesAgentMapsApprovalAndPlan(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(http.StatusOK, `{
 			"output":[
 				{
 					"type":"message",
@@ -152,19 +145,18 @@ func TestResponsesAgentMapsApprovalAndPlan(t *testing.T) {
 					]
 				}
 			]
-		}`)
-	}))
-	defer server.Close()
+		}`), nil
+	})}
 
 	agent, err := NewResponsesAgent(Profile{
 		BackendFamily: BackendResponsesHTTP,
 		Preset:        PresetOpenAI,
 		AuthMethod:    AuthAPIKey,
-		BaseURL:       server.URL + "/v1",
+		BaseURL:       "https://provider.test/v1",
 		Model:         "gpt-5-nano-2025-08-07",
 		APIKey:        "test-key",
 		APIKeyEnvVar:  "OPENAI_API_KEY",
-	}, server.Client())
+	}, client)
 	if err != nil {
 		t.Fatalf("NewResponsesAgent() error = %v", err)
 	}
@@ -179,20 +171,31 @@ func TestResponsesAgentMapsApprovalAndPlan(t *testing.T) {
 	if response.Plan == nil || len(response.Plan.Steps) != 2 {
 		t.Fatalf("expected plan with 2 steps, got %#v", response.Plan)
 	}
-
 	if response.Approval == nil {
 		t.Fatal("expected approval request")
 	}
-
 	if response.Approval.Kind != controller.ApprovalCommand {
 		t.Fatalf("expected command approval, got %s", response.Approval.Kind)
 	}
-
 	if response.Approval.Risk != controller.RiskHigh {
 		t.Fatalf("expected high risk, got %s", response.Approval.Risk)
 	}
-
 	if response.Approval.ID == "" {
 		t.Fatal("expected generated approval ID")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
+
+func jsonResponse(statusCode int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: statusCode,
+		Status:     http.StatusText(statusCode),
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
 	}
 }

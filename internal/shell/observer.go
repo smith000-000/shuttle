@@ -19,6 +19,8 @@ type TrackedExecution struct {
 	CommandID    string
 	Command      string
 	State        MonitorState
+	Cause        CompletionCause
+	Confidence   SignalConfidence
 	ExitCode     int
 	Captured     string
 	ShellContext PromptContext
@@ -191,6 +193,8 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 		}
 
 		result, complete, err := protocol.ParseCommandResult(captured, markers)
+		cause := CompletionCauseEndMarker
+		confidence := ConfidenceStrong
 		if err != nil {
 			logging.TraceError(
 				"shell.tracked.parse_error",
@@ -205,6 +209,10 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 		}
 		if !complete {
 			result, complete, err = inferTrackedCommandResultFromEndMarker(captured, beforeCapture, transportCommand, markers)
+			if complete {
+				cause = CompletionCauseEndMarkerInferred
+				confidence = ConfidenceMedium
+			}
 			if err != nil {
 				logging.TraceError(
 					"shell.tracked.inferred_parse_error",
@@ -236,6 +244,8 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 			monitor.finish(TrackedExecution{
 				CommandID:    result.CommandID,
 				Command:      command,
+				Cause:        cause,
+				Confidence:   confidence,
 				ExitCode:     result.ExitCode,
 				Captured:     cleanBody,
 				ShellContext: shellContext,
@@ -262,6 +272,8 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 				monitor.finish(TrackedExecution{
 					CommandID:    markers.CommandID,
 					Command:      command,
+					Cause:        CompletionCausePromptReturn,
+					Confidence:   ConfidenceMedium,
 					ExitCode:     InterruptedExitCode,
 					Captured:     cleanBody,
 					ShellContext: promptContext,
@@ -506,6 +518,8 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID strin
 	return TrackedExecution{
 		CommandID:    commandID,
 		Command:      command,
+		Cause:        CompletionCauseContextTransition,
+		Confidence:   ConfidenceMedium,
 		ExitCode:     exitCode,
 		Captured:     delta,
 		ShellContext: promptContext,

@@ -497,6 +497,8 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 			Command:     result.Command,
 			Origin:      origin,
 			State:       CommandExecutionCanceled,
+			Cause:       result.Cause,
+			Confidence:  result.Confidence,
 			ExitCode:    result.ExitCode,
 			Summary:     result.Captured,
 		}
@@ -540,6 +542,8 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 		Command:     result.Command,
 		Origin:      origin,
 		State:       CommandExecutionCompleted,
+		Cause:       result.Cause,
+		Confidence:  result.Confidence,
 		ExitCode:    result.ExitCode,
 		Summary:     result.Captured,
 	}

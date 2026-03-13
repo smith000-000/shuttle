@@ -8,6 +8,24 @@ import (
 
 type MonitorState string
 
+type CompletionCause string
+
+const (
+	CompletionCauseUnknown           CompletionCause = "unknown"
+	CompletionCauseEndMarker         CompletionCause = "end_marker"
+	CompletionCauseEndMarkerInferred CompletionCause = "end_marker_inferred"
+	CompletionCausePromptReturn      CompletionCause = "prompt_return"
+	CompletionCauseContextTransition CompletionCause = "context_transition"
+)
+
+type SignalConfidence string
+
+const (
+	ConfidenceStrong SignalConfidence = "strong"
+	ConfidenceMedium SignalConfidence = "medium"
+	ConfidenceLow    SignalConfidence = "low"
+)
+
 const (
 	MonitorStateQueued    MonitorState = "queued"
 	MonitorStateRunning   MonitorState = "running"

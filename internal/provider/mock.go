@@ -132,14 +132,20 @@ func summarizeRecentContext(input controller.AgentInput) string {
 				input.Task.LastCommandResult.ExitCode,
 			))
 		}
+		if input.Task.LastCommandResult.Cause != "" || input.Task.LastCommandResult.Confidence != "" {
+			meta := []string{}
+			if input.Task.LastCommandResult.Cause != "" {
+				meta = append(meta, "cause="+string(input.Task.LastCommandResult.Cause))
+			}
+			if input.Task.LastCommandResult.Confidence != "" {
+				meta = append(meta, "confidence="+string(input.Task.LastCommandResult.Confidence))
+			}
+			parts = append(parts, "Result metadata: "+strings.Join(meta, ", "))
+		}
 	}
 
 	if trimmed := strings.TrimSpace(input.Session.RecentShellOutput); trimmed != "" {
-		lines := strings.Split(trimmed, "\n")
-		if len(lines) > 4 {
-			lines = lines[len(lines)-4:]
-		}
-		parts = append(parts, "Recent shell output:\n"+strings.Join(lines, "\n"))
+		parts = append(parts, "Recent shell output:\n"+compactShellOutput(trimmed, 2, 2, 400))
 	}
 
 	if len(parts) == 0 {
@@ -160,11 +166,7 @@ func summarizeActiveExecution(input controller.AgentInput) string {
 	}
 
 	if trimmed := strings.TrimSpace(current.LatestOutputTail); trimmed != "" {
-		tailLines := strings.Split(trimmed, "\n")
-		if len(tailLines) > 3 {
-			tailLines = tailLines[len(tailLines)-3:]
-		}
-		lines = append(lines, "Latest shell output:\n"+strings.Join(tailLines, "\n"))
+		lines = append(lines, "Latest shell output:\n"+compactShellOutput(trimmed, 2, 2, 400))
 	}
 
 	return strings.Join(lines, "\n\n")

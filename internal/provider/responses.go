@@ -415,6 +415,7 @@ func extractResponseText(response responsesAPIResponse) (string, error) {
 func buildTurnContext(input controller.AgentInput) string {
 	sections := make([]string, 0, 5)
 	sections = append(sections, "User prompt:\n"+strings.TrimSpace(input.Prompt))
+	seenSnippets := make(map[string]struct{})
 
 	sessionLines := []string{}
 	if input.Session.CurrentShell != nil && strings.TrimSpace(input.Session.CurrentShell.PromptLine()) != "" {
@@ -439,8 +440,9 @@ func buildTurnContext(input controller.AgentInput) string {
 		sections = append(sections, "Session:\n"+strings.Join(sessionLines, "\n"))
 	}
 
-	if trimmed := strings.TrimSpace(input.Session.RecentShellOutput); trimmed != "" {
-		sections = append(sections, "Recent shell output:\n"+clipText(trimmed, 2000))
+	recentOutput := compactShellOutput(input.Session.RecentShellOutput, 8, 4, 1200)
+	if shouldIncludeContextSnippet(seenSnippets, recentOutput) {
+		sections = append(sections, "Recent shell output:\n"+recentOutput)
 	}
 
 	if input.Task.LastCommandResult != nil {
@@ -449,7 +451,15 @@ func buildTurnContext(input controller.AgentInput) string {
 			"command=" + last.Command,
 			"state=" + string(last.State),
 			fmt.Sprintf("exit_code=%d", last.ExitCode),
-			"summary=" + clipText(last.Summary, 800),
+		}
+		if last.Cause != "" {
+			lines = append(lines, "cause="+string(last.Cause))
+		}
+		if last.Confidence != "" {
+			lines = append(lines, "confidence="+string(last.Confidence))
+		}
+		if summary := compactShellOutput(last.Summary, 8, 4, 800); shouldIncludeContextSnippet(seenSnippets, summary) {
+			lines = append(lines, "summary="+summary)
 		}
 		sections = append(sections, "Last command result:\n"+strings.Join(lines, "\n"))
 	}
@@ -462,7 +472,7 @@ func buildTurnContext(input controller.AgentInput) string {
 			"origin=" + string(current.Origin),
 			"state=" + string(current.State),
 		}
-		if tail := clipText(current.LatestOutputTail, 800); tail != "" {
+		if tail := compactShellOutput(current.LatestOutputTail, 6, 3, 600); shouldIncludeContextSnippet(seenSnippets, tail) {
 			lines = append(lines, "latest_output="+tail)
 		}
 		sections = append(sections, "Current active command:\n"+strings.Join(lines, "\n"))

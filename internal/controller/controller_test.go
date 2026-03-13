@@ -119,11 +119,13 @@ func TestLocalControllerSubmitShellCommand(t *testing.T) {
 func TestLocalControllerSubmitShellCommandCanceledReturnsResultEvent(t *testing.T) {
 	controller := New(nil, &stubRunner{
 		result: shell.TrackedExecution{
-			CommandID: "cmd-1",
-			Command:   "sleep 60",
-			State:     shell.MonitorStateCanceled,
-			ExitCode:  shell.InterruptedExitCode,
-			Captured:  "^C\njsmith@host % ",
+			CommandID:  "cmd-1",
+			Command:    "sleep 60",
+			State:      shell.MonitorStateCanceled,
+			Cause:      shell.CompletionCausePromptReturn,
+			Confidence: shell.ConfidenceMedium,
+			ExitCode:   shell.InterruptedExitCode,
+			Captured:   "^C\njsmith@host % ",
 		},
 	}, nil, SessionContext{TopPaneID: "%0"})
 
@@ -145,6 +147,12 @@ func TestLocalControllerSubmitShellCommandCanceledReturnsResultEvent(t *testing.
 	}
 	if resultPayload.State != CommandExecutionCanceled {
 		t.Fatalf("expected canceled result state, got %q", resultPayload.State)
+	}
+	if resultPayload.Cause != shell.CompletionCausePromptReturn {
+		t.Fatalf("expected prompt-return cause, got %q", resultPayload.Cause)
+	}
+	if resultPayload.Confidence != shell.ConfidenceMedium {
+		t.Fatalf("expected medium confidence, got %q", resultPayload.Confidence)
 	}
 	if resultPayload.ExitCode != shell.InterruptedExitCode {
 		t.Fatalf("expected interrupted exit code, got %d", resultPayload.ExitCode)

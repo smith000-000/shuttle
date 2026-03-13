@@ -178,6 +178,8 @@ type CommandResultSummary struct {
 	Command      string
 	Origin       CommandOrigin
 	State        CommandExecutionState
+	Cause        shell.CompletionCause
+	Confidence   shell.SignalConfidence
 	ExitCode     int
 	Summary      string
 	ShellContext *shell.PromptContext
