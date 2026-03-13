@@ -388,7 +388,7 @@ func TestLocalControllerCheckActiveExecutionUsesAgentContext(t *testing.T) {
 		t.Fatalf("unexpected check-in events: %#v", events)
 	}
 	if agent.lastInput.Prompt != activeExecutionCheckInPrompt {
-		t.Fatalf("expected check-in prompt, got %q", agent.lastInput.Prompt)
+		t.Fatalf("expected running check-in prompt, got %q", agent.lastInput.Prompt)
 	}
 	if agent.lastInput.Task.CurrentExecution == nil || agent.lastInput.Task.CurrentExecution.State != CommandExecutionBackgroundMonitor {
 		t.Fatalf("expected background monitoring state, got %#v", agent.lastInput.Task.CurrentExecution)
@@ -418,6 +418,9 @@ func TestLocalControllerCheckActiveExecutionPreservesAwaitingInputState(t *testi
 	if err != nil {
 		t.Fatalf("CheckActiveExecution() error = %v", err)
 	}
+	if agent.lastInput.Prompt != awaitingInputCheckInPrompt {
+		t.Fatalf("expected awaiting-input prompt, got %q", agent.lastInput.Prompt)
+	}
 	if agent.lastInput.Task.CurrentExecution == nil || agent.lastInput.Task.CurrentExecution.State != CommandExecutionAwaitingInput {
 		t.Fatalf("expected awaiting_input state to be preserved, got %#v", agent.lastInput.Task.CurrentExecution)
 	}
@@ -446,11 +449,42 @@ func TestLocalControllerCheckActiveExecutionPreservesInteractiveFullscreenState(
 	if err != nil {
 		t.Fatalf("CheckActiveExecution() error = %v", err)
 	}
+	if agent.lastInput.Prompt != fullscreenCheckInPrompt {
+		t.Fatalf("expected fullscreen prompt, got %q", agent.lastInput.Prompt)
+	}
 	if agent.lastInput.Task.CurrentExecution == nil || agent.lastInput.Task.CurrentExecution.State != CommandExecutionInteractiveFullscreen {
 		t.Fatalf("expected interactive_fullscreen state to be preserved, got %#v", agent.lastInput.Task.CurrentExecution)
 	}
 	if agent.lastInput.Task.RecoverySnapshot != "fullscreen snapshot" {
 		t.Fatalf("expected fullscreen recovery snapshot, got %q", agent.lastInput.Task.RecoverySnapshot)
+	}
+}
+
+func TestLocalControllerCheckActiveExecutionUsesLostPrompt(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "Tracking confidence is low.",
+		},
+	}
+	controller := New(agent, nil, &stubContextReader{snapshot: "recovery lines"}, SessionContext{TopPaneID: "%0"})
+	controller.task.CurrentExecution = &CommandExecution{
+		ID:               "cmd-agent",
+		Command:          "unknown",
+		Origin:           CommandOriginAgentProposal,
+		State:            CommandExecutionLost,
+		StartedAt:        time.Now().Add(-15 * time.Second),
+		LatestOutputTail: "weird output",
+	}
+
+	_, err := controller.CheckActiveExecution(context.Background())
+	if err != nil {
+		t.Fatalf("CheckActiveExecution() error = %v", err)
+	}
+	if agent.lastInput.Prompt != lostTrackingCheckInPrompt {
+		t.Fatalf("expected lost prompt, got %q", agent.lastInput.Prompt)
+	}
+	if agent.lastInput.Task.RecoverySnapshot != "recovery lines" {
+		t.Fatalf("expected recovery snapshot, got %q", agent.lastInput.Task.RecoverySnapshot)
 	}
 }
 
@@ -475,12 +509,13 @@ func TestLocalControllerMonitorUpdatesActiveExecutionTail(t *testing.T) {
 		State:            shell.MonitorStateRunning,
 		StartedAt:        time.Now(),
 		LatestOutputTail: "still running",
+		ForegroundCommand: "sleep",
 	})
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		active := controller.ActiveExecution()
-		if active != nil && active.LatestOutputTail == "still running" && active.State == CommandExecutionRunning {
+		if active != nil && active.LatestOutputTail == "still running" && active.State == CommandExecutionRunning && active.ForegroundCommand == "sleep" {
 			break
 		}
 		if time.Now().After(deadline) {

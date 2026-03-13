@@ -404,6 +404,12 @@ This should improve:
   - did control likely return to a prompt
   - is tracking confidence low enough that Shuttle should mark the execution `lost`
 
+Status:
+- implemented in first form
+- ambiguous execution states now feed a dedicated recovery snapshot into agent context
+- agent check-ins are state-aware for `awaiting_input`, `interactive_fullscreen`, and `lost`
+- remaining work is to make monitor-side classification more confident so fewer cases fall back to low-confidence recovery
+
 ### Phase 6. Runtime Durability
 - align with the runtime-management design
 - keep tracked executions recoverable across Shuttle restarts

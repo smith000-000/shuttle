@@ -95,26 +95,47 @@ func TestCommandTimeout(t *testing.T) {
 }
 
 func TestClassifyActiveMonitorStateTreatsInteractiveCommandAsAwaitingInput(t *testing.T) {
-	if got := classifyActiveMonitorState("sudo ls", "[sudo] password for jsmith:", false); got != MonitorStateAwaitingInput {
+	if got := classifyActiveMonitorState("sudo ls", "[sudo] password for jsmith:", false, "sudo"); got != MonitorStateAwaitingInput {
 		t.Fatalf("classifyActiveMonitorState(sudo ls) = %s, want %s", got, MonitorStateAwaitingInput)
 	}
 }
 
 func TestClassifyActiveMonitorStateTreatsAlternateScreenAsInteractiveFullscreen(t *testing.T) {
-	if got := classifyActiveMonitorState("wrapped-btop", "", true); got != MonitorStateInteractiveFullscreen {
+	if got := classifyActiveMonitorState("wrapped-btop", "", true, "btop"); got != MonitorStateInteractiveFullscreen {
 		t.Fatalf("classifyActiveMonitorState(alternate screen) = %s, want %s", got, MonitorStateInteractiveFullscreen)
 	}
 }
 
 func TestAllowPromptReturnInferenceDisablesInteractiveCommands(t *testing.T) {
-	if allowPromptReturnInference("btop", false) {
+	if allowPromptReturnInference("btop", false, "btop") {
 		t.Fatal("expected fullscreen interactive command to disable prompt-return inference")
 	}
-	if allowPromptReturnInference("wrapped-btop", true) {
+	if allowPromptReturnInference("wrapped-btop", true, "btop") {
 		t.Fatal("expected alternate-screen command to disable prompt-return inference")
 	}
-	if !allowPromptReturnInference("bash -lc 'sleep 5; echo ready'", false) {
+	if !allowPromptReturnInference("bash -lc 'sleep 5; echo ready'", false, "zsh") {
 		t.Fatal("expected ordinary shell command to allow prompt-return inference")
+	}
+}
+
+func TestAllowPromptReturnInferenceDisablesNonShellPaneCommands(t *testing.T) {
+	if allowPromptReturnInference("bash -lc 'sleep 5; echo ready'", false, "nano") {
+		t.Fatal("expected non-shell foreground command to disable prompt-return inference")
+	}
+}
+
+func TestAllowPromptReturnInferenceAllowsRemoteTransportPaneCommands(t *testing.T) {
+	if !allowPromptReturnInference("bash -lc 'sleep 5; echo ready'", false, "ssh") {
+		t.Fatal("expected ssh pane command to allow prompt-return inference for remote shell reconciliation")
+	}
+}
+
+func TestPaneCommandIsShell(t *testing.T) {
+	if !paneCommandIsShell("zsh") {
+		t.Fatal("expected zsh to be treated as shell")
+	}
+	if paneCommandIsShell("nano") {
+		t.Fatal("expected nano not to be treated as shell")
 	}
 }
 

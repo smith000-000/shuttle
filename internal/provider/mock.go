@@ -161,12 +161,34 @@ func summarizeActiveExecution(input controller.AgentInput) string {
 		return "I no longer see an active command."
 	}
 
-	lines := []string{
-		fmt.Sprintf("Active command `%s` is in state `%s`.", current.Command, current.State),
+	var lines []string
+	switch current.State {
+	case controller.CommandExecutionAwaitingInput:
+		lines = []string{
+			fmt.Sprintf("Active command `%s` is waiting for shell input.", current.Command),
+			"The user should press F2 to take control. If only a small raw key sequence is needed, KEYS> may help.",
+		}
+	case controller.CommandExecutionInteractiveFullscreen:
+		lines = []string{
+			fmt.Sprintf("Active command `%s` is occupying a fullscreen terminal app.", current.Command),
+			"The user should press F2 to take control. KEYS> may help for simple raw key sequences.",
+		}
+	case controller.CommandExecutionLost:
+		lines = []string{
+			fmt.Sprintf("Tracking confidence for active command `%s` is low.", current.Command),
+			"The user should inspect the shell with F2 to recover ground truth.",
+		}
+	default:
+		lines = []string{
+			fmt.Sprintf("Active command `%s` is in state `%s`.", current.Command, current.State),
+		}
 	}
 
 	if trimmed := strings.TrimSpace(current.LatestOutputTail); trimmed != "" {
 		lines = append(lines, "Latest shell output:\n"+compactShellOutput(trimmed, 2, 2, 400))
+	}
+	if trimmed := strings.TrimSpace(input.Task.RecoverySnapshot); trimmed != "" {
+		lines = append(lines, "Recovery snapshot:\n"+compactShellOutput(trimmed, 3, 3, 800))
 	}
 
 	return strings.Join(lines, "\n\n")

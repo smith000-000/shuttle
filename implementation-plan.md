@@ -31,6 +31,7 @@ Milestone 5 still needs:
 - guardrails that prevent the agent from claiming proposed files exist before the patch is applied
 - stronger active-command classification such as `awaiting_input` and `lost`, so agent check-ins and the UI can distinguish a waiting shell from a merely slow command
 - pane-stream/fullscreen detection so aliases, wrappers, and remote fullscreen apps can be recognized from terminal behavior instead of command-name lists
+- richer state-aware agent recovery guidance so ambiguous shell takeovers are explained from a larger recovery snapshot instead of only a tiny live tail
 
 ## Guiding Decisions
 - Build `P0` only first. That means Epics 1 through 4 in [requirements-mvp.md](requirements-mvp.md).
@@ -205,6 +206,7 @@ Next:
 - After the current `awaiting_input` work, the next execution-monitor slice should add pane-stream/fullscreen detection in the same redesign track rather than as a separate feature branch.
 - That slice should prefer terminal behavior over command names so aliases, functions, and wrapped fullscreen apps do not regress back into weak prompt-return heuristics.
 - After fullscreen detection, add an explicit recovery-snapshot path so ambiguous shell takeovers can be fed back into the agent using a larger terminal page dump plus execution confidence metadata instead of only a tiny shell tail.
+- Recovery snapshots and state-aware agent check-ins are now implemented in a first pass; the next step is to improve monitor-side confidence so more ambiguous states are classified correctly before they reach the agent.
 
 Framework and ACP guidance: [agent-runtime-design.md](agent-runtime-design.md)
 Detailed provider decomposition: [provider-integration-design.md](provider-integration-design.md)

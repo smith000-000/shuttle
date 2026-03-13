@@ -3,8 +3,10 @@ package provider
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"aiterm/internal/controller"
+	"aiterm/internal/shell"
 )
 
 func TestCompactShellOutputCompactsHeadAndTail(t *testing.T) {
@@ -79,5 +81,48 @@ func TestBuildTurnContextIncludesRecoverySnapshot(t *testing.T) {
 
 	if !strings.Contains(context, "Recovery terminal snapshot:\nline 1\nline 2\nline 3") {
 		t.Fatalf("expected recovery snapshot section, got %q", context)
+	}
+}
+
+func TestBuildTurnContextIncludesExecutionMetadata(t *testing.T) {
+	before := shell.PromptContext{
+		User:         "jsmith",
+		Host:         "linuxdesktop",
+		Directory:    "~/repo",
+		PromptSymbol: "%",
+	}
+	after := shell.PromptContext{
+		User:         "openclaw",
+		Host:         "openclaw",
+		Directory:    "~",
+		PromptSymbol: "$",
+		Remote:       true,
+	}
+	context := buildTurnContext(controller.AgentInput{
+		Prompt: "what is going on",
+		Task: controller.TaskContext{
+			CurrentExecution: &controller.CommandExecution{
+				ID:                 "cmd-1",
+				Command:            "ssh openclaw@openclaw",
+				State:              controller.CommandExecutionAwaitingInput,
+				ForegroundCommand:  "ssh",
+				StartedAt:          time.Now().Add(-12 * time.Second),
+				ShellContextBefore: &before,
+				ShellContextAfter:  &after,
+			},
+		},
+	})
+
+	if !strings.Contains(context, "foreground_command=ssh") {
+		t.Fatalf("expected foreground command metadata, got %q", context)
+	}
+	if !strings.Contains(context, "elapsed_seconds=") {
+		t.Fatalf("expected elapsed_seconds metadata, got %q", context)
+	}
+	if !strings.Contains(context, "prompt_before=jsmith@linuxdesktop ~/repo %") {
+		t.Fatalf("expected prompt_before metadata, got %q", context)
+	}
+	if !strings.Contains(context, "prompt_after=openclaw@openclaw ~ $") {
+		t.Fatalf("expected prompt_after metadata, got %q", context)
 	}
 }

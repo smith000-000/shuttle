@@ -472,6 +472,18 @@ func buildTurnContext(input controller.AgentInput) string {
 			"origin=" + string(current.Origin),
 			"state=" + string(current.State),
 		}
+		if strings.TrimSpace(current.ForegroundCommand) != "" {
+			lines = append(lines, "foreground_command="+current.ForegroundCommand)
+		}
+		if !current.StartedAt.IsZero() {
+			lines = append(lines, fmt.Sprintf("elapsed_seconds=%d", int(time.Since(current.StartedAt).Seconds())))
+		}
+		if current.ShellContextBefore != nil && strings.TrimSpace(current.ShellContextBefore.PromptLine()) != "" {
+			lines = append(lines, "prompt_before="+current.ShellContextBefore.PromptLine())
+		}
+		if current.ShellContextAfter != nil && strings.TrimSpace(current.ShellContextAfter.PromptLine()) != "" {
+			lines = append(lines, "prompt_after="+current.ShellContextAfter.PromptLine())
+		}
 		if tail := compactShellOutput(current.LatestOutputTail, 6, 3, 600); shouldIncludeContextSnippet(seenSnippets, tail) {
 			lines = append(lines, "latest_output="+tail)
 		}
@@ -700,5 +712,9 @@ Rules:
 - For approvals, set "approval_kind" to "command", "patch", or "plan" and set "approval_risk" to "low", "medium", or "high".
 - If the task is a refinement of a pending approval, preserve the original command or patch unless the context clearly requires changing it.
 - If the current turn says an active command is still running, use "message" for a brief status update. Do not emit a plan, proposal, or approval unless the shell is clearly waiting for user intervention.
+- If the current active command state is "awaiting_input", explain what input is likely needed from the shell output or recovery snapshot and tell the user to press F2 to take control. Mention KEYS> only when a small raw keystroke sequence would likely help.
+- If the current active command state is "interactive_fullscreen", explain that a fullscreen terminal app currently owns the pane and tell the user to press F2 to take control. Do not suggest unrelated shell commands while that app is active.
+- If the current active command state is "lost", explain that tracking confidence is low, use the recovery snapshot to infer what likely happened, and avoid claiming completion unless the context clearly proves it.
+- If a recovery terminal snapshot is present, use it to reason about the current terminal state. Prefer actionable recovery guidance over abstract commentary.
 - After a proposed or approved command completes, if there is no active plan, default to summarizing the result and waiting for the user. Only chain into another command when the user's request clearly requires more shell work.
 - Leave unused fields as empty strings, and leave unused arrays empty.`

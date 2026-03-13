@@ -133,6 +133,7 @@ type Model struct {
 	lastFullscreenKeysAt  time.Time
 	checkInInFlight       bool
 	lastCheckInAt         time.Time
+	lastInterruptNoticeID string
 	styles                styles
 }
 
@@ -400,7 +401,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastFullscreenKeysAt = time.Now()
 			m.entries = append(m.entries, Entry{
 				Title: "system",
-				Body:  "Sent keys to fullscreen app: " + previewFullscreenKeys(msg.keys),
+				Body:  "Sent keys to active terminal app: " + previewFullscreenKeys(msg.keys),
 			})
 		}
 		if pinned {
@@ -462,6 +463,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.setInput("")
 			return m, nil
 		case tea.KeyTab:
+			if m.sendingFullscreenKeys {
+				return m, nil
+			}
 			if m.composerLocked() {
 				return m, nil
 			}
@@ -477,6 +481,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selectPreviousEntry()
 				return m, nil
 			}
+			if m.sendingFullscreenKeys {
+				return m, nil
+			}
 			if m.composerLocked() {
 				return m, nil
 			}
@@ -487,18 +494,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selectNextEntry()
 				return m, nil
 			}
+			if m.sendingFullscreenKeys {
+				return m, nil
+			}
 			if m.composerLocked() {
 				return m, nil
 			}
 			m.setInput(m.currentHistory().next(m.input))
 			return m, nil
 		case tea.KeyLeft:
+			if m.sendingFullscreenKeys {
+				m.moveCursor(-1)
+				return m, nil
+			}
 			if m.composerLocked() {
 				return m, nil
 			}
 			m.moveCursor(-1)
 			return m, nil
 		case tea.KeyRight:
+			if m.sendingFullscreenKeys {
+				m.moveCursor(1)
+				return m, nil
+			}
 			if m.composerLocked() {
 				return m, nil
 			}
@@ -527,7 +545,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlG:
 			return m.primaryAction()
 		case tea.KeyCtrlJ:
-			if m.composerLocked() {
+			if !m.sendingFullscreenKeys && m.composerLocked() {
 				return m, nil
 			}
 			m.insertTextAtCursor("\n")
@@ -552,23 +570,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case tea.KeyEnter:
-			if m.composerLocked() {
+			if !m.sendingFullscreenKeys && m.composerLocked() {
 				return m, nil
 			}
 			return m.submit()
 		case tea.KeyBackspace:
+			if m.sendingFullscreenKeys {
+				m.backspaceAtCursor()
+				return m, nil
+			}
 			if m.composerLocked() {
 				return m, nil
 			}
 			m.backspaceAtCursor()
 			return m, nil
 		case tea.KeyDelete:
+			if m.sendingFullscreenKeys {
+				m.deleteAtCursor()
+				return m, nil
+			}
 			if m.composerLocked() {
 				return m, nil
 			}
 			m.deleteAtCursor()
 			return m, nil
 		case tea.KeySpace:
+			if m.sendingFullscreenKeys {
+				m.insertTextAtCursor(" ")
+				return m, nil
+			}
 			if m.composerLocked() {
 				return m, nil
 			}
@@ -577,12 +607,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			if !msg.Alt && msg.Type == tea.KeyRunes {
 				if len(msg.Runes) == 1 && (msg.Runes[0] == '\r' || msg.Runes[0] == '\n') {
-					if m.composerLocked() {
+					if !m.sendingFullscreenKeys && m.composerLocked() {
 						return m, nil
 					}
 					return m.submit()
 				}
-				if len(msg.Runes) == 1 && unicode.ToUpper(msg.Runes[0]) == 'S' && m.canSendFullscreenKeys() && strings.TrimSpace(m.input) == "" {
+				if len(msg.Runes) == 1 && unicode.ToUpper(msg.Runes[0]) == 'S' && m.canSendActiveKeys() && strings.TrimSpace(m.input) == "" {
 					m.sendingFullscreenKeys = true
 					m.setInput("")
 					return m, nil
@@ -610,7 +640,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 					}
 				}
-				if m.composerLocked() {
+				if !m.sendingFullscreenKeys && m.composerLocked() {
 					return m, nil
 				}
 				m.insertTextAtCursor(string(msg.Runes))
@@ -1024,33 +1054,11 @@ func (m Model) interruptInFlight() (tea.Model, tea.Cmd) {
 	)
 	if m.activeExecution != nil && m.takeControl.enabled() {
 		if m.activeExecution.State == controller.CommandExecutionInteractiveFullscreen {
-			pinned := m.isTranscriptPinned()
-			m.entries = append(m.entries, Entry{
-				Title: "system",
-				Body:  "Fullscreen app is still active. Use F2 to take control and exit it manually, or use KEYS> to send input.",
-			})
-			if pinned {
-				m.scrollTranscriptToBottom()
-			} else {
-				m.clampTranscriptScroll()
-			}
-			m.selectedEntry = len(m.entries) - 1
-			m.clampSelection()
+			m.appendInterruptNotice("Fullscreen app is still active. Use F2 to take control and exit it manually, or use KEYS> to send input.")
 			return m, nil
 		}
 		if !m.canAttemptLocalInterrupt() {
-			pinned := m.isTranscriptPinned()
-			m.entries = append(m.entries, Entry{
-				Title: "system",
-				Body:  "Active command is not confirmed local. Use F2 to take control and interrupt it manually.",
-			})
-			if pinned {
-				m.scrollTranscriptToBottom()
-			} else {
-				m.clampTranscriptScroll()
-			}
-			m.selectedEntry = len(m.entries) - 1
-			m.clampSelection()
+			m.appendInterruptNotice("Active command is not confirmed local. Use F2 to take control and interrupt it manually.")
 			return m, nil
 		}
 		m.showShellTail = true
@@ -1300,6 +1308,7 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 		m.lastFullscreenKeysAt = time.Time{}
 		m.checkInInFlight = false
 		m.lastCheckInAt = time.Time{}
+		m.lastInterruptNoticeID = ""
 		m.handoffVisible = false
 		m.handoffPriorState = ""
 		return
@@ -1310,6 +1319,7 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 		m.lastFullscreenKeysAt = time.Time{}
 		m.checkInInFlight = false
 		m.lastCheckInAt = time.Time{}
+		m.lastInterruptNoticeID = ""
 		m.handoffVisible = false
 		m.handoffPriorState = ""
 	}
@@ -1791,7 +1801,7 @@ func (m Model) footerParts(width int) []string {
 	switch {
 	case width < 72:
 		parts := []string{"[Tab]", "[Pg]", "[Enter]", "[Esc]", "[F2]", "[Ctrl+O]", "[Ctrl+C]"}
-		if m.canSendFullscreenKeys() {
+		if m.canSendActiveKeys() {
 			parts = append(parts, "[S]")
 		}
 		if m.activeExecution != nil && m.activeExecution.State != controller.CommandExecutionInteractiveFullscreen && m.canAttemptLocalInterrupt() {
@@ -1813,7 +1823,7 @@ func (m Model) footerParts(width int) []string {
 		return parts
 	case width < 100:
 		parts := []string{"[Tab] mode", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Enter] submit", escHint, "[F2] shell", "[Ctrl+C] quit"}
-		if m.canSendFullscreenKeys() {
+		if m.canSendActiveKeys() {
 			parts = append(parts, "[S] keys")
 		}
 		if m.activeExecution != nil && m.activeExecution.State != controller.CommandExecutionInteractiveFullscreen && m.canAttemptLocalInterrupt() {
@@ -1836,7 +1846,7 @@ func (m Model) footerParts(width int) []string {
 	}
 
 	parts := []string{"[Tab] mode", "[Up/Down] history", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Ctrl+U/D] half-page", "[Home/End] bounds", "[Enter] submit", escHint, "[Ctrl+J] newline", "[F2] shell"}
-	if m.canSendFullscreenKeys() {
+	if m.canSendActiveKeys() {
 		parts = append(parts, "[S] send keys")
 	}
 	if m.activeExecution != nil && m.activeExecution.State != controller.CommandExecutionInteractiveFullscreen && m.canAttemptLocalInterrupt() {
@@ -3093,6 +3103,39 @@ func (m Model) canSendFullscreenKeys() bool {
 	return m.pendingFullscreen == nil &&
 		m.activeExecution != nil &&
 		m.activeExecution.State == controller.CommandExecutionInteractiveFullscreen
+}
+
+func (m Model) canSendActiveKeys() bool {
+	return m.pendingFullscreen == nil &&
+		m.activeExecution != nil &&
+		(m.activeExecution.State == controller.CommandExecutionInteractiveFullscreen ||
+			m.activeExecution.State == controller.CommandExecutionAwaitingInput)
+}
+
+func (m *Model) appendInterruptNotice(body string) {
+	if strings.TrimSpace(body) == "" {
+		return
+	}
+	executionID := ""
+	if m.activeExecution != nil {
+		executionID = m.activeExecution.ID
+	}
+	if executionID != "" && m.lastInterruptNoticeID == executionID {
+		return
+	}
+	pinned := m.isTranscriptPinned()
+	m.entries = append(m.entries, Entry{
+		Title: "system",
+		Body:  body,
+	})
+	m.lastInterruptNoticeID = executionID
+	if pinned {
+		m.scrollTranscriptToBottom()
+	} else {
+		m.clampTranscriptScroll()
+	}
+	m.selectedEntry = len(m.entries) - 1
+	m.clampSelection()
 }
 
 func previewFullscreenKeys(keys string) string {

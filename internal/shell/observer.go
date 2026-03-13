@@ -153,6 +153,7 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 	lastCapture := ""
 	lastPaneInfoCheck := time.Time{}
 	alternateOn := false
+	currentPaneCommand := ""
 	for {
 		captured, err := o.client.CapturePane(ctx, paneID, -trackedCaptureLines)
 		if err != nil {
@@ -182,6 +183,8 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 			lastPaneInfoCheck = time.Now()
 			if paneInfo, paneErr := o.client.PaneInfo(ctx, paneID); paneErr == nil {
 				alternateOn = paneInfo.AlternateOn
+				currentPaneCommand = strings.TrimSpace(paneInfo.CurrentCommand)
+				monitor.updateForegroundCommand(currentPaneCommand)
 			}
 		}
 
@@ -207,7 +210,7 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 			)
 		}
 		if started {
-			monitor.setState(classifyActiveMonitorState(command, tail, alternateOn))
+			monitor.setState(classifyActiveMonitorState(command, tail, alternateOn, currentPaneCommand))
 		}
 
 		result, complete, err := protocol.ParseCommandResult(captured, markers)
@@ -283,13 +286,17 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 			return
 		}
 
-		if started && allowPromptReturnInference(command, alternateOn) {
+		if started && allowPromptReturnInference(command, alternateOn, currentPaneCommand) {
 			promptContext := monitor.Snapshot().ShellContext
 			if TailSuggestsPromptReturn(captured, promptContext) {
 				cleanBody := sanitizeCapturedBody(capturePaneDelta(beforeCapture, captured))
 				cleanBody = stripEchoedCommand(cleanBody, transportCommand)
 				if promptContext.PromptLine() != "" {
 					cleanBody = stripTrailingPromptLine(cleanBody, promptContext)
+				}
+				confidence := ConfidenceMedium
+				if paneCommandIsShell(currentPaneCommand) {
+					confidence = ConfidenceStrong
 				}
 				logging.Trace(
 					"shell.tracked.prompt_returned",
@@ -298,12 +305,14 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 					"command_id", markers.CommandID,
 					"captured_preview", logging.Preview(cleanBody, 1200),
 					"prompt", promptContext.PromptLine(),
+					"pane_command", currentPaneCommand,
+					"confidence", confidence,
 				)
 				monitor.finish(TrackedExecution{
 					CommandID:    markers.CommandID,
 					Command:      command,
 					Cause:        CompletionCausePromptReturn,
-					Confidence:   ConfidenceMedium,
+					Confidence:   confidence,
 					ExitCode:     InterruptedExitCode,
 					Captured:     cleanBody,
 					ShellContext: promptContext,
@@ -349,7 +358,7 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 	}
 }
 
-func classifyActiveMonitorState(command string, tail string, alternateOn bool) MonitorState {
+func classifyActiveMonitorState(command string, tail string, alternateOn bool, currentPaneCommand string) MonitorState {
 	if alternateOn {
 		return MonitorStateInteractiveFullscreen
 	}
@@ -362,8 +371,8 @@ func classifyActiveMonitorState(command string, tail string, alternateOn bool) M
 	return MonitorStateRunning
 }
 
-func allowPromptReturnInference(command string, alternateOn bool) bool {
-	return !alternateOn && !IsInteractiveCommand(command)
+func allowPromptReturnInference(command string, alternateOn bool, currentPaneCommand string) bool {
+	return !alternateOn && !IsInteractiveCommand(command) && paneCommandAllowsPromptInference(currentPaneCommand)
 }
 
 func monitorStateFromError(err error) MonitorState {
@@ -379,6 +388,32 @@ func monitorStateFromError(err error) MonitorState {
 func trackedCommandLikelyStarted(beforeCapture string, captured string) bool {
 	return strings.TrimSpace(capturePaneDelta(beforeCapture, captured)) != ""
 }
+
+func paneCommandIsShell(command string) bool {
+	switch strings.TrimSpace(strings.ToLower(command)) {
+	case "bash", "zsh", "sh", "fish", "dash", "ash", "ksh", "csh", "tcsh":
+		return true
+	default:
+		return false
+	}
+}
+
+func paneCommandAllowsPromptInference(command string) bool {
+	trimmed := strings.TrimSpace(strings.ToLower(command))
+	if trimmed == "" {
+		return true
+	}
+	if paneCommandIsShell(trimmed) {
+		return true
+	}
+	switch trimmed {
+	case "ssh", "mosh-client", "mosh":
+		return true
+	default:
+		return false
+	}
+}
+
 
 func inferTrackedCommandResultFromEndMarker(captured string, beforeCapture string, command string, markers protocol.Markers) (protocol.CommandResult, bool, error) {
 	lines := strings.Split(strings.ReplaceAll(captured, "\r\n", "\n"), "\n")

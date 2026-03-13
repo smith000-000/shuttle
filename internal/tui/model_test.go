@@ -193,6 +193,87 @@ func TestComposerIsLockedWhileProposalCardIsActive(t *testing.T) {
 	}
 }
 
+func TestAwaitingInputAllowsSendKeysMode(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   `bash -lc 'read -n 1 -s -r -p "Press any key" _'`,
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now(),
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	next := updated.(Model)
+
+	if !next.sendingFullscreenKeys {
+		t.Fatal("expected send-keys mode to activate for awaiting_input")
+	}
+}
+
+func TestSendKeysModeBypassesComposerLockOnEnter(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.sendingFullscreenKeys = true
+	model.pendingApproval = &controller.ApprovalRequest{
+		ID:      "approval-1",
+		Kind:    controller.ApprovalCommand,
+		Title:   "Approve",
+		Summary: "Run interactive command",
+		Command: "read",
+	}
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "read",
+		Origin:    controller.CommandOriginAgentApproval,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now(),
+	}
+	model.setInput("hello")
+	model.takeControl = takeControlConfig{SocketName: "sock", SessionName: "sess", TopPaneID: "%0", DetachKey: TakeControlKey}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(Model)
+
+	if cmd == nil {
+		t.Fatal("expected send-keys command even while composer is otherwise locked")
+	}
+	if next.sendingFullscreenKeys {
+		t.Fatal("expected send-keys mode to submit and exit")
+	}
+}
+
+func TestRemoteManualInterruptNoticeIsNotDuplicated(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("sock", "sess", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-remote",
+		Command:   "sleep 60",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+		ShellContextAfter: &shell.PromptContext{
+			User:         "openclaw",
+			Host:         "openclaw",
+			Directory:    "~",
+			PromptSymbol: "$",
+			Remote:       true,
+		},
+	}
+
+	initial := len(model.entries)
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(Model)
+	afterFirst := len(model.entries)
+	if afterFirst != initial+1 {
+		t.Fatalf("expected one interrupt notice, entries=%d -> %d", initial, afterFirst)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(Model)
+	if len(model.entries) != afterFirst {
+		t.Fatalf("expected duplicate interrupt notice to be suppressed, got %d entries", len(model.entries))
+	}
+}
+
 func TestF2CancelsInFlightWorkAndStartsTakeControl(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
 	canceled := false

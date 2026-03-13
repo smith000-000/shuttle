@@ -44,6 +44,7 @@ type MonitorSnapshot struct {
 	StartedAt        time.Time
 	CompletedAt      *time.Time
 	LatestOutputTail string
+	ForegroundCommand string
 	ExitCode         *int
 	ShellContext     PromptContext
 	Error            string
@@ -116,6 +117,19 @@ func (m *trackedCommandMonitor) updateTail(tail string) {
 		return
 	}
 	m.snapshot.LatestOutputTail = tail
+	snapshot := m.snapshot
+	m.mu.Unlock()
+	m.publish(snapshot)
+}
+
+func (m *trackedCommandMonitor) updateForegroundCommand(command string) {
+	command = strings.TrimSpace(command)
+	m.mu.Lock()
+	if m.snapshot.ForegroundCommand == command {
+		m.mu.Unlock()
+		return
+	}
+	m.snapshot.ForegroundCommand = command
 	snapshot := m.snapshot
 	m.mu.Unlock()
 	m.publish(snapshot)

@@ -169,6 +169,7 @@ type CommandExecution struct {
 	CompletedAt        *time.Time
 	ExitCode           *int
 	LatestOutputTail   string
+	ForegroundCommand  string
 	Error              string
 	ShellContextBefore *shell.PromptContext
 	ShellContextAfter  *shell.PromptContext

@@ -16,7 +16,10 @@ import (
 const autoContinuePrompt = "The previously approved or proposed command has completed. First summarize the result briefly. If there is an active plan, continue it from the current step. If there is no active plan, do not propose another command unless the user's request clearly still requires more shell work. For one-off commands, demos, or tests, prefer stopping after reporting the outcome. If another action is truly needed, propose it. If risky, request approval."
 const continuePlanPrompt = "Continue the active plan from the current step. Propose the next safe action if one is needed. If the next action is risky, request approval. If the plan is complete, answer briefly."
 const resumeAfterTakeControlPrompt = "The user temporarily took control of the shell to handle an interactive step such as a password prompt, remote login, or fullscreen terminal app. Reassess the latest shell state and continue the task. If another action is needed, propose it. If risky, request approval. If the task is complete, answer briefly."
-const activeExecutionCheckInPrompt = "An agent-started shell command is still active. Use the execution state and latest shell output to decide whether it is running normally, waiting for input, or occupying a fullscreen interactive terminal app. If there is no new output, say that no new shell output has appeared yet. Do not claim the command has completed or that the shell returned to a prompt unless the context shows that. Do not propose a new command, plan, or approval unless the shell is clearly blocked and needs user intervention; if so, say that the user should press F2 to take control."
+const activeExecutionCheckInPrompt = "An agent-started shell command is still active. Use the execution state and latest shell output to decide whether it is running normally or merely quiet. If there is no new output, say that no new shell output has appeared yet. Do not claim the command has completed or that the shell returned to a prompt unless the context shows that. Do not propose a new command, plan, or approval unless the shell is clearly blocked and needs user intervention; if so, say that the user should press F2 to take control."
+const awaitingInputCheckInPrompt = "An agent-started shell command is waiting for shell input. Use the latest shell output and recovery snapshot to explain what input is likely needed. Do not claim the command has completed. Prefer a concise recovery message that tells the user to press F2 to take control. If the task only needs a small raw key sequence, mention KEYS> as an option."
+const fullscreenCheckInPrompt = "An agent-started shell command has occupied a fullscreen terminal app. Use the latest shell output and recovery snapshot to identify the app or state as best you can. Do not claim the command has completed. Prefer a concise recovery message telling the user to press F2 to take control, or use KEYS> if they only need to send a few raw keys."
+const lostTrackingCheckInPrompt = "Tracking confidence for an agent-started shell command is low. Use the latest shell output and recovery snapshot to explain what likely happened, without claiming completion unless the context clearly proves it. Prefer a recovery-oriented message that suggests inspecting the shell with F2 if the state is ambiguous."
 
 const recoverySnapshotLines = 200
 
@@ -148,7 +151,9 @@ func (c *LocalController) CheckActiveExecution(ctx context.Context) ([]Transcrip
 		return nil, nil
 	}
 
-	if c.task.CurrentExecution.State != CommandExecutionAwaitingInput && c.task.CurrentExecution.State != CommandExecutionInteractiveFullscreen {
+	if c.task.CurrentExecution.State != CommandExecutionAwaitingInput &&
+		c.task.CurrentExecution.State != CommandExecutionInteractiveFullscreen &&
+		c.task.CurrentExecution.State != CommandExecutionLost {
 		c.task.CurrentExecution.State = CommandExecutionBackgroundMonitor
 	}
 	session := c.session
@@ -170,7 +175,9 @@ func (c *LocalController) CheckActiveExecution(ctx context.Context) ([]Transcrip
 		c.mu.Unlock()
 		return nil, nil
 	}
-	if c.task.CurrentExecution.State != CommandExecutionAwaitingInput && c.task.CurrentExecution.State != CommandExecutionInteractiveFullscreen {
+	if c.task.CurrentExecution.State != CommandExecutionAwaitingInput &&
+		c.task.CurrentExecution.State != CommandExecutionInteractiveFullscreen &&
+		c.task.CurrentExecution.State != CommandExecutionLost {
 		c.task.CurrentExecution.State = CommandExecutionBackgroundMonitor
 	}
 	if strings.TrimSpace(recentOutput) != "" {
@@ -185,7 +192,7 @@ func (c *LocalController) CheckActiveExecution(ctx context.Context) ([]Transcrip
 	response, err := c.agent.Respond(ctx, AgentInput{
 		Session: session,
 		Task:    task,
-		Prompt:  activeExecutionCheckInPrompt,
+		Prompt:  buildActiveExecutionCheckInPrompt(task.CurrentExecution),
 	})
 	if err != nil {
 		logging.TraceError("controller.check_active_execution.error", err)
@@ -210,6 +217,23 @@ func (c *LocalController) CheckActiveExecution(ctx context.Context) ([]Transcrip
 		"message_preview", logging.Preview(response.Message, 600),
 	)
 	return []TranscriptEvent{event}, nil
+}
+
+func buildActiveExecutionCheckInPrompt(execution *CommandExecution) string {
+	if execution == nil {
+		return activeExecutionCheckInPrompt
+	}
+
+	switch execution.State {
+	case CommandExecutionAwaitingInput:
+		return awaitingInputCheckInPrompt
+	case CommandExecutionInteractiveFullscreen, CommandExecutionHandoffActive:
+		return fullscreenCheckInPrompt
+	case CommandExecutionLost:
+		return lostTrackingCheckInPrompt
+	default:
+		return activeExecutionCheckInPrompt
+	}
 }
 
 func (c *LocalController) SubmitProposedShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error) {
@@ -693,6 +717,9 @@ func (c *LocalController) applyMonitorSnapshot(executionID string, snapshot shel
 	if strings.TrimSpace(snapshot.LatestOutputTail) != "" {
 		execution.LatestOutputTail = snapshot.LatestOutputTail
 		c.session.RecentShellOutput = snapshot.LatestOutputTail
+	}
+	if strings.TrimSpace(snapshot.ForegroundCommand) != "" {
+		execution.ForegroundCommand = snapshot.ForegroundCommand
 	}
 	if snapshot.ShellContext.PromptLine() != "" {
 		contextCopy := snapshot.ShellContext
