@@ -107,6 +107,7 @@ type Model struct {
 	inFlightCancel     context.CancelFunc
 	suppressCancelErr  bool
 	resumeAfterHandoff bool
+	awaitingHandoff    bool
 	takeControl        takeControlConfig
 	liveShellTail      string
 	showShellTail      bool
@@ -247,6 +248,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			"active_execution", activeExecutionID(m.activeExecution),
 		)
 		if msg.err != nil {
+			m.awaitingHandoff = false
 			m.entries = append(m.entries, Entry{
 				Title: "error",
 				Body:  msg.err.Error(),
@@ -281,7 +283,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case refreshedShellContextMsg:
 		if msg.context != nil {
 			m.shellContext = *msg.context
-			if m.activeExecution != nil && m.activeExecution.State == controller.CommandExecutionHandoffActive {
+			if m.awaitingHandoff && m.activeExecution != nil {
 				return m, m.reconcileHandoffExecutionCmd()
 			}
 		}
@@ -294,7 +296,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				updated.LatestOutputTail = msg.tail
 				m.activeExecution = &updated
 			}
-			if m.activeExecution != nil && m.activeExecution.State == controller.CommandExecutionHandoffActive && shellTailSuggestsPromptReturn(msg.tail, m.shellContext) {
+			if m.awaitingHandoff && m.activeExecution != nil && shellTailSuggestsPromptReturn(msg.tail, m.shellContext) {
 				return m.handleHandoffPromptReturn(msg.tail)
 			}
 		}
@@ -341,13 +343,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !msg.clear {
 			return m, nil
 		}
-		if m.activeExecution == nil || m.activeExecution.State != controller.CommandExecutionHandoffActive {
+		if !m.awaitingHandoff || m.activeExecution == nil {
 			return m, nil
 		}
-		execution := m.abandonControllerExecution("user interrupted the command during take control")
+		execution := m.abandonControllerExecution("shell returned to a prompt during take control")
 		m.handleInterruptedExecution()
 		pinned := m.isTranscriptPinned()
-		m.entries = append(m.entries, interruptedExecutionEntry(execution, "Interrupted during take control."))
+		m.entries = append(m.entries, interruptedExecutionEntry(execution, humanizeHandoffSummary("shell returned to a prompt during take control")))
 		if pinned {
 			m.scrollTranscriptToBottom()
 		} else {
@@ -829,6 +831,7 @@ func (m Model) takeControlNow() (tea.Model, tea.Cmd) {
 		updated := *m.activeExecution
 		updated.State = controller.CommandExecutionHandoffActive
 		m.activeExecution = &updated
+		m.awaitingHandoff = true
 	}
 
 	m.busy = false
@@ -930,7 +933,7 @@ func interruptShellCmd(config takeControlConfig) tea.Cmd {
 }
 
 func (m Model) reconcileHandoffExecutionCmd() tea.Cmd {
-	if m.ctrl == nil || m.activeExecution == nil || m.activeExecution.State != controller.CommandExecutionHandoffActive {
+	if m.ctrl == nil || !m.awaitingHandoff || m.activeExecution == nil {
 		return nil
 	}
 
@@ -958,6 +961,7 @@ func (m *Model) handleInterruptedExecution() {
 	m.busyStartedAt = time.Time{}
 	m.showShellTail = false
 	m.liveShellTail = ""
+	m.awaitingHandoff = false
 	m.suppressCancelErr = true
 	if m.inFlightCancel != nil {
 		m.inFlightCancel()
@@ -1145,6 +1149,9 @@ func (m *Model) maybeExecutionCheckInCmd(now time.Time) tea.Cmd {
 	if m.ctrl == nil || m.checkInInFlight || m.activeExecution == nil {
 		return nil
 	}
+	if m.awaitingHandoff {
+		return nil
+	}
 	if !isAgentOwnedExecution(m.activeExecution.Origin) {
 		return nil
 	}
@@ -1186,12 +1193,25 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 		m.activeExecution = nil
 		m.checkInInFlight = false
 		m.lastCheckInAt = time.Time{}
+		m.awaitingHandoff = false
 		return
 	}
 
 	if currentID != execution.ID {
 		m.checkInInFlight = false
 		m.lastCheckInAt = time.Time{}
+		m.awaitingHandoff = false
+	}
+	if m.activeExecution != nil &&
+		m.activeExecution.ID == execution.ID &&
+		m.activeExecution.State == controller.CommandExecutionHandoffActive &&
+		execution.State != controller.CommandExecutionCompleted &&
+		execution.State != controller.CommandExecutionFailed &&
+		execution.State != controller.CommandExecutionCanceled &&
+		execution.State != controller.CommandExecutionLost {
+		executionCopy := *execution
+		executionCopy.State = controller.CommandExecutionHandoffActive
+		execution = &executionCopy
 	}
 	m.activeExecution = execution
 }

@@ -296,6 +296,7 @@ func TestReconcileHandoffClearsControllerActiveExecution(t *testing.T) {
 	}
 	model := NewModel(fakeWorkspace(), ctrl)
 	model.activeExecution = ctrl.activeExecution
+	model.awaitingHandoff = true
 
 	updated, _ := model.Update(reconcileHandoffExecutionMsg{clear: true})
 	next := updated.(Model)
@@ -324,6 +325,7 @@ func TestShellTailWithPromptReturnClearsHandoffExecution(t *testing.T) {
 	}
 	model := NewModel(fakeWorkspace(), ctrl)
 	model.activeExecution = ctrl.activeExecution
+	model.awaitingHandoff = true
 	model.showShellTail = true
 
 	tail := "jsmith@linuxdesktop ~/source/repos/aiterm git:(main) %\n^C%\njsmith@linuxdesktop ~/source/repos/aiterm git:(main) ✗ %"
@@ -357,6 +359,7 @@ func TestShellTailPromptReturnWithoutCtrlCClearsHandoffExecution(t *testing.T) {
 	}
 	model := NewModel(fakeWorkspace(), ctrl)
 	model.activeExecution = ctrl.activeExecution
+	model.awaitingHandoff = true
 	model.showShellTail = true
 	model.shellContext = shell.PromptContext{
 		User:         "jsmith",
@@ -1370,6 +1373,7 @@ func TestReconcileHandoffExecutionClearsStaleTrackedCommand(t *testing.T) {
 		State:     controller.CommandExecutionHandoffActive,
 		StartedAt: time.Now(),
 	}
+	model.awaitingHandoff = true
 	initialEntries := len(model.entries)
 
 	updated, _ := model.Update(reconcileHandoffExecutionMsg{clear: true})
@@ -1384,6 +1388,39 @@ func TestReconcileHandoffExecutionClearsStaleTrackedCommand(t *testing.T) {
 	last := next.entries[len(next.entries)-1]
 	if last.Title != "result" || !strings.Contains(last.Body, "status=canceled") {
 		t.Fatalf("unexpected reconciliation entry: %#v", last)
+	}
+}
+
+func TestShellTailPromptReturnClearsAwaitingHandoffEvenWhenControllerStateIsBackgroundMonitoring(t *testing.T) {
+	ctrl := &fakeController{
+		activeExecution: &controller.CommandExecution{
+			ID:        "cmd-1",
+			Command:   "rg -l foo ~",
+			Origin:    controller.CommandOriginAgentProposal,
+			State:     controller.CommandExecutionBackgroundMonitor,
+			StartedAt: time.Now(),
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "rg -l foo ~",
+		Origin:    controller.CommandOriginAgentProposal,
+		State:     controller.CommandExecutionBackgroundMonitor,
+		StartedAt: time.Now(),
+	}
+	model.awaitingHandoff = true
+	model.showShellTail = true
+
+	tail := "tool output\njsmith@linuxdesktop ~/source/repos/aiterm git:(main) %"
+	updated, _ := model.Update(shellTailMsg{tail: tail})
+	next := updated.(Model)
+
+	if next.activeExecution != nil {
+		t.Fatalf("expected prompt return to clear active execution, got %#v", next.activeExecution)
+	}
+	if ctrl.activeExecution != nil {
+		t.Fatal("expected controller active execution to clear")
 	}
 }
 
