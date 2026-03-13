@@ -116,6 +116,47 @@ func TestLocalControllerSubmitShellCommand(t *testing.T) {
 	}
 }
 
+func TestLocalControllerSubmitShellCommandCanceledReturnsResultEvent(t *testing.T) {
+	controller := New(nil, &stubRunner{
+		result: shell.TrackedExecution{
+			CommandID: "cmd-1",
+			Command:   "sleep 60",
+			State:     shell.MonitorStateCanceled,
+			ExitCode:  shell.InterruptedExitCode,
+			Captured:  "^C\njsmith@host % ",
+		},
+	}, nil, SessionContext{TopPaneID: "%0"})
+
+	events, err := controller.SubmitShellCommand(context.Background(), "sleep 60")
+	if err != nil {
+		t.Fatalf("SubmitShellCommand() error = %v", err)
+	}
+
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+	if events[0].Kind != EventCommandStart || events[1].Kind != EventCommandResult {
+		t.Fatalf("unexpected event kinds: %#v", events)
+	}
+
+	resultPayload, ok := events[1].Payload.(CommandResultSummary)
+	if !ok {
+		t.Fatalf("expected command result payload, got %#v", events[1].Payload)
+	}
+	if resultPayload.State != CommandExecutionCanceled {
+		t.Fatalf("expected canceled result state, got %q", resultPayload.State)
+	}
+	if resultPayload.ExitCode != shell.InterruptedExitCode {
+		t.Fatalf("expected interrupted exit code, got %d", resultPayload.ExitCode)
+	}
+	if controller.ActiveExecution() != nil {
+		t.Fatal("expected active execution to clear after canceled result")
+	}
+	if controller.task.LastCommandResult == nil || controller.task.LastCommandResult.State != CommandExecutionCanceled {
+		t.Fatalf("expected canceled last command result, got %#v", controller.task.LastCommandResult)
+	}
+}
+
 func TestLocalControllerSubmitProposedShellCommandTracksAgentOrigin(t *testing.T) {
 	controller := New(nil, &stubRunner{
 		result: shell.TrackedExecution{

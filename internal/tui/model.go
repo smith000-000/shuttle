@@ -63,17 +63,12 @@ type shellInterruptMsg struct {
 	err error
 }
 
-type reconcileHandoffExecutionMsg struct {
-	clear bool
-}
-
 const (
-	agentTurnTimeout      = 60 * time.Second
-	shellTailPollLines    = 40
-	shellTailPollTimeout  = 750 * time.Millisecond
-	firstCheckInDelay     = 10 * time.Second
-	repeatCheckInDelay    = 30 * time.Second
-	handoffReconcileDelay = 750 * time.Millisecond
+	agentTurnTimeout     = 60 * time.Second
+	shellTailPollLines   = 40
+	shellTailPollTimeout = 750 * time.Millisecond
+	firstCheckInDelay    = 10 * time.Second
+	repeatCheckInDelay   = 30 * time.Second
 )
 
 type Model struct {
@@ -107,7 +102,8 @@ type Model struct {
 	inFlightCancel     context.CancelFunc
 	suppressCancelErr  bool
 	resumeAfterHandoff bool
-	awaitingHandoff    bool
+	handoffVisible     bool
+	handoffPriorState  controller.CommandExecutionState
 	takeControl        takeControlConfig
 	liveShellTail      string
 	showShellTail      bool
@@ -248,7 +244,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			"active_execution", activeExecutionID(m.activeExecution),
 		)
 		if msg.err != nil {
-			m.awaitingHandoff = false
+			m.handoffVisible = false
 			m.entries = append(m.entries, Entry{
 				Title: "error",
 				Body:  msg.err.Error(),
@@ -257,6 +253,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.clampSelection()
 			return m, nil
 		}
+		m.handoffVisible = false
+		if m.activeExecution != nil && m.activeExecution.State == controller.CommandExecutionHandoffActive {
+			updated := *m.activeExecution
+			if m.handoffPriorState != "" {
+				updated.State = m.handoffPriorState
+			} else if isAgentOwnedExecution(updated.Origin) {
+				updated.State = controller.CommandExecutionBackgroundMonitor
+			} else {
+				updated.State = controller.CommandExecutionRunning
+			}
+			m.activeExecution = &updated
+		}
+		m.handoffPriorState = ""
 		followUpCmds := []tea.Cmd{m.refreshShellContextCmd(), m.pollShellTailCmd(), m.pollActiveExecutionCmd()}
 		if m.activeExecution != nil {
 			followUpCmds = append(followUpCmds, tickBusy())
@@ -293,9 +302,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				updated.LatestOutputTail = msg.tail
 				m.activeExecution = &updated
 			}
-			if m.awaitingHandoff && m.activeExecution != nil && shellTailSuggestsPromptReturn(msg.tail, m.shellContext) {
-				return m.handleHandoffPromptReturn(msg.tail)
-			}
 		}
 		return m, nil
 	case activeExecutionMsg:
@@ -328,25 +334,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		pinned := m.isTranscriptPinned()
 		m.entries = append(m.entries, eventsToEntries(msg.events, true)...)
-		if pinned {
-			m.scrollTranscriptToBottom()
-		} else {
-			m.clampTranscriptScroll()
-		}
-		m.selectedEntry = len(m.entries) - 1
-		m.clampSelection()
-		return m, nil
-	case reconcileHandoffExecutionMsg:
-		if !msg.clear {
-			return m, nil
-		}
-		if !m.awaitingHandoff || m.activeExecution == nil {
-			return m, nil
-		}
-		execution := m.abandonControllerExecution("shell returned to a prompt during take control")
-		m.handleInterruptedExecution()
-		pinned := m.isTranscriptPinned()
-		m.entries = append(m.entries, interruptedExecutionEntry(execution, humanizeHandoffSummary("shell returned to a prompt during take control")))
 		if pinned {
 			m.scrollTranscriptToBottom()
 		} else {
@@ -826,9 +813,10 @@ func (m Model) takeControlNow() (tea.Model, tea.Cmd) {
 	}
 	if m.activeExecution != nil {
 		updated := *m.activeExecution
+		m.handoffPriorState = updated.State
 		updated.State = controller.CommandExecutionHandoffActive
 		m.activeExecution = &updated
-		m.awaitingHandoff = true
+		m.handoffVisible = true
 	}
 
 	m.busy = false
@@ -929,37 +917,15 @@ func interruptShellCmd(config takeControlConfig) tea.Cmd {
 	}
 }
 
-func (m Model) reconcileHandoffExecutionCmd() tea.Cmd {
-	if m.ctrl == nil || !m.awaitingHandoff || m.activeExecution == nil {
-		return nil
-	}
-
-	expectedID := m.activeExecution.ID
-	return tea.Tick(handoffReconcileDelay, func(time.Time) tea.Msg {
-		active := m.ctrl.ActiveExecution()
-		if active == nil || active.ID != expectedID {
-			return reconcileHandoffExecutionMsg{clear: false}
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		tail, err := m.ctrl.PeekShellTail(ctx, shellTailPollLines)
-		if err != nil || !shellTailSuggestsPromptReturn(tail, m.shellContext) {
-			return reconcileHandoffExecutionMsg{clear: false}
-		}
-
-		return reconcileHandoffExecutionMsg{clear: true}
-	})
-}
-
 func (m *Model) handleInterruptedExecution() {
 	logging.Trace("tui.execution.interrupted", "active_execution", activeExecutionID(m.activeExecution))
 	m.busy = false
 	m.busyStartedAt = time.Time{}
 	m.showShellTail = false
 	m.liveShellTail = ""
-	m.awaitingHandoff = false
 	m.suppressCancelErr = true
+	m.handoffVisible = false
+	m.handoffPriorState = ""
 	if m.inFlightCancel != nil {
 		m.inFlightCancel()
 		m.inFlightCancel = nil
@@ -968,25 +934,6 @@ func (m *Model) handleInterruptedExecution() {
 	m.approvalInFlight = false
 	m.directShellPending = false
 	m.syncActiveExecution(nil)
-}
-
-func (m Model) handleHandoffPromptReturn(tail string) (tea.Model, tea.Cmd) {
-	reason := "shell returned to a prompt during take control"
-	execution := m.abandonControllerExecution(reason)
-	if promptContext, ok := shell.ParsePromptContextFromCapture(tail); ok {
-		m.shellContext = promptContext
-	}
-	m.handleInterruptedExecution()
-	pinned := m.isTranscriptPinned()
-	m.entries = append(m.entries, interruptedExecutionEntry(execution, humanizeHandoffSummary(reason)))
-	if pinned {
-		m.scrollTranscriptToBottom()
-	} else {
-		m.clampTranscriptScroll()
-	}
-	m.selectedEntry = len(m.entries) - 1
-	m.clampSelection()
-	return m, tea.Batch(m.refreshShellContextCmd(), m.pollActiveExecutionCmd())
 }
 
 func (m *Model) abandonControllerExecution(reason string) *controller.CommandExecution {
@@ -1061,119 +1008,8 @@ func traceEntryTitles(entries []Entry) []string {
 	return titles
 }
 
-func shellTailSuggestsPromptReturn(tail string, current shell.PromptContext) bool {
-	if strings.TrimSpace(tail) == "" {
-		return false
-	}
-
-	lines := lastNonEmptyLines(tail, 2)
-	if len(lines) == 0 {
-		return false
-	}
-
-	trailing := strings.Join(lines, "\n")
-	if context, ok := shell.ParsePromptContextFromCapture(trailing); ok {
-		last := strings.TrimSpace(lines[len(lines)-1])
-		if strings.TrimSpace(context.RawLine) == last {
-			return true
-		}
-	}
-
-	line := strings.TrimSpace(lines[len(lines)-1])
-	if promptLooksLikeCurrentShell(line, current) {
-		return true
-	}
-
-	return false
-}
-
-func humanizeHandoffSummary(reason string) string {
-	return "Shell returned to a prompt during take control."
-}
-
-func lastNonEmptyLine(tail string) string {
-	lines := strings.Split(strings.ReplaceAll(tail, "\r\n", "\n"), "\n")
-	for index := len(lines) - 1; index >= 0; index-- {
-		line := strings.TrimSpace(lines[index])
-		if line != "" {
-			return line
-		}
-	}
-
-	return ""
-}
-
-func lastNonEmptyLines(tail string, limit int) []string {
-	if limit <= 0 {
-		return nil
-	}
-
-	lines := strings.Split(strings.ReplaceAll(tail, "\r\n", "\n"), "\n")
-	result := make([]string, 0, limit)
-	for index := len(lines) - 1; index >= 0 && len(result) < limit; index-- {
-		line := strings.TrimSpace(lines[index])
-		if line == "" {
-			continue
-		}
-		result = append(result, line)
-	}
-
-	for left, right := 0, len(result)-1; left < right; left, right = left+1, right-1 {
-		result[left], result[right] = result[right], result[left]
-	}
-
-	return result
-}
-
-func promptLooksLikeCurrentShell(line string, current shell.PromptContext) bool {
-	trimmed := strings.TrimSpace(line)
-	if trimmed == "" {
-		return false
-	}
-
-	promptSymbol := current.PromptSymbol
-	if promptSymbol == "" {
-		switch last := trimmed[len(trimmed)-1]; last {
-		case '$', '#', '%', '>':
-			promptSymbol = string(last)
-		default:
-			return false
-		}
-	}
-	if !strings.HasSuffix(trimmed, promptSymbol) {
-		return false
-	}
-
-	score := 0
-	if current.User != "" && current.Host != "" && strings.Contains(trimmed, current.User+"@"+current.Host) {
-		score++
-	}
-	if current.Directory != "" && strings.Contains(trimmed, current.Directory) {
-		score++
-	}
-	if current.GitBranch != "" && strings.Contains(trimmed, "git:("+current.GitBranch+")") {
-		score++
-	}
-
-	if score > 0 {
-		return true
-	}
-
-	if strings.Contains(trimmed, "@") && (strings.Contains(trimmed, "~/") || strings.Contains(trimmed, "/")) {
-		return true
-	}
-	if strings.HasPrefix(trimmed, "~") || strings.HasPrefix(trimmed, "/") || strings.HasPrefix(trimmed, ".") {
-		return true
-	}
-
-	return false
-}
-
 func (m *Model) maybeExecutionCheckInCmd(now time.Time) tea.Cmd {
 	if m.ctrl == nil || m.checkInInFlight || m.activeExecution == nil {
-		return nil
-	}
-	if m.awaitingHandoff {
 		return nil
 	}
 	if !isAgentOwnedExecution(m.activeExecution.Origin) {
@@ -1217,17 +1053,20 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 		m.activeExecution = nil
 		m.checkInInFlight = false
 		m.lastCheckInAt = time.Time{}
-		m.awaitingHandoff = false
+		m.handoffVisible = false
+		m.handoffPriorState = ""
 		return
 	}
 
 	if currentID != execution.ID {
 		m.checkInInFlight = false
 		m.lastCheckInAt = time.Time{}
-		m.awaitingHandoff = false
+		m.handoffVisible = false
+		m.handoffPriorState = ""
 	}
 	if m.activeExecution != nil &&
 		m.activeExecution.ID == execution.ID &&
+		m.handoffVisible &&
 		m.activeExecution.State == controller.CommandExecutionHandoffActive &&
 		execution.State != controller.CommandExecutionCompleted &&
 		execution.State != controller.CommandExecutionFailed &&
@@ -3025,6 +2864,24 @@ func eventsToEntries(events []controller.TranscriptEvent, collapseResults bool) 
 			body := fullBody
 			if collapseResults {
 				body = compactResultPreview(fullBody, 6)
+			}
+			if payload.State == controller.CommandExecutionCanceled {
+				detail := []string{
+					"command:",
+					payload.Command,
+					"",
+					"status:",
+					"canceled",
+				}
+				if strings.TrimSpace(fullBody) != "" && fullBody != "(no output)" {
+					detail = append(detail, "", "output so far:", fullBody)
+				}
+				entries = append(entries, Entry{
+					Title:  "result",
+					Body:   "status=canceled\n" + body,
+					Detail: strings.Join(detail, "\n"),
+				})
+				break
 			}
 			entries = append(entries, Entry{
 				Title:  "result",

@@ -40,6 +40,18 @@ func TestStripEchoedMultiLineQuotedCommand(t *testing.T) {
 	}
 }
 
+func TestStripEchoedCommandWithPromptLineBeforeTransportCommand(t *testing.T) {
+	body := "jsmith@linuxdesktop ~/source/repos/aiterm git:(main) %\n. '/home/jsmith/source/repos/aiterm/.shuttle/commands/cmd-1.sh'\n1\n2\n3"
+	command := ". '/home/jsmith/source/repos/aiterm/.shuttle/commands/cmd-1.sh'"
+
+	got := stripEchoedCommand(body, command)
+	want := "1\n2\n3"
+
+	if got != want {
+		t.Fatalf("stripEchoedCommand() = %q, want %q", got, want)
+	}
+}
+
 func TestIsContextTransitionCommand(t *testing.T) {
 	cases := map[string]bool{
 		"ssh prod":                   true,

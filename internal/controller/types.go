@@ -177,6 +177,7 @@ type CommandResultSummary struct {
 	CommandID    string
 	Command      string
 	Origin       CommandOrigin
+	State        CommandExecutionState
 	ExitCode     int
 	Summary      string
 	ShellContext *shell.PromptContext

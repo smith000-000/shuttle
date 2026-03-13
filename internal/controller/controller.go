@@ -482,6 +482,50 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 		return []TranscriptEvent{startEvent, errEvent}, nil
 	}
 
+	if result.State == shell.MonitorStateCanceled {
+		canceledExecution := execution
+		canceledExecution.State = CommandExecutionCanceled
+		canceledExecution.LatestOutputTail = result.Captured
+		completedAt := time.Now()
+		canceledExecution.CompletedAt = &completedAt
+		exitCode := result.ExitCode
+		canceledExecution.ExitCode = &exitCode
+
+		summary := CommandResultSummary{
+			ExecutionID: execution.ID,
+			CommandID:   result.CommandID,
+			Command:     result.Command,
+			Origin:      origin,
+			State:       CommandExecutionCanceled,
+			ExitCode:    result.ExitCode,
+			Summary:     result.Captured,
+		}
+		if result.ShellContext.PromptLine() != "" {
+			shellContext := result.ShellContext
+			summary.ShellContext = &shellContext
+			canceledExecution.ShellContextAfter = &shellContext
+			c.session.CurrentShell = &shellContext
+			if shellContext.Directory != "" {
+				c.session.WorkingDirectory = shellContext.Directory
+			}
+		}
+		c.session.RecentShellOutput = result.Captured
+		c.task.LastCommandResult = &summary
+		c.task.CurrentExecution = nil
+		resultEvent := c.newEvent(EventCommandResult, summary)
+		c.appendEvents(resultEvent)
+		logging.Trace(
+			"controller.shell_command.canceled_result",
+			"execution_id", execution.ID,
+			"command", command,
+			"origin", origin,
+			"command_id", result.CommandID,
+			"summary_preview", logging.Preview(result.Captured, 1000),
+			"prompt", result.ShellContext.PromptLine(),
+		)
+		return []TranscriptEvent{startEvent, resultEvent}, nil
+	}
+
 	completedExecution := execution
 	completedExecution.State = CommandExecutionCompleted
 	completedExecution.LatestOutputTail = result.Captured
@@ -495,6 +539,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 		CommandID:   result.CommandID,
 		Command:     result.Command,
 		Origin:      origin,
+		State:       CommandExecutionCompleted,
 		ExitCode:    result.ExitCode,
 		Summary:     result.Captured,
 	}

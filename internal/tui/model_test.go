@@ -284,156 +284,6 @@ func TestShellInterruptClearsControllerActiveExecution(t *testing.T) {
 	}
 }
 
-func TestReconcileHandoffClearsControllerActiveExecution(t *testing.T) {
-	ctrl := &fakeController{
-		activeExecution: &controller.CommandExecution{
-			ID:        "cmd-1",
-			Command:   "sleep 60",
-			Origin:    controller.CommandOriginUserShell,
-			State:     controller.CommandExecutionHandoffActive,
-			StartedAt: time.Now(),
-		},
-	}
-	model := NewModel(fakeWorkspace(), ctrl)
-	model.activeExecution = ctrl.activeExecution
-	model.awaitingHandoff = true
-
-	updated, _ := model.Update(reconcileHandoffExecutionMsg{clear: true})
-	next := updated.(Model)
-
-	if ctrl.activeExecution != nil {
-		t.Fatal("expected controller active execution to clear")
-	}
-	if next.activeExecution != nil {
-		t.Fatal("expected model active execution to clear")
-	}
-	last := next.entries[len(next.entries)-1]
-	if last.Title != "result" || !strings.Contains(last.Body, "status=canceled") {
-		t.Fatalf("expected canceled result entry, got %#v", last)
-	}
-}
-
-func TestShellTailWithPromptReturnClearsHandoffExecution(t *testing.T) {
-	ctrl := &fakeController{
-		activeExecution: &controller.CommandExecution{
-			ID:        "cmd-1",
-			Command:   "rg -l foo ~",
-			Origin:    controller.CommandOriginAgentProposal,
-			State:     controller.CommandExecutionHandoffActive,
-			StartedAt: time.Now(),
-		},
-	}
-	model := NewModel(fakeWorkspace(), ctrl)
-	model.activeExecution = ctrl.activeExecution
-	model.awaitingHandoff = true
-	model.showShellTail = true
-
-	tail := "jsmith@linuxdesktop ~/source/repos/aiterm git:(main) %\n^C%\njsmith@linuxdesktop ~/source/repos/aiterm git:(main) ✗ %"
-	updated, cmd := model.Update(shellTailMsg{tail: tail})
-	next := updated.(Model)
-
-	if next.activeExecution != nil {
-		t.Fatalf("expected handoff execution to clear, got %#v", next.activeExecution)
-	}
-	if ctrl.activeExecution != nil {
-		t.Fatal("expected controller active execution to clear")
-	}
-	last := next.entries[len(next.entries)-1]
-	if last.Title != "result" || !strings.Contains(last.Body, "status=canceled") {
-		t.Fatalf("expected canceled result entry, got %#v", last)
-	}
-	if cmd == nil {
-		t.Fatal("expected follow-up refresh command")
-	}
-}
-
-func TestShellTailPromptReturnWithoutCtrlCClearsHandoffExecution(t *testing.T) {
-	ctrl := &fakeController{
-		activeExecution: &controller.CommandExecution{
-			ID:        "cmd-1",
-			Command:   "rg -l foo ~",
-			Origin:    controller.CommandOriginAgentProposal,
-			State:     controller.CommandExecutionHandoffActive,
-			StartedAt: time.Now(),
-		},
-	}
-	model := NewModel(fakeWorkspace(), ctrl)
-	model.activeExecution = ctrl.activeExecution
-	model.awaitingHandoff = true
-	model.showShellTail = true
-	model.shellContext = shell.PromptContext{
-		User:         "jsmith",
-		Host:         "linuxdesktop",
-		Directory:    "~/source/repos/aiterm",
-		GitBranch:    "main",
-		PromptSymbol: "%",
-	}
-
-	tail := "some tool exited unexpectedly\njsmith@linuxdesktop ~/source/repos/aiterm git:(main) %"
-	updated, _ := model.Update(shellTailMsg{tail: tail})
-	next := updated.(Model)
-
-	if next.activeExecution != nil {
-		t.Fatalf("expected handoff execution to clear, got %#v", next.activeExecution)
-	}
-	if ctrl.activeExecution != nil {
-		t.Fatal("expected controller active execution to clear")
-	}
-	last := next.entries[len(next.entries)-1]
-	if last.Title != "result" || !strings.Contains(last.Detail, "Shell returned to a prompt during take control.") {
-		t.Fatalf("expected prompt-return cancellation entry, got %#v", last)
-	}
-}
-
-func TestShellTailWithEarlierPromptLineDoesNotClearHandoffExecution(t *testing.T) {
-	ctrl := &fakeController{
-		activeExecution: &controller.CommandExecution{
-			ID:        "cmd-1",
-			Command:   "sleep 20",
-			Origin:    controller.CommandOriginUserShell,
-			State:     controller.CommandExecutionHandoffActive,
-			StartedAt: time.Now(),
-		},
-	}
-	model := NewModel(fakeWorkspace(), ctrl)
-	model.activeExecution = ctrl.activeExecution
-	model.awaitingHandoff = true
-	model.showShellTail = true
-	model.shellContext = shell.PromptContext{
-		User:         "jsmith",
-		Host:         "linuxdesktop",
-		Directory:    "~/source/repos/aiterm",
-		GitBranch:    "main",
-		PromptSymbol: "%",
-	}
-
-	tail := "jsmith@linuxdesktop ~/source/repos/aiterm git:(main) %\n. '/tmp/cmd.sh'\n1\n2\n3"
-	updated, _ := model.Update(shellTailMsg{tail: tail})
-	next := updated.(Model)
-
-	if next.activeExecution == nil {
-		t.Fatal("expected handoff execution to remain active")
-	}
-	if !next.awaitingHandoff {
-		t.Fatal("expected handoff reconcile to stay armed")
-	}
-}
-
-func TestShellTailSuggestsPromptReturnIgnoresEarlierPromptHistory(t *testing.T) {
-	current := shell.PromptContext{
-		User:         "jsmith",
-		Host:         "linuxdesktop",
-		Directory:    "~/source/repos/aiterm",
-		GitBranch:    "main",
-		PromptSymbol: "%",
-	}
-
-	tail := "jsmith@linuxdesktop ~/source/repos/aiterm git:(main) %\n. '/tmp/cmd.sh'\n1\n2\n3"
-	if shellTailSuggestsPromptReturn(tail, current) {
-		t.Fatal("expected earlier prompt history to be ignored")
-	}
-}
-
 func TestCanceledControllerEventSuppressedAfterTakeControl(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.suppressCancelErr = true
@@ -487,12 +337,20 @@ func TestTakeControlFinishedRestartsTickingForActiveExecution(t *testing.T) {
 		State:     controller.CommandExecutionHandoffActive,
 		StartedAt: time.Now(),
 	}
+	model.handoffVisible = true
+	model.handoffPriorState = controller.CommandExecutionRunning
 
 	updated, cmd := model.Update(takeControlFinishedMsg{})
 	next := updated.(Model)
 
 	if next.activeExecution == nil {
 		t.Fatal("expected active execution to remain after detach")
+	}
+	if next.activeExecution.State != controller.CommandExecutionRunning {
+		t.Fatalf("expected handoff state to restore to running, got %#v", next.activeExecution)
+	}
+	if next.handoffVisible {
+		t.Fatal("expected handoff display state to clear after detach")
 	}
 	if cmd == nil {
 		t.Fatal("expected follow-up commands after detach")
@@ -1401,75 +1259,6 @@ func TestShellInterruptMsgClearsActiveExecutionState(t *testing.T) {
 	last := next.entries[len(next.entries)-1]
 	if last.Title != "result" || !strings.Contains(last.Body, "status=canceled") {
 		t.Fatalf("expected canceled result entry, got %#v", last)
-	}
-}
-
-func TestReconcileHandoffExecutionClearsStaleTrackedCommand(t *testing.T) {
-	ctrl := &fakeController{
-		activeExecution: &controller.CommandExecution{
-			ID:        "cmd-1",
-			Command:   "rg -n foo ~/",
-			Origin:    controller.CommandOriginAgentProposal,
-			State:     controller.CommandExecutionHandoffActive,
-			StartedAt: time.Now(),
-		},
-	}
-	model := NewModel(fakeWorkspace(), ctrl)
-	model.activeExecution = &controller.CommandExecution{
-		ID:        "cmd-1",
-		Command:   "rg -n foo ~/",
-		Origin:    controller.CommandOriginAgentProposal,
-		State:     controller.CommandExecutionHandoffActive,
-		StartedAt: time.Now(),
-	}
-	model.awaitingHandoff = true
-	initialEntries := len(model.entries)
-
-	updated, _ := model.Update(reconcileHandoffExecutionMsg{clear: true})
-	next := updated.(Model)
-
-	if next.activeExecution != nil {
-		t.Fatalf("expected stale handoff execution to clear, got %#v", next.activeExecution)
-	}
-	if len(next.entries) != initialEntries+1 {
-		t.Fatalf("expected one reconciliation notice, got %d entries", len(next.entries)-initialEntries)
-	}
-	last := next.entries[len(next.entries)-1]
-	if last.Title != "result" || !strings.Contains(last.Body, "status=canceled") {
-		t.Fatalf("unexpected reconciliation entry: %#v", last)
-	}
-}
-
-func TestShellTailPromptReturnClearsAwaitingHandoffEvenWhenControllerStateIsBackgroundMonitoring(t *testing.T) {
-	ctrl := &fakeController{
-		activeExecution: &controller.CommandExecution{
-			ID:        "cmd-1",
-			Command:   "rg -l foo ~",
-			Origin:    controller.CommandOriginAgentProposal,
-			State:     controller.CommandExecutionBackgroundMonitor,
-			StartedAt: time.Now(),
-		},
-	}
-	model := NewModel(fakeWorkspace(), ctrl)
-	model.activeExecution = &controller.CommandExecution{
-		ID:        "cmd-1",
-		Command:   "rg -l foo ~",
-		Origin:    controller.CommandOriginAgentProposal,
-		State:     controller.CommandExecutionBackgroundMonitor,
-		StartedAt: time.Now(),
-	}
-	model.awaitingHandoff = true
-	model.showShellTail = true
-
-	tail := "tool output\njsmith@linuxdesktop ~/source/repos/aiterm git:(main) %"
-	updated, _ := model.Update(shellTailMsg{tail: tail})
-	next := updated.(Model)
-
-	if next.activeExecution != nil {
-		t.Fatalf("expected prompt return to clear active execution, got %#v", next.activeExecution)
-	}
-	if ctrl.activeExecution != nil {
-		t.Fatal("expected controller active execution to clear")
 	}
 }
 

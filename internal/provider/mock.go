@@ -120,11 +120,18 @@ func summarizeRecentContext(input controller.AgentInput) string {
 	parts := make([]string, 0, 2)
 
 	if input.Task.LastCommandResult != nil {
-		parts = append(parts, fmt.Sprintf(
-			"Last command `%s` exited with code %d.",
-			input.Task.LastCommandResult.Command,
-			input.Task.LastCommandResult.ExitCode,
-		))
+		if input.Task.LastCommandResult.State == controller.CommandExecutionCanceled {
+			parts = append(parts, fmt.Sprintf(
+				"Last command `%s` was canceled.",
+				input.Task.LastCommandResult.Command,
+			))
+		} else {
+			parts = append(parts, fmt.Sprintf(
+				"Last command `%s` exited with code %d.",
+				input.Task.LastCommandResult.Command,
+				input.Task.LastCommandResult.ExitCode,
+			))
+		}
 	}
 
 	if trimmed := strings.TrimSpace(input.Session.RecentShellOutput); trimmed != "" {

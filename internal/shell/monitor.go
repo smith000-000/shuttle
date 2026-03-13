@@ -29,6 +29,8 @@ type MonitorSnapshot struct {
 	Error            string
 }
 
+const InterruptedExitCode = 130
+
 type CommandMonitor interface {
 	Snapshot() MonitorSnapshot
 	Updates() <-chan MonitorSnapshot
@@ -113,6 +115,7 @@ func (m *trackedCommandMonitor) updateShellContext(context PromptContext) {
 
 func (m *trackedCommandMonitor) finish(result TrackedExecution, err error, state MonitorState) {
 	completedAt := time.Now()
+	result.State = state
 
 	m.mu.Lock()
 	m.result = result

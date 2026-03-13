@@ -445,12 +445,13 @@ func buildTurnContext(input controller.AgentInput) string {
 
 	if input.Task.LastCommandResult != nil {
 		last := input.Task.LastCommandResult
-		sections = append(sections, fmt.Sprintf(
-			"Last command result:\ncommand=%s\nexit_code=%d\nsummary=%s",
-			last.Command,
-			last.ExitCode,
-			clipText(last.Summary, 800),
-		))
+		lines := []string{
+			"command=" + last.Command,
+			"state=" + string(last.State),
+			fmt.Sprintf("exit_code=%d", last.ExitCode),
+			"summary=" + clipText(last.Summary, 800),
+		}
+		sections = append(sections, "Last command result:\n"+strings.Join(lines, "\n"))
 	}
 
 	if input.Task.CurrentExecution != nil {
@@ -556,6 +557,9 @@ func summarizeTranscriptEvent(event controller.TranscriptEvent) string {
 		return string(event.Kind) + ": " + clipText(payload.Command, 240)
 	case controller.EventCommandResult:
 		payload, _ := event.Payload.(controller.CommandResultSummary)
+		if payload.State == controller.CommandExecutionCanceled {
+			return fmt.Sprintf("%s: canceled %s", event.Kind, clipText(payload.Command, 180))
+		}
 		return fmt.Sprintf("%s: exit=%d %s", event.Kind, payload.ExitCode, clipText(payload.Command, 180))
 	default:
 		return string(event.Kind)

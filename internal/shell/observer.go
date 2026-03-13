@@ -18,6 +18,7 @@ import (
 type TrackedExecution struct {
 	CommandID    string
 	Command      string
+	State        MonitorState
 	ExitCode     int
 	Captured     string
 	ShellContext PromptContext
@@ -240,6 +241,33 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 				ShellContext: shellContext,
 			}, nil, MonitorStateCompleted)
 			return
+		}
+
+		if started {
+			promptContext := monitor.Snapshot().ShellContext
+			if TailSuggestsPromptReturn(captured, promptContext) {
+				cleanBody := sanitizeCapturedBody(capturePaneDelta(beforeCapture, captured))
+				cleanBody = stripEchoedCommand(cleanBody, transportCommand)
+				if promptContext.PromptLine() != "" {
+					cleanBody = stripTrailingPromptLine(cleanBody, promptContext)
+				}
+				logging.Trace(
+					"shell.tracked.prompt_returned",
+					"pane", paneID,
+					"command", command,
+					"command_id", markers.CommandID,
+					"captured_preview", logging.Preview(cleanBody, 1200),
+					"prompt", promptContext.PromptLine(),
+				)
+				monitor.finish(TrackedExecution{
+					CommandID:    markers.CommandID,
+					Command:      command,
+					ExitCode:     InterruptedExitCode,
+					Captured:     cleanBody,
+					ShellContext: promptContext,
+				}, nil, MonitorStateCanceled)
+				return
+			}
 		}
 
 		if !started && time.Now().After(startDeadline) {
@@ -613,13 +641,42 @@ func stripEchoedCommand(body string, command string) string {
 		return strings.TrimSpace(body)
 	}
 
-	for index, commandLine := range commandLines {
-		if !strings.HasSuffix(strings.TrimRight(bodyLines[index], " \t"), commandLine) {
-			return strings.TrimSpace(body)
+	if stripped, ok := stripEchoedCommandLines(bodyLines, commandLines); ok {
+		return stripped
+	}
+
+	if len(bodyLines) > len(commandLines) && lineLooksLikePrompt(bodyLines[0]) {
+		if stripped, ok := stripEchoedCommandLines(bodyLines[1:], commandLines); ok {
+			return stripped
 		}
 	}
 
-	return strings.TrimSpace(strings.Join(bodyLines[len(commandLines):], "\n"))
+	return strings.TrimSpace(body)
+}
+
+func stripEchoedCommandLines(bodyLines []string, commandLines []string) (string, bool) {
+	if len(bodyLines) < len(commandLines) {
+		return "", false
+	}
+
+	for index, commandLine := range commandLines {
+		if !strings.HasSuffix(strings.TrimRight(bodyLines[index], " \t"), commandLine) {
+			return "", false
+		}
+	}
+
+	return strings.TrimSpace(strings.Join(bodyLines[len(commandLines):], "\n")), true
+}
+
+func lineLooksLikePrompt(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return false
+	}
+	if context, ok := ParsePromptContextFromCapture(trimmed); ok {
+		return strings.TrimSpace(context.RawLine) == trimmed
+	}
+	return false
 }
 
 func isContextTransitionCommand(command string) bool {
