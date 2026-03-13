@@ -283,9 +283,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case refreshedShellContextMsg:
 		if msg.context != nil {
 			m.shellContext = *msg.context
-			if m.awaitingHandoff && m.activeExecution != nil {
-				return m, m.reconcileHandoffExecutionCmd()
-			}
 		}
 		return m, nil
 	case shellTailMsg:
@@ -946,8 +943,8 @@ func (m Model) reconcileHandoffExecutionCmd() tea.Cmd {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		promptContext, err := m.ctrl.RefreshShellContext(ctx)
-		if err != nil || promptContext == nil || promptContext.PromptLine() == "" {
+		tail, err := m.ctrl.PeekShellTail(ctx, shellTailPollLines)
+		if err != nil || !shellTailSuggestsPromptReturn(tail, m.shellContext) {
 			return reconcileHandoffExecutionMsg{clear: false}
 		}
 
@@ -1069,15 +1066,20 @@ func shellTailSuggestsPromptReturn(tail string, current shell.PromptContext) boo
 		return false
 	}
 
-	if _, ok := shell.ParsePromptContextFromCapture(tail); ok {
-		return true
-	}
-
-	line := lastNonEmptyLine(tail)
-	if line == "" {
+	lines := lastNonEmptyLines(tail, 2)
+	if len(lines) == 0 {
 		return false
 	}
 
+	trailing := strings.Join(lines, "\n")
+	if context, ok := shell.ParsePromptContextFromCapture(trailing); ok {
+		last := strings.TrimSpace(lines[len(lines)-1])
+		if strings.TrimSpace(context.RawLine) == last {
+			return true
+		}
+	}
+
+	line := strings.TrimSpace(lines[len(lines)-1])
 	if promptLooksLikeCurrentShell(line, current) {
 		return true
 	}
@@ -1099,6 +1101,28 @@ func lastNonEmptyLine(tail string) string {
 	}
 
 	return ""
+}
+
+func lastNonEmptyLines(tail string, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+
+	lines := strings.Split(strings.ReplaceAll(tail, "\r\n", "\n"), "\n")
+	result := make([]string, 0, limit)
+	for index := len(lines) - 1; index >= 0 && len(result) < limit; index-- {
+		line := strings.TrimSpace(lines[index])
+		if line == "" {
+			continue
+		}
+		result = append(result, line)
+	}
+
+	for left, right := 0, len(result)-1; left < right; left, right = left+1, right-1 {
+		result[left], result[right] = result[right], result[left]
+	}
+
+	return result
 }
 
 func promptLooksLikeCurrentShell(line string, current shell.PromptContext) bool {

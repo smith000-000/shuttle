@@ -94,8 +94,9 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	}
 
 	if a.cfg.AgentPrompt != "" {
-		observer := shell.NewObserver(client)
+		observer := shell.NewObserver(client).WithStateDir(a.cfg.StateDir)
 		initialShellContext := initialPromptContext(ctx, observer, workspace.TopPane.ID, a.cfg.StartDir)
+		observer.WithPromptHint(initialShellContext)
 		agent, profile, err := provider.NewFromConfig(a.cfg, provider.FactoryOptions{})
 		if err != nil {
 			logging.TraceError("app.provider.error", err, "provider", a.cfg.ProviderType)
@@ -133,12 +134,13 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	}
 
 	if a.cfg.TUI {
-		observer := shell.NewObserver(client)
+		observer := shell.NewObserver(client).WithStateDir(a.cfg.StateDir)
 		if err := client.BindNoPrefixKey(ctx, tui.TakeControlKey, "detach-client"); err != nil {
 			logging.TraceError("app.bind_take_control.error", err, "key", tui.TakeControlKey)
 			return Result{}, fmt.Errorf("configure take-control key: %w", err)
 		}
 		initialShellContext := initialPromptContext(ctx, observer, workspace.TopPane.ID, a.cfg.StartDir)
+		observer.WithPromptHint(initialShellContext)
 		agent, profile, err := provider.NewFromConfig(a.cfg, provider.FactoryOptions{})
 		if err != nil {
 			logging.TraceError("app.provider.error", err, "provider", a.cfg.ProviderType)
@@ -196,7 +198,8 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	}
 
 	if a.cfg.Track != "" {
-		observer := shell.NewObserver(client)
+		observer := shell.NewObserver(client).WithStateDir(a.cfg.StateDir)
+		observer.WithPromptHint(shell.GuessLocalContext(a.cfg.StartDir))
 		tracked, err := observer.RunTrackedCommand(ctx, workspace.TopPane.ID, a.cfg.Track, shell.CommandTimeout(a.cfg.Track))
 		if err != nil {
 			logging.TraceError("app.track.error", err, "pane", workspace.TopPane.ID, "command", a.cfg.Track)

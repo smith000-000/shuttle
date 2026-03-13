@@ -275,16 +275,14 @@ func TestLocalControllerCheckActiveExecutionUsesAgentContext(t *testing.T) {
 			Message: "Still waiting on the active command.",
 		},
 	}
-	reader := &stubContextReader{
-		output: "line 1\nline 2\nline 3",
-	}
-	controller := New(agent, nil, reader, SessionContext{TopPaneID: "%0"})
+	controller := New(agent, nil, nil, SessionContext{TopPaneID: "%0"})
 	controller.task.CurrentExecution = &CommandExecution{
-		ID:        "cmd-agent",
-		Command:   "sleep 60",
-		Origin:    CommandOriginAgentProposal,
-		State:     CommandExecutionRunning,
-		StartedAt: time.Now().Add(-15 * time.Second),
+		ID:               "cmd-agent",
+		Command:          "sleep 60",
+		Origin:           CommandOriginAgentProposal,
+		State:            CommandExecutionRunning,
+		StartedAt:        time.Now().Add(-15 * time.Second),
+		LatestOutputTail: "line 1\nline 2\nline 3",
 	}
 
 	events, err := controller.CheckActiveExecution(context.Background())
@@ -302,6 +300,55 @@ func TestLocalControllerCheckActiveExecutionUsesAgentContext(t *testing.T) {
 	}
 	if agent.lastInput.Session.RecentShellOutput != "line 1\nline 2\nline 3" {
 		t.Fatalf("expected recent shell output in agent input, got %q", agent.lastInput.Session.RecentShellOutput)
+	}
+}
+
+func TestLocalControllerMonitorUpdatesActiveExecutionTail(t *testing.T) {
+	monitor := newManualMonitor()
+	runner := &monitoringRunner{
+		monitor: monitor,
+		started: make(chan struct{}, 1),
+	}
+	controller := New(nil, runner, nil, SessionContext{TopPaneID: "%0"})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = controller.SubmitShellCommand(context.Background(), "sleep 60")
+	}()
+
+	runner.waitForStart(t)
+	monitor.publish(shell.MonitorSnapshot{
+		CommandID:        "cmd-monitor",
+		Command:          "sleep 60",
+		State:            shell.MonitorStateRunning,
+		StartedAt:        time.Now(),
+		LatestOutputTail: "still running",
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		active := controller.ActiveExecution()
+		if active != nil && active.LatestOutputTail == "still running" && active.State == CommandExecutionRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected active execution to receive monitor tail, got %#v", active)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	monitor.finish(shell.TrackedExecution{
+		CommandID: "cmd-monitor",
+		Command:   "sleep 60",
+		ExitCode:  0,
+		Captured:  "done",
+	}, nil)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for monitored command to finish")
 	}
 }
 
@@ -403,6 +450,71 @@ func TestLocalControllerApproveRunsCommand(t *testing.T) {
 	}
 }
 
+func TestLocalControllerProposalCommandFillsApprovalCommand(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "Approve this test command.",
+			Proposal: &Proposal{
+				Kind:        ProposalCommand,
+				Command:     "bash -lc 'for i in {1..20}; do echo \"$i\"; sleep 1; done'",
+				Description: "Streaming loop.",
+			},
+			Approval: &ApprovalRequest{
+				ID:      "approval-1",
+				Kind:    ApprovalCommand,
+				Title:   "Approve test command",
+				Summary: "Run the streaming loop.",
+				Risk:    RiskLow,
+			},
+		},
+	}
+	controller := New(agent, nil, nil, SessionContext{TopPaneID: "%0"})
+
+	events, err := controller.SubmitAgentPrompt(context.Background(), "propose a streaming loop and ask for approval")
+	if err != nil {
+		t.Fatalf("SubmitAgentPrompt() error = %v", err)
+	}
+
+	var approval ApprovalRequest
+	foundApproval := false
+	for _, event := range events {
+		if event.Kind != EventApproval {
+			continue
+		}
+		payload, ok := event.Payload.(ApprovalRequest)
+		if !ok {
+			t.Fatalf("expected approval payload, got %#v", event.Payload)
+		}
+		approval = payload
+		foundApproval = true
+	}
+	if !foundApproval {
+		t.Fatal("expected approval event")
+	}
+	if approval.Command != "bash -lc 'for i in {1..20}; do echo \"$i\"; sleep 1; done'" {
+		t.Fatalf("expected approval to inherit proposal command, got %q", approval.Command)
+	}
+}
+
+func TestLocalControllerApproveWithoutCommandReturnsError(t *testing.T) {
+	controller := New(nil, nil, nil, SessionContext{TopPaneID: "%0"})
+	controller.task.PendingApproval = &ApprovalRequest{
+		ID:      "approval-1",
+		Kind:    ApprovalCommand,
+		Title:   "Broken approval",
+		Summary: "Missing command",
+		Risk:    RiskLow,
+	}
+
+	events, err := controller.DecideApproval(context.Background(), "approval-1", DecisionApprove, "")
+	if err != nil {
+		t.Fatalf("DecideApproval() error = %v", err)
+	}
+	if len(events) != 1 || events[0].Kind != EventError {
+		t.Fatalf("expected single error event, got %#v", events)
+	}
+}
+
 type stubAgent struct {
 	response  AgentResponse
 	err       error
@@ -445,6 +557,79 @@ func (b *blockingRunner) RunTrackedCommand(_ context.Context, _ string, _ string
 	}
 	<-b.release
 	return b.result, nil
+}
+
+type monitoringRunner struct {
+	monitor  *manualMonitor
+	commands []string
+	started  chan struct{}
+}
+
+func (m *monitoringRunner) RunTrackedCommand(_ context.Context, _ string, _ string, _ time.Duration) (shell.TrackedExecution, error) {
+	return shell.TrackedExecution{}, errors.New("unexpected fallback RunTrackedCommand call")
+}
+
+func (m *monitoringRunner) StartTrackedCommand(_ context.Context, _ string, command string, _ time.Duration) (shell.CommandMonitor, error) {
+	m.commands = append(m.commands, command)
+	if m.started != nil {
+		select {
+		case m.started <- struct{}{}:
+		default:
+		}
+	}
+	return m.monitor, nil
+}
+
+func (m *monitoringRunner) waitForStart(t *testing.T) {
+	t.Helper()
+	if m.started == nil {
+		m.started = make(chan struct{}, 1)
+	}
+	select {
+	case <-m.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for monitor runner to start")
+	}
+}
+
+type manualMonitor struct {
+	snapshot shell.MonitorSnapshot
+	updates  chan shell.MonitorSnapshot
+	done     chan struct{}
+	result   shell.TrackedExecution
+	err      error
+}
+
+func newManualMonitor() *manualMonitor {
+	return &manualMonitor{
+		updates: make(chan shell.MonitorSnapshot, 16),
+		done:    make(chan struct{}),
+	}
+}
+
+func (m *manualMonitor) Snapshot() shell.MonitorSnapshot {
+	return m.snapshot
+}
+
+func (m *manualMonitor) Updates() <-chan shell.MonitorSnapshot {
+	return m.updates
+}
+
+func (m *manualMonitor) Wait() (shell.TrackedExecution, error) {
+	<-m.done
+	return m.result, m.err
+}
+
+func (m *manualMonitor) publish(snapshot shell.MonitorSnapshot) {
+	m.snapshot = snapshot
+	m.updates <- snapshot
+}
+
+func (m *manualMonitor) finish(result shell.TrackedExecution, err error) {
+	m.result = result
+	m.err = err
+	close(m.done)
+	close(m.updates)
 }
 
 func TestLocalControllerRunnerError(t *testing.T) {

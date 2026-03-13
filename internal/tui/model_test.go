@@ -385,6 +385,55 @@ func TestShellTailPromptReturnWithoutCtrlCClearsHandoffExecution(t *testing.T) {
 	}
 }
 
+func TestShellTailWithEarlierPromptLineDoesNotClearHandoffExecution(t *testing.T) {
+	ctrl := &fakeController{
+		activeExecution: &controller.CommandExecution{
+			ID:        "cmd-1",
+			Command:   "sleep 20",
+			Origin:    controller.CommandOriginUserShell,
+			State:     controller.CommandExecutionHandoffActive,
+			StartedAt: time.Now(),
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.activeExecution = ctrl.activeExecution
+	model.awaitingHandoff = true
+	model.showShellTail = true
+	model.shellContext = shell.PromptContext{
+		User:         "jsmith",
+		Host:         "linuxdesktop",
+		Directory:    "~/source/repos/aiterm",
+		GitBranch:    "main",
+		PromptSymbol: "%",
+	}
+
+	tail := "jsmith@linuxdesktop ~/source/repos/aiterm git:(main) %\n. '/tmp/cmd.sh'\n1\n2\n3"
+	updated, _ := model.Update(shellTailMsg{tail: tail})
+	next := updated.(Model)
+
+	if next.activeExecution == nil {
+		t.Fatal("expected handoff execution to remain active")
+	}
+	if !next.awaitingHandoff {
+		t.Fatal("expected handoff reconcile to stay armed")
+	}
+}
+
+func TestShellTailSuggestsPromptReturnIgnoresEarlierPromptHistory(t *testing.T) {
+	current := shell.PromptContext{
+		User:         "jsmith",
+		Host:         "linuxdesktop",
+		Directory:    "~/source/repos/aiterm",
+		GitBranch:    "main",
+		PromptSymbol: "%",
+	}
+
+	tail := "jsmith@linuxdesktop ~/source/repos/aiterm git:(main) %\n. '/tmp/cmd.sh'\n1\n2\n3"
+	if shellTailSuggestsPromptReturn(tail, current) {
+		t.Fatal("expected earlier prompt history to be ignored")
+	}
+}
+
 func TestCanceledControllerEventSuppressedAfterTakeControl(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.suppressCancelErr = true
@@ -2077,6 +2126,7 @@ type fakeController struct {
 	checkInCalls    int
 	activeExecution *controller.CommandExecution
 	abandonReason   string
+	peekShellTail   string
 }
 
 func (f *fakeController) SubmitAgentPrompt(_ context.Context, _ string) ([]controller.TranscriptEvent, error) {
@@ -2213,6 +2263,9 @@ func (f *fakeController) RefreshShellContext(_ context.Context) (*shell.PromptCo
 }
 
 func (f *fakeController) PeekShellTail(_ context.Context, _ int) (string, error) {
+	if f.peekShellTail != "" {
+		return f.peekShellTail, nil
+	}
 	return "waiting for input", nil
 }
 

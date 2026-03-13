@@ -168,6 +168,58 @@ func TestRunTrackedCommandUsesStartTimeoutNotCompletionTimeout(t *testing.T) {
 	}
 }
 
+func TestRunTrackedCommandUsesLocalManagedTransport(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	socketName := fmt.Sprintf("shuttle-track-local-managed-%d", time.Now().UnixNano())
+	sessionName := fmt.Sprintf("shuttle-track-local-managed-%d", time.Now().UnixNano())
+
+	client, err := tmux.NewClient(socketName)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	t.Cleanup(func() {
+		_ = client.KillSession(context.Background(), sessionName)
+	})
+
+	workspace, _, err := tmux.BootstrapWorkspace(ctx, client, tmux.BootstrapOptions{
+		SessionName:       sessionName,
+		StartDir:          ".",
+		BottomPanePercent: 30,
+		HistoryFile:       filepath.Join(t.TempDir(), "shell_history"),
+	})
+	if err != nil {
+		t.Fatalf("BootstrapWorkspace() error = %v", err)
+	}
+
+	stateDir := t.TempDir()
+	observer := shell.NewObserver(client).WithStateDir(stateDir).WithPromptHint(shell.GuessLocalContext("."))
+	result, err := observer.RunTrackedCommand(ctx, workspace.TopPane.ID, "printf 'alpha\\n'", 2*time.Second)
+	if err != nil {
+		t.Fatalf("RunTrackedCommand() error = %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", result.ExitCode)
+	}
+
+	captured, err := client.CapturePane(ctx, workspace.TopPane.ID, -80)
+	if err != nil {
+		t.Fatalf("CapturePane() error = %v", err)
+	}
+	if !strings.Contains(captured, filepath.Join(stateDir, "commands")) {
+		t.Fatalf("expected local managed transport path in shell capture, got %q", captured)
+	}
+	if strings.Contains(captured, "eval \"$(printf") {
+		t.Fatalf("expected local managed transport instead of inline wrapper, got %q", captured)
+	}
+}
+
 func TestRunTrackedCommandHandlesFastHighVolumeOutput(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")

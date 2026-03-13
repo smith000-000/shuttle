@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -22,8 +23,15 @@ type TrackedExecution struct {
 	ShellContext PromptContext
 }
 
+type paneClient interface {
+	CapturePane(ctx context.Context, target string, startLine int) (string, error)
+	SendKeys(ctx context.Context, target string, command string, pressEnter bool) error
+}
+
 type Observer struct {
-	client *tmux.Client
+	client     paneClient
+	stateDir   string
+	promptHint PromptContext
 }
 
 var wrappedSentinelSuffixPattern = regexp.MustCompile(`^[a-z0-9]{1,16}:\$\?$`)
@@ -42,6 +50,53 @@ const (
 
 func NewObserver(client *tmux.Client) *Observer {
 	return &Observer{client: client}
+}
+
+func (o *Observer) WithStateDir(stateDir string) *Observer {
+	o.stateDir = strings.TrimSpace(stateDir)
+	return o
+}
+
+func (o *Observer) WithPromptHint(context PromptContext) *Observer {
+	if context.PromptLine() != "" {
+		o.promptHint = context
+	}
+	return o
+}
+
+func (o *Observer) StartTrackedCommand(ctx context.Context, paneID string, command string, timeout time.Duration) (CommandMonitor, error) {
+	if isContextTransitionCommand(command) {
+		monitor := newTrackedCommandMonitor("", command)
+		go func() {
+			result, err := o.runContextTransitionCommand(ctx, paneID, command, timeout)
+			state := MonitorStateCompleted
+			if err != nil {
+				state = monitorStateFromError(err)
+			}
+			monitor.finish(result, err, state)
+		}()
+		return monitor, nil
+	}
+
+	beforeCapture, err := o.client.CapturePane(ctx, paneID, -trackedCaptureLines)
+	if err != nil {
+		return nil, fmt.Errorf("capture pane before tracked command: %w", err)
+	}
+
+	markers := protocol.NewMarkers()
+	transportCommand, cleanup, err := o.buildTrackedTransport(ctx, paneID, command, markers)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := o.client.SendKeys(ctx, paneID, transportCommand, true); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("send tracked command: %w", err)
+	}
+
+	monitor := newTrackedCommandMonitor(markers.CommandID, command)
+	go o.runTrackedMonitor(ctx, monitor, paneID, command, transportCommand, timeout, beforeCapture, markers, cleanup)
+	return monitor, nil
 }
 
 func (o *Observer) CaptureRecentOutput(ctx context.Context, paneID string, lines int) (string, error) {
@@ -67,32 +122,27 @@ func (o *Observer) CaptureShellContext(ctx context.Context, paneID string) (Prom
 	if !ok {
 		return PromptContext{}, nil
 	}
+	o.promptHint = context
 
 	return context, nil
 }
 
 func (o *Observer) RunTrackedCommand(ctx context.Context, paneID string, command string, timeout time.Duration) (TrackedExecution, error) {
+	monitor, err := o.StartTrackedCommand(ctx, paneID, command, timeout)
+	if err != nil {
+		return TrackedExecution{}, err
+	}
+	return monitor.Wait()
+}
+
+func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedCommandMonitor, paneID string, command string, transportCommand string, timeout time.Duration, beforeCapture string, markers protocol.Markers, cleanup func()) {
+	defer cleanup()
 	logging.Trace(
 		"shell.tracked.start",
 		"pane", paneID,
 		"command", command,
 		"timeout_ms", timeout.Milliseconds(),
 	)
-	if isContextTransitionCommand(command) {
-		return o.runContextTransitionCommand(ctx, paneID, command, timeout)
-	}
-
-	beforeCapture, err := o.client.CapturePane(ctx, paneID, -trackedCaptureLines)
-	if err != nil {
-		return TrackedExecution{}, fmt.Errorf("capture pane before tracked command: %w", err)
-	}
-
-	markers := protocol.NewMarkers()
-	wrapped := protocol.WrapCommand(command, markers)
-
-	if err := o.client.SendKeys(ctx, paneID, wrapped, true); err != nil {
-		return TrackedExecution{}, fmt.Errorf("send tracked command: %w", err)
-	}
 
 	started := false
 	startDeadline := time.Now().Add(timeout)
@@ -107,12 +157,18 @@ func (o *Observer) RunTrackedCommand(ctx context.Context, paneID string, command
 				"command", command,
 				"last_capture_preview", logging.Preview(lastCapture, 1000),
 			)
-			return TrackedExecution{}, fmt.Errorf("capture pane: %w", err)
+			monitor.finish(TrackedExecution{CommandID: markers.CommandID, Command: command}, fmt.Errorf("capture pane: %w", err), MonitorStateFailed)
+			return
 		}
 		lastCapture = captured
+		monitor.updateTail(monitorTail(captured, transportCommand))
+		if shellContext, ok := ParsePromptContextFromCapture(captured); ok {
+			monitor.updateShellContext(shellContext)
+		}
 
 		if !started && sawTrackedCommandStart(captured, markers) {
 			started = true
+			monitor.setState(MonitorStateRunning)
 			logging.Trace(
 				"shell.tracked.started",
 				"pane", paneID,
@@ -123,6 +179,7 @@ func (o *Observer) RunTrackedCommand(ctx context.Context, paneID string, command
 		}
 		if !started && trackedCommandLikelyStarted(beforeCapture, captured) {
 			started = true
+			monitor.setState(MonitorStateRunning)
 			logging.Trace(
 				"shell.tracked.started_inferred",
 				"pane", paneID,
@@ -142,10 +199,11 @@ func (o *Observer) RunTrackedCommand(ctx context.Context, paneID string, command
 				"command_id", markers.CommandID,
 				"capture_preview", logging.Preview(captured, 1000),
 			)
-			return TrackedExecution{}, fmt.Errorf("parse tracked command result: %w", err)
+			monitor.finish(TrackedExecution{CommandID: markers.CommandID, Command: command}, fmt.Errorf("parse tracked command result: %w", err), MonitorStateFailed)
+			return
 		}
 		if !complete {
-			result, complete, err = inferTrackedCommandResultFromEndMarker(captured, beforeCapture, command, markers)
+			result, complete, err = inferTrackedCommandResultFromEndMarker(captured, beforeCapture, transportCommand, markers)
 			if err != nil {
 				logging.TraceError(
 					"shell.tracked.inferred_parse_error",
@@ -155,13 +213,14 @@ func (o *Observer) RunTrackedCommand(ctx context.Context, paneID string, command
 					"command_id", markers.CommandID,
 					"capture_preview", logging.Preview(captured, 1000),
 				)
-				return TrackedExecution{}, fmt.Errorf("parse tracked command result from end marker: %w", err)
+				monitor.finish(TrackedExecution{CommandID: markers.CommandID, Command: command}, fmt.Errorf("parse tracked command result from end marker: %w", err), MonitorStateFailed)
+				return
 			}
 		}
 
 		if complete {
 			cleanBody := sanitizeCapturedBody(result.Body)
-			cleanBody = stripEchoedCommand(cleanBody, command)
+			cleanBody = stripEchoedCommand(cleanBody, transportCommand)
 			shellContext, _ := ParsePromptContextFromCapture(captured)
 			logging.Trace(
 				"shell.tracked.complete",
@@ -173,16 +232,18 @@ func (o *Observer) RunTrackedCommand(ctx context.Context, paneID string, command
 				"captured_len", len(cleanBody),
 				"prompt", shellContext.PromptLine(),
 			)
-			return TrackedExecution{
+			monitor.finish(TrackedExecution{
 				CommandID:    result.CommandID,
 				Command:      command,
 				ExitCode:     result.ExitCode,
 				Captured:     cleanBody,
 				ShellContext: shellContext,
-			}, nil
+			}, nil, MonitorStateCompleted)
+			return
 		}
 
 		if !started && time.Now().After(startDeadline) {
+			err := fmt.Errorf("timed out waiting for tracked command %s to start", markers.CommandID)
 			logging.Trace(
 				"shell.tracked.start_timeout",
 				"pane", paneID,
@@ -190,7 +251,8 @@ func (o *Observer) RunTrackedCommand(ctx context.Context, paneID string, command
 				"command_id", markers.CommandID,
 				"capture_preview", logging.Preview(captured, 2000),
 			)
-			return TrackedExecution{}, fmt.Errorf("timed out waiting for tracked command %s to start", markers.CommandID)
+			monitor.finish(TrackedExecution{CommandID: markers.CommandID, Command: command}, err, MonitorStateFailed)
+			return
 		}
 
 		select {
@@ -204,10 +266,21 @@ func (o *Observer) RunTrackedCommand(ctx context.Context, paneID string, command
 				"started", started,
 				"last_capture_preview", logging.Preview(lastCapture, 1000),
 			)
-			return TrackedExecution{}, ctx.Err()
+			monitor.finish(TrackedExecution{CommandID: markers.CommandID, Command: command}, ctx.Err(), monitorStateFromError(ctx.Err()))
+			return
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+}
+
+func monitorStateFromError(err error) MonitorState {
+	if err == nil {
+		return MonitorStateCompleted
+	}
+	if errors.Is(err, context.Canceled) {
+		return MonitorStateCanceled
+	}
+	return MonitorStateFailed
 }
 
 func trackedCommandLikelyStarted(beforeCapture string, captured string) bool {

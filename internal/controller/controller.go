@@ -22,6 +22,10 @@ type ShellRunner interface {
 	RunTrackedCommand(ctx context.Context, paneID string, command string, timeout time.Duration) (shell.TrackedExecution, error)
 }
 
+type MonitoringShellRunner interface {
+	StartTrackedCommand(ctx context.Context, paneID string, command string, timeout time.Duration) (shell.CommandMonitor, error)
+}
+
 type ShellContextReader interface {
 	CaptureRecentOutput(ctx context.Context, paneID string, lines int) (string, error)
 	CaptureShellContext(ctx context.Context, paneID string) (shell.PromptContext, error)
@@ -145,11 +149,11 @@ func (c *LocalController) CheckActiveExecution(ctx context.Context) ([]Transcrip
 	c.task.CurrentExecution.State = CommandExecutionBackgroundMonitor
 	session := c.session
 	task := c.task
+	recentOutput := strings.TrimSpace(c.task.CurrentExecution.LatestOutputTail)
 	topPaneID := c.session.TopPaneID
 	c.mu.Unlock()
 
-	recentOutput := ""
-	if c.reader != nil && topPaneID != "" {
+	if recentOutput == "" && c.reader != nil && topPaneID != "" {
 		captured, err := c.reader.CaptureRecentOutput(ctx, topPaneID, 120)
 		if err == nil {
 			recentOutput = captured
@@ -269,6 +273,7 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 		c.appendEvents(errEvent)
 		return append(append([]TranscriptEvent(nil), events...), errEvent), nil
 	}
+	response = normalizeAgentResponse(response)
 
 	newEvents := append([]TranscriptEvent(nil), events...)
 
@@ -331,6 +336,25 @@ func buildActivePlan(plan Plan) ActivePlan {
 		Summary: strings.TrimSpace(plan.Summary),
 		Steps:   steps,
 	}
+}
+
+func normalizeAgentResponse(response AgentResponse) AgentResponse {
+	if response.Approval == nil || response.Proposal == nil {
+		return response
+	}
+
+	approval := *response.Approval
+	proposal := *response.Proposal
+
+	if approval.Kind == ApprovalCommand && strings.TrimSpace(approval.Command) == "" && proposal.Kind == ProposalCommand && strings.TrimSpace(proposal.Command) != "" {
+		approval.Command = strings.TrimSpace(proposal.Command)
+	}
+	if approval.Kind == ApprovalPatch && strings.TrimSpace(approval.Patch) == "" && proposal.Kind == ProposalPatch && strings.TrimSpace(proposal.Patch) != "" {
+		approval.Patch = strings.TrimSpace(proposal.Patch)
+	}
+
+	response.Approval = &approval
+	return response
 }
 
 func (c *LocalController) advanceActivePlanLocked() *TranscriptEvent {
@@ -416,7 +440,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 		return []TranscriptEvent{startEvent, errEvent}, nil
 	}
 
-	result, err := c.runner.RunTrackedCommand(ctx, c.session.TopPaneID, command, shell.CommandTimeout(command))
+	result, err := c.runTrackedCommand(ctx, execution.ID, command)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -501,6 +525,75 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 	return []TranscriptEvent{startEvent, resultEvent}, nil
 }
 
+func (c *LocalController) runTrackedCommand(ctx context.Context, executionID string, command string) (shell.TrackedExecution, error) {
+	timeout := shell.CommandTimeout(command)
+	if monitorRunner, ok := c.runner.(MonitoringShellRunner); ok {
+		monitor, err := monitorRunner.StartTrackedCommand(ctx, c.session.TopPaneID, command, timeout)
+		if err != nil {
+			return shell.TrackedExecution{}, err
+		}
+		go c.consumeMonitorSnapshots(executionID, monitor)
+		return monitor.Wait()
+	}
+
+	return c.runner.RunTrackedCommand(ctx, c.session.TopPaneID, command, timeout)
+}
+
+func (c *LocalController) consumeMonitorSnapshots(executionID string, monitor shell.CommandMonitor) {
+	for snapshot := range monitor.Updates() {
+		c.applyMonitorSnapshot(executionID, snapshot)
+	}
+}
+
+func (c *LocalController) applyMonitorSnapshot(executionID string, snapshot shell.MonitorSnapshot) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.task.CurrentExecution == nil || c.task.CurrentExecution.ID != executionID {
+		return
+	}
+
+	execution := c.task.CurrentExecution
+	switch snapshot.State {
+	case shell.MonitorStateQueued:
+		if execution.State == CommandExecutionQueued {
+			execution.State = CommandExecutionQueued
+		}
+	case shell.MonitorStateRunning:
+		if execution.State != CommandExecutionHandoffActive && execution.State != CommandExecutionBackgroundMonitor {
+			execution.State = CommandExecutionRunning
+		}
+	case shell.MonitorStateCanceled:
+		execution.State = CommandExecutionCanceled
+	case shell.MonitorStateFailed:
+		execution.State = CommandExecutionFailed
+	case shell.MonitorStateLost:
+		execution.State = CommandExecutionLost
+	case shell.MonitorStateCompleted:
+		execution.State = CommandExecutionCompleted
+	}
+
+	if strings.TrimSpace(snapshot.LatestOutputTail) != "" {
+		execution.LatestOutputTail = snapshot.LatestOutputTail
+		c.session.RecentShellOutput = snapshot.LatestOutputTail
+	}
+	if snapshot.ShellContext.PromptLine() != "" {
+		contextCopy := snapshot.ShellContext
+		execution.ShellContextAfter = &contextCopy
+		c.session.CurrentShell = &contextCopy
+		if contextCopy.Directory != "" {
+			c.session.WorkingDirectory = contextCopy.Directory
+		}
+	}
+	if snapshot.ExitCode != nil {
+		exitCode := *snapshot.ExitCode
+		execution.ExitCode = &exitCode
+	}
+	if snapshot.Error != "" {
+		execution.Error = snapshot.Error
+	}
+}
+
 func (c *LocalController) DecideApproval(ctx context.Context, approvalID string, decision ApprovalDecision, refineText string) ([]TranscriptEvent, error) {
 	logging.Trace("controller.decide_approval", "approval_id", approvalID, "decision", decision, "refine_text", refineText)
 	c.mu.Lock()
@@ -532,6 +625,12 @@ func (c *LocalController) DecideApproval(ctx context.Context, approvalID string,
 	case DecisionApprove:
 		command := pending.Command
 		c.task.PendingApproval = nil
+		if strings.TrimSpace(command) == "" {
+			event := c.newEvent(EventError, TextPayload{Text: "approval does not contain an executable command"})
+			c.appendEvents(event)
+			c.mu.Unlock()
+			return []TranscriptEvent{event}, nil
+		}
 		c.mu.Unlock()
 		return c.submitShellCommand(ctx, command, CommandOriginAgentApproval)
 	default:
