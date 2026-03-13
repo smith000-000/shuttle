@@ -27,6 +27,9 @@ Milestone 5 still needs:
 - provider switching UI
 - release-grade runtime management for socket/session lifecycle and crash recovery
 - execution-state redesign for long-running and interactive shell commands
+- a real patch-application path so proposed diffs can become actual workspace changes
+- guardrails that prevent the agent from claiming proposed files exist before the patch is applied
+- stronger active-command classification such as `awaiting_input` and `lost`, so agent check-ins and the UI can distinguish a waiting shell from a merely slow command
 
 ## Guiding Decisions
 - Build `P0` only first. That means Epics 1 through 4 in [requirements-mvp.md](requirements-mvp.md).
@@ -193,6 +196,11 @@ Next:
 ### Exit Criteria
 - the same loop used in Milestone 4 works with a real provider
 - provider failures are surfaced as structured errors rather than crashing the app
+
+### Backlog Note
+- Patch proposals currently stop at proposal generation. Shuttle still needs an explicit apply/approve/apply-result flow for diffs and file creation.
+- Until that exists, the controller and provider prompts should treat proposed patches as inert and should not let the agent narrate them as already-created files.
+- The next execution-monitor slice should classify `awaiting_input` conservatively from shell-tail evidence and reserve `lost` for genuinely low-confidence tracking failures rather than silent long-running jobs.
 
 Framework and ACP guidance: [agent-runtime-design.md](agent-runtime-design.md)
 Detailed provider decomposition: [provider-integration-design.md](provider-integration-design.md)

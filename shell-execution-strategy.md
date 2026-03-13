@@ -243,6 +243,17 @@ But heuristics should only help with:
 They should not be required for correctness.
 The live shell tail and explicit `F2` flow are the correctness path.
 
+### 8.1 Immediate Next Slice
+The next practical slice after prompt-return reconciliation is:
+- classify `awaiting_input` conservatively from live shell tail evidence
+- keep `running` for commands that are clearly progressing
+- reserve `lost` for cases where Shuttle truly cannot reconcile the command confidently, rather than treating quiet commands as lost by default
+
+This should improve:
+- password and confirmation prompts
+- `read` / `input()` / "press any key" flows
+- agent check-ins that currently say "still running" when the shell is actually waiting for input
+
 ### 9. Model Shell Connectivity as Capability Tiers
 Shuttle should not assume every shell has the same observability.
 
@@ -342,6 +353,12 @@ Design implication:
 - only for agent-owned commands
 - rate-limited progress turns
 - allow the agent to wait, summarize, revise, or request user input
+
+### Phase 5a. Input-Wait Classification
+- add conservative `awaiting_input` classification from shell-tail evidence
+- surface that state in the active command card
+- feed that state into agent check-ins so the agent can say "waiting for shell input" instead of "still running"
+- do not classify a quiet long-running command as `lost` just because it is silent
 
 ### Phase 6. Runtime Durability
 - align with the runtime-management design
