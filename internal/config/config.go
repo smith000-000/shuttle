@@ -5,6 +5,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -12,6 +13,7 @@ const (
 	defaultSessionName = "shuttle"
 	defaultStateDir    = ".shuttle"
 	defaultLogName     = "shuttle.log"
+	defaultTraceName   = "trace.log"
 )
 
 type Config struct {
@@ -20,6 +22,8 @@ type Config struct {
 	TmuxSocket           string
 	StateDir             string
 	LogPath              string
+	Trace                bool
+	TracePath            string
 	AgentPrompt          string
 	Inject               string
 	Track                string
@@ -46,6 +50,8 @@ func Parse(args []string) (Config, error) {
 	providerAuthMethod := envOrDefault("SHUTTLE_AUTH", "auto")
 	providerModel := os.Getenv("SHUTTLE_MODEL")
 	providerBaseURL := os.Getenv("SHUTTLE_BASE_URL")
+	traceEnabled := envBool("SHUTTLE_TRACE")
+	tracePath := os.Getenv("SHUTTLE_TRACE_PATH")
 
 	fs := flag.NewFlagSet("shuttle", flag.ContinueOnError)
 
@@ -54,6 +60,8 @@ func Parse(args []string) (Config, error) {
 	fs.StringVar(&cfg.StartDir, "dir", workingDir, "working directory for new panes")
 	fs.StringVar(&cfg.TmuxSocket, "socket", socketName, "tmux socket name for an isolated server")
 	fs.StringVar(&cfg.StateDir, "state-dir", stateDir, "state directory for logs and future local state")
+	fs.BoolVar(&cfg.Trace, "trace", traceEnabled, "write verbose execution tracing to the trace log")
+	fs.StringVar(&cfg.TracePath, "trace-path", tracePath, "path for verbose trace output")
 	fs.StringVar(&cfg.AgentPrompt, "agent", "", "submit a single agent prompt and print the structured response")
 	fs.StringVar(&cfg.Inject, "inject", "", "inject a shell command into the top pane after bootstrap")
 	fs.StringVar(&cfg.Track, "track", "", "inject a tracked shell command into the top pane and wait for its result")
@@ -84,6 +92,15 @@ func Parse(args []string) (Config, error) {
 	}
 	cfg.StateDir = stateDirAbs
 	cfg.LogPath = filepath.Join(cfg.StateDir, defaultLogName)
+	if strings.TrimSpace(cfg.TracePath) == "" {
+		cfg.TracePath = filepath.Join(cfg.StateDir, defaultTraceName)
+	} else {
+		tracePathAbs, err := filepath.Abs(cfg.TracePath)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.TracePath = tracePathAbs
+	}
 	cfg.ProviderType = normalizeProviderType(cfg.ProviderType)
 	authMethod, err := normalizeProviderAuthMethod(cfg.ProviderAuthMethod)
 	if err != nil {
@@ -101,6 +118,20 @@ func envOrDefault(key string, fallback string) string {
 	}
 
 	return fallback
+}
+
+func envBool(key string) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return false
+	}
+
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false
+	}
+
+	return parsed
 }
 
 func firstNonEmpty(values ...string) string {

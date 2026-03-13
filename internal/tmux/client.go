@@ -8,6 +8,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
+
+	"aiterm/internal/logging"
 )
 
 var ErrNotInstalled = errors.New("tmux not found in PATH")
@@ -120,23 +123,53 @@ func (c *Client) BindNoPrefixKey(ctx context.Context, key string, command ...str
 	return err
 }
 
+func (c *Client) SetGlobalOption(ctx context.Context, name string, value string) error {
+	_, err := c.run(ctx, "set-option", "-g", name, value)
+	return err
+}
+
 func (c *Client) run(ctx context.Context, args ...string) (string, error) {
+	startedAt := time.Now()
 	commandArgs := make([]string, 0, len(args)+2)
 	if c.socketName != "" {
 		commandArgs = append(commandArgs, "-L", c.socketName)
 	}
 	commandArgs = append(commandArgs, args...)
 
+	logging.Trace(
+		"tmux.run.start",
+		"socket", c.socketName,
+		"args", strings.Join(args, " "),
+	)
+
 	command := exec.CommandContext(ctx, c.binary, commandArgs...)
 	output, err := command.CombinedOutput()
 	trimmed := strings.TrimSpace(string(output))
 	if err != nil {
+		logging.TraceError(
+			"tmux.run.error",
+			err,
+			"socket", c.socketName,
+			"args", strings.Join(args, " "),
+			"duration_ms", time.Since(startedAt).Milliseconds(),
+			"output_preview", logging.Preview(trimmed, 600),
+			"output_len", len(trimmed),
+		)
 		if trimmed == "" {
 			return "", fmt.Errorf("tmux %s: %w", strings.Join(args, " "), err)
 		}
 
 		return "", fmt.Errorf("tmux %s: %w: %s", strings.Join(args, " "), err, trimmed)
 	}
+
+	logging.Trace(
+		"tmux.run.complete",
+		"socket", c.socketName,
+		"args", strings.Join(args, " "),
+		"duration_ms", time.Since(startedAt).Milliseconds(),
+		"output_preview", logging.Preview(trimmed, 600),
+		"output_len", len(trimmed),
+	)
 
 	return trimmed, nil
 }

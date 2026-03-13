@@ -1,6 +1,10 @@
 package shell
 
-import "testing"
+import (
+	"testing"
+
+	"aiterm/internal/protocol"
+)
 
 func TestSanitizeCapturedBody(t *testing.T) {
 	body := "prompt% echo __SHUTTLE_B__:cmd-1\nprompt% printf 'alpha\\n'; false\nalpha\nprompt% echo __SHUTTLE_E__:cmd-1:1\nabc123:$?"
@@ -81,5 +85,39 @@ func TestParseShellContextProbeOutput(t *testing.T) {
 	}
 	if !context.Root {
 		t.Fatalf("expected root prompt context %#v", context)
+	}
+}
+
+func TestTrackedCommandLikelyStarted(t *testing.T) {
+	before := "jsmith@host %"
+	after := "jsmith@host % printf '__SHUTTLE_B__'\nalpha"
+
+	if !trackedCommandLikelyStarted(before, after) {
+		t.Fatal("expected changed pane capture to infer command start")
+	}
+}
+
+func TestInferTrackedCommandResultFromEndMarker(t *testing.T) {
+	markers := protocol.Markers{
+		CommandID: "cmd-1",
+		BeginLine: "__SHUTTLE_B__:cmd-1",
+		EndPrefix: "__SHUTTLE_E__:cmd-1:",
+	}
+
+	before := "jsmith@host %"
+	after := "jsmith@host % rg -n -H -e foo ~\nalpha\nbeta\n__SHUTTLE_E__:cmd-1:0\njsmith@host %"
+
+	result, complete, err := inferTrackedCommandResultFromEndMarker(after, before, "rg -n -H -e foo ~", markers)
+	if err != nil {
+		t.Fatalf("inferTrackedCommandResultFromEndMarker() error = %v", err)
+	}
+	if !complete {
+		t.Fatal("expected inferred result to complete")
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", result.ExitCode)
+	}
+	if result.Body != "alpha\nbeta\njsmith@host %" {
+		t.Fatalf("unexpected inferred body %q", result.Body)
 	}
 }

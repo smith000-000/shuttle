@@ -122,3 +122,93 @@ func TestRunTrackedInteractiveCommand(t *testing.T) {
 		t.Fatal("timed out waiting for interactive tracked command")
 	}
 }
+
+func TestRunTrackedCommandUsesStartTimeoutNotCompletionTimeout(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	socketName := fmt.Sprintf("shuttle-track-start-timeout-%d", time.Now().UnixNano())
+	sessionName := fmt.Sprintf("shuttle-track-start-timeout-%d", time.Now().UnixNano())
+
+	client, err := tmux.NewClient(socketName)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	t.Cleanup(func() {
+		_ = client.KillSession(context.Background(), sessionName)
+	})
+
+	workspace, _, err := tmux.BootstrapWorkspace(ctx, client, tmux.BootstrapOptions{
+		SessionName:       sessionName,
+		StartDir:          ".",
+		BottomPanePercent: 30,
+		HistoryFile:       filepath.Join(t.TempDir(), "shell_history"),
+	})
+	if err != nil {
+		t.Fatalf("BootstrapWorkspace() error = %v", err)
+	}
+
+	observer := shell.NewObserver(client)
+	result, err := observer.RunTrackedCommand(ctx, workspace.TopPane.ID, "sleep 1; printf 'ready\\n'", 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("RunTrackedCommand() error = %v", err)
+	}
+
+	if result.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", result.ExitCode)
+	}
+
+	if !strings.Contains(result.Captured, "ready") {
+		t.Fatalf("expected captured output to contain ready, got %q", result.Captured)
+	}
+}
+
+func TestRunTrackedCommandHandlesFastHighVolumeOutput(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	socketName := fmt.Sprintf("shuttle-track-high-volume-%d", time.Now().UnixNano())
+	sessionName := fmt.Sprintf("shuttle-track-high-volume-%d", time.Now().UnixNano())
+
+	client, err := tmux.NewClient(socketName)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	t.Cleanup(func() {
+		_ = client.KillSession(context.Background(), sessionName)
+	})
+
+	workspace, _, err := tmux.BootstrapWorkspace(ctx, client, tmux.BootstrapOptions{
+		SessionName:       sessionName,
+		StartDir:          ".",
+		BottomPanePercent: 30,
+		HistoryFile:       filepath.Join(t.TempDir(), "shell_history"),
+	})
+	if err != nil {
+		t.Fatalf("BootstrapWorkspace() error = %v", err)
+	}
+
+	observer := shell.NewObserver(client)
+	result, err := observer.RunTrackedCommand(ctx, workspace.TopPane.ID, "seq 1 5000; printf 'ready\\n'", 2*time.Second)
+	if err != nil {
+		t.Fatalf("RunTrackedCommand() error = %v", err)
+	}
+
+	if result.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", result.ExitCode)
+	}
+
+	if !strings.Contains(result.Captured, "ready") {
+		t.Fatalf("expected captured output to contain ready, got %q", result.Captured)
+	}
+}

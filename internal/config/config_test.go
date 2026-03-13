@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestParseResolvesOpenAIAPIKeyByProvider(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "openai-key")
@@ -53,5 +56,38 @@ func TestParsePrefersShuttleAPIKeyOverride(t *testing.T) {
 
 	if cfg.ProviderAPIKeyEnvVar != "SHUTTLE_API_KEY" {
 		t.Fatalf("expected SHUTTLE_API_KEY source, got %q", cfg.ProviderAPIKeyEnvVar)
+	}
+}
+
+func TestParseEnablesTraceFromEnv(t *testing.T) {
+	t.Setenv("SHUTTLE_TRACE", "true")
+
+	cfg, err := Parse(nil)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	if !cfg.Trace {
+		t.Fatalf("expected trace to be enabled from env")
+	}
+
+	expected := filepath.Join(cfg.StateDir, defaultTraceName)
+	if cfg.TracePath != expected {
+		t.Fatalf("expected default trace path %q, got %q", expected, cfg.TracePath)
+	}
+}
+
+func TestParseResolvesCustomTracePath(t *testing.T) {
+	cfg, err := Parse([]string{"--trace", "--trace-path", "./tmp/trace.out"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	if !cfg.Trace {
+		t.Fatalf("expected trace flag to be enabled")
+	}
+
+	if !filepath.IsAbs(cfg.TracePath) {
+		t.Fatalf("expected absolute trace path, got %q", cfg.TracePath)
 	}
 }

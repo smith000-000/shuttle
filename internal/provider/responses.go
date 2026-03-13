@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"aiterm/internal/controller"
+	"aiterm/internal/logging"
 )
 
 type ResponsesAgent struct {
@@ -115,6 +116,7 @@ func NewResponsesAgent(profile Profile, client *http.Client) (*ResponsesAgent, e
 }
 
 func (a *ResponsesAgent) Respond(ctx context.Context, input controller.AgentInput) (controller.AgentResponse, error) {
+	requestID := fmt.Sprintf("req-%d", a.counter.Add(1))
 	requestBody := responsesRequest{
 		Model: a.profile.Model,
 		Input: []responsesInputMessage{
@@ -151,6 +153,18 @@ func (a *ResponsesAgent) Respond(ctx context.Context, input controller.AgentInpu
 		return controller.AgentResponse{}, err
 	}
 
+	logging.Trace(
+		"provider.responses.request",
+		"request_id", requestID,
+		"preset", a.profile.Preset,
+		"model", a.profile.Model,
+		"base_url", a.profile.BaseURL,
+		"endpoint", endpoint,
+		"auth_method", a.profile.AuthMethod,
+		"api_key_env", a.profile.APIKeyEnvVar,
+		"body", string(payload),
+	)
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return controller.AgentResponse{}, fmt.Errorf("build provider request: %w", err)
@@ -163,16 +177,41 @@ func (a *ResponsesAgent) Respond(ctx context.Context, input controller.AgentInpu
 		req.Header.Set("Authorization", "Bearer "+a.profile.APIKey)
 	}
 
+	startedAt := time.Now()
 	resp, err := a.client.Do(req)
 	if err != nil {
+		logging.TraceError(
+			"provider.responses.request_error",
+			err,
+			"request_id", requestID,
+			"endpoint", endpoint,
+			"duration_ms", time.Since(startedAt).Milliseconds(),
+		)
 		return controller.AgentResponse{}, fmt.Errorf("request provider: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		logging.TraceError(
+			"provider.responses.read_error",
+			err,
+			"request_id", requestID,
+			"endpoint", endpoint,
+			"status_code", resp.StatusCode,
+			"duration_ms", time.Since(startedAt).Milliseconds(),
+		)
 		return controller.AgentResponse{}, fmt.Errorf("read provider response: %w", err)
 	}
+
+	logging.Trace(
+		"provider.responses.response",
+		"request_id", requestID,
+		"endpoint", endpoint,
+		"status_code", resp.StatusCode,
+		"duration_ms", time.Since(startedAt).Milliseconds(),
+		"body", string(body),
+	)
 
 	if resp.StatusCode >= http.StatusBadRequest {
 		return controller.AgentResponse{}, parseProviderError(resp.StatusCode, body)
@@ -414,6 +453,20 @@ func buildTurnContext(input controller.AgentInput) string {
 		))
 	}
 
+	if input.Task.CurrentExecution != nil {
+		current := input.Task.CurrentExecution
+		lines := []string{
+			"id=" + current.ID,
+			"command=" + current.Command,
+			"origin=" + string(current.Origin),
+			"state=" + string(current.State),
+		}
+		if tail := clipText(current.LatestOutputTail, 800); tail != "" {
+			lines = append(lines, "latest_output="+tail)
+		}
+		sections = append(sections, "Current active command:\n"+strings.Join(lines, "\n"))
+	}
+
 	if input.Task.ActivePlan != nil {
 		sections = append(sections, "Active plan:\n"+formatActivePlan(*input.Task.ActivePlan))
 	}
@@ -626,4 +679,6 @@ Rules:
 - If an action is destructive, risky, or should be user-confirmed, leave proposal fields empty and fill the approval fields instead.
 - For approvals, set "approval_kind" to "command", "patch", or "plan" and set "approval_risk" to "low", "medium", or "high".
 - If the task is a refinement of a pending approval, preserve the original command or patch unless the context clearly requires changing it.
+- If the current turn says an active command is still running, use "message" for a brief status update. Do not emit a plan, proposal, or approval unless the shell is clearly waiting for user intervention.
+- After a proposed or approved command completes, if there is no active plan, default to summarizing the result and waiting for the user. Only chain into another command when the user's request clearly requires more shell work.
 - Leave unused fields as empty strings, and leave unused arrays empty.`

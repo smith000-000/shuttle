@@ -32,6 +32,7 @@ type TaskContext struct {
 	PendingApproval   *ApprovalRequest
 	LastCommandResult *CommandResultSummary
 	ActivePlan        *ActivePlan
+	CurrentExecution  *CommandExecution
 }
 
 type AgentResponse struct {
@@ -134,9 +135,48 @@ const (
 	EventError         TranscriptEventKind = "error"
 )
 
+type CommandOrigin string
+
+const (
+	CommandOriginUserShell     CommandOrigin = "user_shell"
+	CommandOriginAgentProposal CommandOrigin = "agent_proposal"
+	CommandOriginAgentApproval CommandOrigin = "agent_approval"
+	CommandOriginAgentPlan     CommandOrigin = "agent_plan"
+)
+
+type CommandExecutionState string
+
+const (
+	CommandExecutionQueued            CommandExecutionState = "queued"
+	CommandExecutionRunning           CommandExecutionState = "running"
+	CommandExecutionAwaitingInput     CommandExecutionState = "awaiting_input"
+	CommandExecutionHandoffActive     CommandExecutionState = "handoff_active"
+	CommandExecutionBackgroundMonitor CommandExecutionState = "background_monitoring"
+	CommandExecutionCompleted         CommandExecutionState = "completed"
+	CommandExecutionFailed            CommandExecutionState = "failed"
+	CommandExecutionCanceled          CommandExecutionState = "canceled"
+	CommandExecutionLost              CommandExecutionState = "lost"
+)
+
+type CommandExecution struct {
+	ID                 string
+	Command            string
+	Origin             CommandOrigin
+	State              CommandExecutionState
+	StartedAt          time.Time
+	CompletedAt        *time.Time
+	ExitCode           *int
+	LatestOutputTail   string
+	Error              string
+	ShellContextBefore *shell.PromptContext
+	ShellContextAfter  *shell.PromptContext
+}
+
 type CommandResultSummary struct {
+	ExecutionID  string
 	CommandID    string
 	Command      string
+	Origin       CommandOrigin
 	ExitCode     int
 	Summary      string
 	ShellContext *shell.PromptContext
@@ -145,11 +185,16 @@ type CommandResultSummary struct {
 type Controller interface {
 	SubmitAgentPrompt(ctx context.Context, prompt string) ([]TranscriptEvent, error)
 	SubmitRefinement(ctx context.Context, approval ApprovalRequest, note string) ([]TranscriptEvent, error)
+	SubmitProposalRefinement(ctx context.Context, proposal ProposalPayload, note string) ([]TranscriptEvent, error)
 	ContinueActivePlan(ctx context.Context) ([]TranscriptEvent, error)
 	ContinueAfterCommand(ctx context.Context) ([]TranscriptEvent, error)
+	CheckActiveExecution(ctx context.Context) ([]TranscriptEvent, error)
 	ResumeAfterTakeControl(ctx context.Context) ([]TranscriptEvent, error)
 	SubmitShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error)
+	SubmitProposedShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error)
 	DecideApproval(ctx context.Context, approvalID string, decision ApprovalDecision, refineText string) ([]TranscriptEvent, error)
 	RefreshShellContext(ctx context.Context) (*shell.PromptContext, error)
 	PeekShellTail(ctx context.Context, lines int) (string, error)
+	ActiveExecution() *CommandExecution
+	AbandonActiveExecution(reason string) *CommandExecution
 }

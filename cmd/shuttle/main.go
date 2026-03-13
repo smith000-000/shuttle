@@ -29,6 +29,25 @@ func main() {
 	}
 	defer closeLogger()
 
+	closeTrace, err := logging.ConfigureTrace(cfg.TracePath, cfg.Trace)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "trace logger error: %v\n", err)
+		os.Exit(1)
+	}
+	defer closeTrace()
+
+	logging.Trace(
+		"app.start",
+		"session", cfg.SessionName,
+		"socket", cfg.TmuxSocket,
+		"start_dir", cfg.StartDir,
+		"state_dir", cfg.StateDir,
+		"provider", cfg.ProviderType,
+		"auth", cfg.ProviderAuthMethod,
+		"model", cfg.ProviderModel,
+		"trace_path", cfg.TracePath,
+	)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

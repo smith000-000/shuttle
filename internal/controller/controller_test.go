@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,6 +98,268 @@ func TestLocalControllerSubmitShellCommand(t *testing.T) {
 	if events[0].Kind != EventCommandStart || events[1].Kind != EventCommandResult {
 		t.Fatalf("unexpected event kinds: %#v", events)
 	}
+
+	startPayload, ok := events[0].Payload.(CommandStartPayload)
+	if !ok {
+		t.Fatalf("expected command start payload, got %#v", events[0].Payload)
+	}
+	if startPayload.Execution.Origin != CommandOriginUserShell || startPayload.Execution.State != CommandExecutionRunning {
+		t.Fatalf("unexpected execution payload: %#v", startPayload.Execution)
+	}
+
+	resultPayload, ok := events[1].Payload.(CommandResultSummary)
+	if !ok {
+		t.Fatalf("expected command result payload, got %#v", events[1].Payload)
+	}
+	if resultPayload.Origin != CommandOriginUserShell {
+		t.Fatalf("expected user-shell origin, got %q", resultPayload.Origin)
+	}
+}
+
+func TestLocalControllerSubmitProposedShellCommandTracksAgentOrigin(t *testing.T) {
+	controller := New(nil, &stubRunner{
+		result: shell.TrackedExecution{
+			CommandID: "cmd-2",
+			Command:   "ls -lah",
+			ExitCode:  0,
+			Captured:  "file.txt",
+		},
+	}, nil, SessionContext{TopPaneID: "%0"})
+
+	events, err := controller.SubmitProposedShellCommand(context.Background(), "ls -lah")
+	if err != nil {
+		t.Fatalf("SubmitProposedShellCommand() error = %v", err)
+	}
+
+	startPayload, ok := events[0].Payload.(CommandStartPayload)
+	if !ok {
+		t.Fatalf("expected command start payload, got %#v", events[0].Payload)
+	}
+	if startPayload.Execution.Origin != CommandOriginAgentProposal {
+		t.Fatalf("expected proposal origin, got %q", startPayload.Execution.Origin)
+	}
+
+	resultPayload, ok := events[1].Payload.(CommandResultSummary)
+	if !ok {
+		t.Fatalf("expected command result payload, got %#v", events[1].Payload)
+	}
+	if resultPayload.Origin != CommandOriginAgentProposal {
+		t.Fatalf("expected proposal origin in result, got %q", resultPayload.Origin)
+	}
+}
+
+func TestLocalControllerActiveExecutionVisibleWhileCommandRuns(t *testing.T) {
+	runner := &blockingRunner{
+		started: make(chan struct{}, 1),
+		release: make(chan struct{}),
+		result: shell.TrackedExecution{
+			CommandID: "cmd-blocking",
+			Command:   "sleep 5",
+			ExitCode:  0,
+			Captured:  "done",
+		},
+	}
+	controller := New(nil, runner, nil, SessionContext{TopPaneID: "%0"})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = controller.SubmitShellCommand(context.Background(), "sleep 5")
+	}()
+
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for runner to start")
+	}
+
+	active := controller.ActiveExecution()
+	if active == nil {
+		t.Fatal("expected active execution while command is running")
+	}
+	if active.Command != "sleep 5" || active.State != CommandExecutionRunning {
+		t.Fatalf("unexpected active execution: %#v", active)
+	}
+
+	close(runner.release)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for runner to finish")
+	}
+
+	if controller.ActiveExecution() != nil {
+		t.Fatal("expected active execution to clear after completion")
+	}
+}
+
+func TestLocalControllerAbandonActiveExecutionClearsState(t *testing.T) {
+	controller := New(nil, nil, &stubContextReader{output: "tail line"}, SessionContext{TopPaneID: "%0"})
+	controller.task.CurrentExecution = &CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 60",
+		Origin:    CommandOriginUserShell,
+		State:     CommandExecutionRunning,
+		StartedAt: time.Now(),
+	}
+
+	execution := controller.AbandonActiveExecution("user interrupted from handoff")
+	if execution == nil {
+		t.Fatal("expected execution snapshot")
+	}
+	if execution.State != CommandExecutionCanceled {
+		t.Fatalf("expected canceled state, got %q", execution.State)
+	}
+	if execution.Error != "user interrupted from handoff" {
+		t.Fatalf("expected abandon reason, got %q", execution.Error)
+	}
+	if execution.LatestOutputTail != "tail line" {
+		t.Fatalf("expected captured tail, got %q", execution.LatestOutputTail)
+	}
+	if controller.ActiveExecution() != nil {
+		t.Fatal("expected active execution to clear")
+	}
+}
+
+func TestLocalControllerIgnoresLateResultAfterAbandon(t *testing.T) {
+	runner := &blockingRunner{
+		started: make(chan struct{}, 1),
+		release: make(chan struct{}),
+		result: shell.TrackedExecution{
+			CommandID: "cmd-blocking",
+			Command:   "sleep 60",
+			ExitCode:  0,
+			Captured:  "done",
+		},
+	}
+	controller := New(nil, runner, &stubContextReader{output: "^C"}, SessionContext{TopPaneID: "%0"})
+
+	resultCh := make(chan struct {
+		events []TranscriptEvent
+		err    error
+	}, 1)
+	go func() {
+		events, err := controller.SubmitShellCommand(context.Background(), "sleep 60")
+		resultCh <- struct {
+			events []TranscriptEvent
+			err    error
+		}{events: events, err: err}
+	}()
+
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for runner to start")
+	}
+
+	controller.AbandonActiveExecution("user interrupted from handoff")
+	close(runner.release)
+
+	select {
+	case result := <-resultCh:
+		if !errors.Is(result.err, context.Canceled) {
+			t.Fatalf("expected late result to be treated as canceled, got err=%v events=%#v", result.err, result.events)
+		}
+		if len(result.events) != 0 {
+			t.Fatalf("expected no late events after abandon, got %#v", result.events)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for submit shell command to finish")
+	}
+}
+
+func TestLocalControllerCheckActiveExecutionUsesAgentContext(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "Still waiting on the active command.",
+		},
+	}
+	reader := &stubContextReader{
+		output: "line 1\nline 2\nline 3",
+	}
+	controller := New(agent, nil, reader, SessionContext{TopPaneID: "%0"})
+	controller.task.CurrentExecution = &CommandExecution{
+		ID:        "cmd-agent",
+		Command:   "sleep 60",
+		Origin:    CommandOriginAgentProposal,
+		State:     CommandExecutionRunning,
+		StartedAt: time.Now().Add(-15 * time.Second),
+	}
+
+	events, err := controller.CheckActiveExecution(context.Background())
+	if err != nil {
+		t.Fatalf("CheckActiveExecution() error = %v", err)
+	}
+	if len(events) != 1 || events[0].Kind != EventAgentMessage {
+		t.Fatalf("unexpected check-in events: %#v", events)
+	}
+	if agent.lastInput.Prompt != activeExecutionCheckInPrompt {
+		t.Fatalf("expected check-in prompt, got %q", agent.lastInput.Prompt)
+	}
+	if agent.lastInput.Task.CurrentExecution == nil || agent.lastInput.Task.CurrentExecution.State != CommandExecutionBackgroundMonitor {
+		t.Fatalf("expected background monitoring state, got %#v", agent.lastInput.Task.CurrentExecution)
+	}
+	if agent.lastInput.Session.RecentShellOutput != "line 1\nline 2\nline 3" {
+		t.Fatalf("expected recent shell output in agent input, got %q", agent.lastInput.Session.RecentShellOutput)
+	}
+}
+
+func TestLocalControllerCheckActiveExecutionSkipsUserShellCommands(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "unexpected",
+		},
+	}
+	controller := New(agent, nil, &stubContextReader{output: "ignored"}, SessionContext{TopPaneID: "%0"})
+	controller.task.CurrentExecution = &CommandExecution{
+		ID:        "cmd-user",
+		Command:   "sleep 60",
+		Origin:    CommandOriginUserShell,
+		State:     CommandExecutionRunning,
+		StartedAt: time.Now().Add(-15 * time.Second),
+	}
+
+	events, err := controller.CheckActiveExecution(context.Background())
+	if err != nil {
+		t.Fatalf("CheckActiveExecution() error = %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected no events, got %#v", events)
+	}
+	if agent.lastInput.Prompt != "" {
+		t.Fatalf("expected agent not to be called, got input %#v", agent.lastInput)
+	}
+}
+
+func TestLocalControllerSubmitProposalRefinementBuildsAgentPrompt(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "Revised proposal ready.",
+		},
+	}
+	controller := New(agent, nil, nil, SessionContext{TopPaneID: "%0"})
+
+	events, err := controller.SubmitProposalRefinement(context.Background(), ProposalPayload{
+		Kind:        ProposalCommand,
+		Command:     "sleep 5",
+		Description: "Run a short sleep.",
+	}, "Make it one second.")
+	if err != nil {
+		t.Fatalf("SubmitProposalRefinement() error = %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected user + agent events, got %d", len(events))
+	}
+	if events[0].Kind != EventUserMessage {
+		t.Fatalf("expected visible user note, got %#v", events[0])
+	}
+	if !strings.Contains(agent.lastInput.Prompt, "Original command: sleep 5") {
+		t.Fatalf("expected proposal context in agent prompt, got %q", agent.lastInput.Prompt)
+	}
+	if events[0].Payload.(TextPayload).Text != "Make it one second." {
+		t.Fatalf("expected visible refinement note, got %#v", events[0].Payload)
+	}
 }
 
 func TestLocalControllerApproveRunsCommand(t *testing.T) {
@@ -167,6 +430,21 @@ func (s *stubRunner) RunTrackedCommand(_ context.Context, _ string, command stri
 		s.result.Command = command
 	}
 	return s.result, nil
+}
+
+type blockingRunner struct {
+	started chan struct{}
+	release chan struct{}
+	result  shell.TrackedExecution
+}
+
+func (b *blockingRunner) RunTrackedCommand(_ context.Context, _ string, _ string, _ time.Duration) (shell.TrackedExecution, error) {
+	select {
+	case b.started <- struct{}{}:
+	default:
+	}
+	<-b.release
+	return b.result, nil
 }
 
 func TestLocalControllerRunnerError(t *testing.T) {

@@ -9,6 +9,8 @@ import (
 	"sort"
 )
 
+const shuttleHistoryLimit = 50000
+
 type BootstrapOptions struct {
 	SessionName       string
 	StartDir          string
@@ -70,6 +72,10 @@ func BootstrapWorkspace(ctx context.Context, client *Client, options BootstrapOp
 		}
 
 		created = true
+	}
+
+	if err := client.SetGlobalOption(ctx, "history-limit", fmt.Sprintf("%d", shuttleHistoryLimit)); err != nil {
+		return Workspace{}, false, fmt.Errorf("set tmux history limit: %w", err)
 	}
 
 	panes, err := client.ListPanes(ctx, options.SessionName)

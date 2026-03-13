@@ -243,6 +243,77 @@ But heuristics should only help with:
 They should not be required for correctness.
 The live shell tail and explicit `F2` flow are the correctness path.
 
+### 9. Model Shell Connectivity as Capability Tiers
+Shuttle should not assume every shell has the same observability.
+
+This is especially important once the user is inside:
+- an interactive remote SSH session
+- a shell with a heavily customized multi-line prompt
+- a non-Linux remote system
+- a shell where we cannot install hooks or helpers
+
+Instead of pretending one strategy is universal, Shuttle should classify the current shell session by capability.
+
+Recommended capability tiers:
+
+#### Tier A. `local_managed`
+Shuttle owns the local tmux pane and injects commands directly into the local shell.
+
+Available signals:
+- sentinel begin/end markers
+- tmux pane metadata
+- live shell tail
+- prompt/context refresh
+- explicit local interrupt/handoff events
+
+This is the strongest mode and should provide the best execution guarantees.
+
+#### Tier B. `text_observed`
+Shuttle can see terminal output and prompt-like returns, but cannot rely on shell hooks or remote helpers.
+
+Available signals:
+- terminal stream text
+- best-effort prompt recognition
+- explicit user handoff
+- shell-tail changes
+
+Unavailable or untrusted signals:
+- remote tmux or remote process metadata
+- shell hooks
+- platform-specific assumptions about Linux tools
+
+This tier should remain usable, but Shuttle must treat completion and interruption as lower-confidence inferences.
+
+#### Tier C. `hook_integrated`
+Shuttle has shell-aware hooks inside the current shell session, for example prompt or command lifecycle hooks.
+
+Available signals:
+- explicit preexec/precmd-style command lifecycle events
+- prompt/context changes
+- terminal stream text
+
+This is likely the best long-term answer for local shells, but it requires shell-specific integration.
+
+#### Tier D. `remote_enhanced`
+Shuttle successfully bootstrapped a temporary remote helper or session integration for the current remote shell.
+
+Important constraints:
+- it must not require remote tmux
+- it must not assume Linux-only tooling
+- it must degrade safely if the remote host does not support it
+
+Available signals may include:
+- explicit remote command lifecycle markers
+- session-aware pwd/user/host reporting
+- stronger remote execution reconciliation
+
+This tier should be optional enhancement, not a requirement for basic SSH support.
+
+Design implication:
+- when Shuttle launches a command, it should use the strongest mechanism available for the current capability tier
+- when the user drops into an opaque interactive remote shell, Shuttle should downgrade gracefully to `text_observed`
+- prompt parsing should remain fallback logic, not the core execution contract
+
 ## Proposed Implementation Sequence
 
 ### Phase 1. Execution State Machine

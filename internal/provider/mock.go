@@ -32,6 +32,10 @@ func (m *MockAgent) Respond(_ context.Context, input controller.AgentInput) (con
 		return controller.AgentResponse{
 			Message: summarizeRecentContext(input),
 		}, nil
+	case containsAny(lower, "agent-started shell command is still running", "give a brief status update based on the latest shell output"):
+		return controller.AgentResponse{
+			Message: summarizeActiveExecution(input),
+		}, nil
 	case containsAny(lower, "previously approved or proposed command has completed", "continue the task using the latest shell output"):
 		return continueActivePlanResponse(input), nil
 	case containsAny(lower, "continue the active plan from the current step"):
@@ -136,6 +140,27 @@ func summarizeRecentContext(input controller.AgentInput) string {
 	}
 
 	return strings.Join(parts, "\n\n")
+}
+
+func summarizeActiveExecution(input controller.AgentInput) string {
+	current := input.Task.CurrentExecution
+	if current == nil {
+		return "I no longer see an active command."
+	}
+
+	lines := []string{
+		fmt.Sprintf("Still waiting on `%s`.", current.Command),
+	}
+
+	if trimmed := strings.TrimSpace(current.LatestOutputTail); trimmed != "" {
+		tailLines := strings.Split(trimmed, "\n")
+		if len(tailLines) > 3 {
+			tailLines = tailLines[len(tailLines)-3:]
+		}
+		lines = append(lines, "Latest shell output:\n"+strings.Join(tailLines, "\n"))
+	}
+
+	return strings.Join(lines, "\n\n")
 }
 
 func continueActivePlanResponse(input controller.AgentInput) controller.AgentResponse {

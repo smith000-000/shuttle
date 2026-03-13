@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"aiterm/internal/logging"
 	"aiterm/internal/protocol"
 	"aiterm/internal/tmux"
 )
@@ -36,6 +37,7 @@ printf '__SHUTTLE_CTX_PWD__=%s\n' "$PWD"`
 const (
 	DefaultCommandTimeout           = 10 * time.Second
 	ContextTransitionCommandTimeout = 60 * time.Second
+	trackedCaptureLines             = 2000
 )
 
 func NewObserver(client *tmux.Client) *Observer {
@@ -70,8 +72,19 @@ func (o *Observer) CaptureShellContext(ctx context.Context, paneID string) (Prom
 }
 
 func (o *Observer) RunTrackedCommand(ctx context.Context, paneID string, command string, timeout time.Duration) (TrackedExecution, error) {
+	logging.Trace(
+		"shell.tracked.start",
+		"pane", paneID,
+		"command", command,
+		"timeout_ms", timeout.Milliseconds(),
+	)
 	if isContextTransitionCommand(command) {
 		return o.runContextTransitionCommand(ctx, paneID, command, timeout)
+	}
+
+	beforeCapture, err := o.client.CapturePane(ctx, paneID, -trackedCaptureLines)
+	if err != nil {
+		return TrackedExecution{}, fmt.Errorf("capture pane before tracked command: %w", err)
 	}
 
 	markers := protocol.NewMarkers()
@@ -81,22 +94,85 @@ func (o *Observer) RunTrackedCommand(ctx context.Context, paneID string, command
 		return TrackedExecution{}, fmt.Errorf("send tracked command: %w", err)
 	}
 
-	deadline := time.Now().Add(timeout)
+	started := false
+	startDeadline := time.Now().Add(timeout)
+	lastCapture := ""
 	for {
-		captured, err := o.client.CapturePane(ctx, paneID, -200)
+		captured, err := o.client.CapturePane(ctx, paneID, -trackedCaptureLines)
 		if err != nil {
+			logging.TraceError(
+				"shell.tracked.capture_error",
+				err,
+				"pane", paneID,
+				"command", command,
+				"last_capture_preview", logging.Preview(lastCapture, 1000),
+			)
 			return TrackedExecution{}, fmt.Errorf("capture pane: %w", err)
+		}
+		lastCapture = captured
+
+		if !started && sawTrackedCommandStart(captured, markers) {
+			started = true
+			logging.Trace(
+				"shell.tracked.started",
+				"pane", paneID,
+				"command", command,
+				"command_id", markers.CommandID,
+				"capture_preview", logging.Preview(captured, 1000),
+			)
+		}
+		if !started && trackedCommandLikelyStarted(beforeCapture, captured) {
+			started = true
+			logging.Trace(
+				"shell.tracked.started_inferred",
+				"pane", paneID,
+				"command", command,
+				"command_id", markers.CommandID,
+				"delta_preview", logging.Preview(capturePaneDelta(beforeCapture, captured), 1000),
+			)
 		}
 
 		result, complete, err := protocol.ParseCommandResult(captured, markers)
 		if err != nil {
+			logging.TraceError(
+				"shell.tracked.parse_error",
+				err,
+				"pane", paneID,
+				"command", command,
+				"command_id", markers.CommandID,
+				"capture_preview", logging.Preview(captured, 1000),
+			)
 			return TrackedExecution{}, fmt.Errorf("parse tracked command result: %w", err)
+		}
+		if !complete {
+			result, complete, err = inferTrackedCommandResultFromEndMarker(captured, beforeCapture, command, markers)
+			if err != nil {
+				logging.TraceError(
+					"shell.tracked.inferred_parse_error",
+					err,
+					"pane", paneID,
+					"command", command,
+					"command_id", markers.CommandID,
+					"capture_preview", logging.Preview(captured, 1000),
+				)
+				return TrackedExecution{}, fmt.Errorf("parse tracked command result from end marker: %w", err)
+			}
 		}
 
 		if complete {
 			cleanBody := sanitizeCapturedBody(result.Body)
 			cleanBody = stripEchoedCommand(cleanBody, command)
 			shellContext, _ := ParsePromptContextFromCapture(captured)
+			logging.Trace(
+				"shell.tracked.complete",
+				"pane", paneID,
+				"command", command,
+				"command_id", result.CommandID,
+				"exit_code", result.ExitCode,
+				"captured_preview", logging.Preview(cleanBody, 2000),
+				"captured_len", len(cleanBody),
+				"prompt", shellContext.PromptLine(),
+			)
 			return TrackedExecution{
 				CommandID:    result.CommandID,
 				Command:      command,
@@ -106,16 +182,83 @@ func (o *Observer) RunTrackedCommand(ctx context.Context, paneID string, command
 			}, nil
 		}
 
-		if time.Now().After(deadline) {
-			return TrackedExecution{}, fmt.Errorf("timed out waiting for tracked command %s", markers.CommandID)
+		if !started && time.Now().After(startDeadline) {
+			logging.Trace(
+				"shell.tracked.start_timeout",
+				"pane", paneID,
+				"command", command,
+				"command_id", markers.CommandID,
+				"capture_preview", logging.Preview(captured, 2000),
+			)
+			return TrackedExecution{}, fmt.Errorf("timed out waiting for tracked command %s to start", markers.CommandID)
 		}
 
 		select {
 		case <-ctx.Done():
+			logging.TraceError(
+				"shell.tracked.canceled",
+				ctx.Err(),
+				"pane", paneID,
+				"command", command,
+				"command_id", markers.CommandID,
+				"started", started,
+				"last_capture_preview", logging.Preview(lastCapture, 1000),
+			)
 			return TrackedExecution{}, ctx.Err()
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+}
+
+func trackedCommandLikelyStarted(beforeCapture string, captured string) bool {
+	return strings.TrimSpace(capturePaneDelta(beforeCapture, captured)) != ""
+}
+
+func inferTrackedCommandResultFromEndMarker(captured string, beforeCapture string, command string, markers protocol.Markers) (protocol.CommandResult, bool, error) {
+	lines := strings.Split(strings.ReplaceAll(captured, "\r\n", "\n"), "\n")
+	endIndex := -1
+	exitCode := 0
+	for index := len(lines) - 1; index >= 0; index-- {
+		line := strings.TrimSpace(lines[index])
+		if !strings.HasPrefix(line, markers.EndPrefix) {
+			continue
+		}
+
+		exitValue := strings.TrimPrefix(line, markers.EndPrefix)
+		if exitValue == "" {
+			return protocol.CommandResult{}, false, nil
+		}
+
+		parsedExitCode, err := strconv.Atoi(exitValue)
+		if err != nil {
+			return protocol.CommandResult{}, false, fmt.Errorf("parse end marker exit code from %q: %w", line, err)
+		}
+
+		endIndex = index
+		exitCode = parsedExitCode
+		break
+	}
+
+	if endIndex == -1 {
+		return protocol.CommandResult{}, false, nil
+	}
+
+	delta := capturePaneDelta(beforeCapture, captured)
+	return protocol.CommandResult{
+		CommandID: markers.CommandID,
+		ExitCode:  exitCode,
+		Body:      stripEchoedCommand(sanitizeCapturedBody(delta), command),
+	}, true, nil
+}
+
+func sawTrackedCommandStart(captured string, markers protocol.Markers) bool {
+	for _, line := range strings.Split(captured, "\n") {
+		if strings.TrimSpace(line) == markers.BeginLine {
+			return true
+		}
+	}
+
+	return false
 }
 
 func CommandTimeout(command string) time.Duration {
@@ -155,6 +298,12 @@ func IsInteractiveCommand(command string) bool {
 }
 
 func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID string, command string, timeout time.Duration) (TrackedExecution, error) {
+	logging.Trace(
+		"shell.context_transition.start",
+		"pane", paneID,
+		"command", command,
+		"timeout_ms", timeout.Milliseconds(),
+	)
 	effectiveTimeout := timeout
 	if effectiveTimeout < 45*time.Second {
 		effectiveTimeout = 45 * time.Second
@@ -162,11 +311,13 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID strin
 
 	beforeCapture, err := o.client.CapturePane(ctx, paneID, -200)
 	if err != nil {
+		logging.TraceError("shell.context_transition.capture_before_error", err, "pane", paneID, "command", command)
 		return TrackedExecution{}, fmt.Errorf("capture pane before context transition: %w", err)
 	}
 
 	baselineContext, _ := ParsePromptContextFromCapture(beforeCapture)
 	if err := o.client.SendKeys(ctx, paneID, command, true); err != nil {
+		logging.TraceError("shell.context_transition.send_error", err, "pane", paneID, "command", command)
 		return TrackedExecution{}, fmt.Errorf("send context transition command: %w", err)
 	}
 
@@ -176,6 +327,7 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID strin
 	for {
 		captured, err := o.client.CapturePane(ctx, paneID, -200)
 		if err != nil {
+			logging.TraceError("shell.context_transition.capture_after_error", err, "pane", paneID, "command", command)
 			return TrackedExecution{}, fmt.Errorf("capture pane after context transition: %w", err)
 		}
 
@@ -183,15 +335,29 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID strin
 		if ok && promptReturnedAfterTransition(beforeCapture, baselineContext, candidate, captured) {
 			promptCapture = captured
 			promptContext = candidate
+			logging.Trace(
+				"shell.context_transition.prompt_returned",
+				"pane", paneID,
+				"command", command,
+				"prompt", promptContext.PromptLine(),
+				"capture_preview", logging.Preview(captured, 1200),
+			)
 			break
 		}
 
 		if time.Now().After(deadline) {
+			logging.Trace(
+				"shell.context_transition.timeout",
+				"pane", paneID,
+				"command", command,
+				"capture_preview", logging.Preview(captured, 1200),
+			)
 			return TrackedExecution{}, fmt.Errorf("timed out waiting for context transition command to settle")
 		}
 
 		select {
 		case <-ctx.Done():
+			logging.TraceError("shell.context_transition.canceled", ctx.Err(), "pane", paneID, "command", command)
 			return TrackedExecution{}, ctx.Err()
 		case <-time.After(100 * time.Millisecond):
 		}
@@ -222,7 +388,19 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID strin
 		if probeOutput != "" {
 			delta = strings.TrimSpace(delta + "\n" + probeOutput)
 		}
+	} else {
+		logging.TraceError("shell.context_transition.probe_error", err, "pane", paneID, "command", command)
 	}
+
+	logging.Trace(
+		"shell.context_transition.complete",
+		"pane", paneID,
+		"command", command,
+		"command_id", commandID,
+		"exit_code", exitCode,
+		"delta_preview", logging.Preview(delta, 1200),
+		"prompt", promptContext.PromptLine(),
+	)
 
 	return TrackedExecution{
 		CommandID:    commandID,
@@ -234,22 +412,38 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID strin
 }
 
 func (o *Observer) runProbeCommand(ctx context.Context, paneID string, timeout time.Duration) (TrackedExecution, error) {
+	logging.Trace(
+		"shell.probe.start",
+		"pane", paneID,
+		"timeout_ms", timeout.Milliseconds(),
+	)
 	markers := protocol.NewMarkers()
 	wrapped := protocol.WrapCommand(shellContextProbeCommand, markers)
 
 	if err := o.client.SendKeys(ctx, paneID, wrapped, true); err != nil {
+		logging.TraceError("shell.probe.send_error", err, "pane", paneID, "command_id", markers.CommandID)
 		return TrackedExecution{}, fmt.Errorf("send shell context probe: %w", err)
 	}
 
 	deadline := time.Now().Add(timeout)
+	lastCapture := ""
 	for {
-		captured, err := o.client.CapturePane(ctx, paneID, -200)
+		captured, err := o.client.CapturePane(ctx, paneID, -trackedCaptureLines)
 		if err != nil {
+			logging.TraceError("shell.probe.capture_error", err, "pane", paneID, "command_id", markers.CommandID)
 			return TrackedExecution{}, fmt.Errorf("capture pane for shell context probe: %w", err)
 		}
+		lastCapture = captured
 
 		result, complete, err := protocol.ParseCommandResult(captured, markers)
 		if err != nil {
+			logging.TraceError(
+				"shell.probe.parse_error",
+				err,
+				"pane", paneID,
+				"command_id", markers.CommandID,
+				"capture_preview", logging.Preview(captured, 1200),
+			)
 			return TrackedExecution{}, fmt.Errorf("parse shell context probe result: %w", err)
 		}
 
@@ -257,6 +451,14 @@ func (o *Observer) runProbeCommand(ctx context.Context, paneID string, timeout t
 			cleanBody := sanitizeCapturedBody(result.Body)
 			cleanBody = stripEchoedCommand(cleanBody, shellContextProbeCommand)
 			shellContext, _ := ParsePromptContextFromCapture(captured)
+			logging.Trace(
+				"shell.probe.complete",
+				"pane", paneID,
+				"command_id", result.CommandID,
+				"exit_code", result.ExitCode,
+				"captured_preview", logging.Preview(cleanBody, 1200),
+				"prompt", shellContext.PromptLine(),
+			)
 			return TrackedExecution{
 				CommandID:    result.CommandID,
 				Command:      shellContextProbeCommand,
@@ -267,11 +469,24 @@ func (o *Observer) runProbeCommand(ctx context.Context, paneID string, timeout t
 		}
 
 		if time.Now().After(deadline) {
+			logging.Trace(
+				"shell.probe.timeout",
+				"pane", paneID,
+				"command_id", markers.CommandID,
+				"capture_preview", logging.Preview(captured, 1200),
+			)
 			return TrackedExecution{}, fmt.Errorf("timed out waiting for shell context probe")
 		}
 
 		select {
 		case <-ctx.Done():
+			logging.TraceError(
+				"shell.probe.canceled",
+				ctx.Err(),
+				"pane", paneID,
+				"command_id", markers.CommandID,
+				"last_capture_preview", logging.Preview(lastCapture, 1200),
+			)
 			return TrackedExecution{}, ctx.Err()
 		case <-time.After(50 * time.Millisecond):
 		}
