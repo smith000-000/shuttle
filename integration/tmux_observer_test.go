@@ -123,6 +123,62 @@ func TestRunTrackedInteractiveCommand(t *testing.T) {
 	}
 }
 
+func TestStartTrackedCommandDetectsAlternateScreen(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	socketName := fmt.Sprintf("shuttle-track-alt-screen-%d", time.Now().UnixNano())
+	sessionName := fmt.Sprintf("shuttle-track-alt-screen-%d", time.Now().UnixNano())
+
+	client, err := tmux.NewClient(socketName)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	t.Cleanup(func() {
+		_ = client.KillSession(context.Background(), sessionName)
+	})
+
+	workspace, _, err := tmux.BootstrapWorkspace(ctx, client, tmux.BootstrapOptions{
+		SessionName:       sessionName,
+		StartDir:          ".",
+		BottomPanePercent: 30,
+		HistoryFile:       filepath.Join(t.TempDir(), "shell_history"),
+	})
+	if err != nil {
+		t.Fatalf("BootstrapWorkspace() error = %v", err)
+	}
+
+	observer := shell.NewObserver(client)
+	monitor, err := observer.StartTrackedCommand(ctx, workspace.TopPane.ID, `bash -lc 'printf "\033[?1049h"; printf "fullscreen\n"; sleep 1; printf "\033[?1049l"; printf "done\n"'`, 2*time.Second)
+	if err != nil {
+		t.Fatalf("StartTrackedCommand() error = %v", err)
+	}
+
+	sawInteractive := false
+	for snapshot := range monitor.Updates() {
+		if snapshot.State == shell.MonitorStateInteractiveFullscreen {
+			sawInteractive = true
+			break
+		}
+	}
+
+	result, err := monitor.Wait()
+	if err != nil {
+		t.Fatalf("monitor.Wait() error = %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", result.ExitCode)
+	}
+	if !sawInteractive {
+		t.Fatalf("expected alternate-screen command to publish interactive fullscreen state, got %#v", result)
+	}
+}
+
 func TestRunTrackedCommandUsesStartTimeoutNotCompletionTimeout(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")

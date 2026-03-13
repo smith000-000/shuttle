@@ -204,6 +204,7 @@ Next:
 - The next execution-monitor slice should classify `awaiting_input` conservatively from shell-tail evidence and reserve `lost` for genuinely low-confidence tracking failures rather than silent long-running jobs.
 - After the current `awaiting_input` work, the next execution-monitor slice should add pane-stream/fullscreen detection in the same redesign track rather than as a separate feature branch.
 - That slice should prefer terminal behavior over command names so aliases, functions, and wrapped fullscreen apps do not regress back into weak prompt-return heuristics.
+- After fullscreen detection, add an explicit recovery-snapshot path so ambiguous shell takeovers can be fed back into the agent using a larger terminal page dump plus execution confidence metadata instead of only a tiny shell tail.
 
 Framework and ACP guidance: [agent-runtime-design.md](agent-runtime-design.md)
 Detailed provider decomposition: [provider-integration-design.md](provider-integration-design.md)

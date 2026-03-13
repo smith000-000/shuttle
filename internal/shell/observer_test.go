@@ -52,6 +52,18 @@ func TestStripEchoedCommandWithPromptLineBeforeTransportCommand(t *testing.T) {
 	}
 }
 
+func TestStripEchoedWrappedTransportCommand(t *testing.T) {
+	body := "jsmith@linuxdesktop ~/source/repos/aiterm git:(main) %\n. \n '/home/jsmith/source/repos/aiterm/.shuttle/commands/cmd-1.sh'\n1\n2\n3"
+	command := ". '/home/jsmith/source/repos/aiterm/.shuttle/commands/cmd-1.sh'"
+
+	got := stripEchoedCommand(body, command)
+	want := "1\n2\n3"
+
+	if got != want {
+		t.Fatalf("stripEchoedCommand() = %q, want %q", got, want)
+	}
+}
+
 func TestIsContextTransitionCommand(t *testing.T) {
 	cases := map[string]bool{
 		"ssh prod":                   true,
@@ -83,16 +95,25 @@ func TestCommandTimeout(t *testing.T) {
 }
 
 func TestClassifyActiveMonitorStateTreatsInteractiveCommandAsAwaitingInput(t *testing.T) {
-	if got := classifyActiveMonitorState("btop", ""); got != MonitorStateAwaitingInput {
-		t.Fatalf("classifyActiveMonitorState(btop) = %s, want %s", got, MonitorStateAwaitingInput)
+	if got := classifyActiveMonitorState("sudo ls", "[sudo] password for jsmith:", false); got != MonitorStateAwaitingInput {
+		t.Fatalf("classifyActiveMonitorState(sudo ls) = %s, want %s", got, MonitorStateAwaitingInput)
+	}
+}
+
+func TestClassifyActiveMonitorStateTreatsAlternateScreenAsInteractiveFullscreen(t *testing.T) {
+	if got := classifyActiveMonitorState("wrapped-btop", "", true); got != MonitorStateInteractiveFullscreen {
+		t.Fatalf("classifyActiveMonitorState(alternate screen) = %s, want %s", got, MonitorStateInteractiveFullscreen)
 	}
 }
 
 func TestAllowPromptReturnInferenceDisablesInteractiveCommands(t *testing.T) {
-	if allowPromptReturnInference("btop") {
+	if allowPromptReturnInference("btop", false) {
 		t.Fatal("expected fullscreen interactive command to disable prompt-return inference")
 	}
-	if !allowPromptReturnInference("bash -lc 'sleep 5; echo ready'") {
+	if allowPromptReturnInference("wrapped-btop", true) {
+		t.Fatal("expected alternate-screen command to disable prompt-return inference")
+	}
+	if !allowPromptReturnInference("bash -lc 'sleep 5; echo ready'", false) {
 		t.Fatal("expected ordinary shell command to allow prompt-return inference")
 	}
 }

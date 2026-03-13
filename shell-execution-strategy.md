@@ -389,6 +389,21 @@ This should improve:
 - remote fullscreen apps inside SSH sessions
 - correctness when there is little or no line-oriented shell output
 
+### Phase 5c. Agent Recovery Snapshot
+- when control flow goes ambiguous because the shell or a fullscreen app unexpectedly takes over, capture a richer recovery snapshot instead of relying on a tiny live tail
+- snapshot inputs should include:
+  - a larger terminal page dump, for example the last 100 to 200 visible lines
+  - current execution state and confidence
+  - shell context, if available
+  - fullscreen and alternate-screen indicators
+  - local-vs-remote capability hints
+- use that recovery snapshot as an explicit agent check-in path for ambiguous states, not as the default on every command
+- let the agent use it to answer:
+  - is the shell waiting for input
+  - is a fullscreen app active
+  - did control likely return to a prompt
+  - is tracking confidence low enough that Shuttle should mark the execution `lost`
+
 ### Phase 6. Runtime Durability
 - align with the runtime-management design
 - keep tracked executions recoverable across Shuttle restarts

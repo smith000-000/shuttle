@@ -284,6 +284,301 @@ func TestShellInterruptClearsControllerActiveExecution(t *testing.T) {
 	}
 }
 
+func TestInterruptInFlightRefusesRemoteExecution(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:      "cmd-1",
+		Command: "ssh host 'btop'",
+		Origin:  controller.CommandOriginUserShell,
+		State:   controller.CommandExecutionInteractiveFullscreen,
+		ShellContextBefore: &shell.PromptContext{
+			User:         "root",
+			Host:         "remote",
+			Directory:    "/root",
+			PromptSymbol: "#",
+			Remote:       true,
+			RawLine:      "root@remote:~#",
+		},
+		StartedAt: time.Now(),
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	next := updated.(Model)
+
+	if cmd != nil {
+		t.Fatal("expected no interrupt command for remote execution")
+	}
+	last := next.entries[len(next.entries)-1]
+	if last.Title != "system" || !strings.Contains(last.Body, "Fullscreen app is still active") {
+		t.Fatalf("expected manual interrupt notice, got %#v", last)
+	}
+}
+
+func TestRenderShellTailHiddenForInteractiveFullscreen(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.showShellTail = true
+	model.liveShellTail = "hidden tail"
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "btop",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionInteractiveFullscreen,
+		StartedAt: time.Now(),
+	}
+
+	if got := model.renderShellTail(80); got != "" {
+		t.Fatalf("expected fullscreen execution to hide tail, got %q", got)
+	}
+}
+
+func TestCanAttemptLocalInterruptPrefersCurrentRemoteShellContext(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.shellContext = shell.PromptContext{
+		User:         "openclaw",
+		Host:         "openclaw",
+		Directory:    "~",
+		PromptSymbol: "$",
+		Remote:       true,
+		RawLine:      "openclaw@openclaw ~ $",
+	}
+	model.activeExecution = &controller.CommandExecution{
+		ID:      "cmd-1",
+		Command: "nano SYSTEM_TWEAKS.md",
+		Origin:  controller.CommandOriginUserShell,
+		State:   controller.CommandExecutionInteractiveFullscreen,
+		ShellContextBefore: &shell.PromptContext{
+			User:         "jsmith",
+			Host:         "linuxdesktop",
+			Directory:    "/home/jsmith/source/repos/aiterm",
+			PromptSymbol: "%",
+			RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+		},
+	}
+
+	if model.canAttemptLocalInterrupt() {
+		t.Fatal("expected remote current shell context to suppress local interrupt")
+	}
+}
+
+func TestCanAttemptLocalInterruptRemoteEvidenceWinsOverStaleLocalContext(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.activeExecution = &controller.CommandExecution{
+		ID:      "cmd-1",
+		Command: "nano SYSTEM_TWEAKS.md",
+		Origin:  controller.CommandOriginUserShell,
+		State:   controller.CommandExecutionInteractiveFullscreen,
+		ShellContextBefore: &shell.PromptContext{
+			User:         "jsmith",
+			Host:         "linuxdesktop",
+			Directory:    "/home/jsmith/source/repos/aiterm",
+			PromptSymbol: "%",
+			RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+		},
+		ShellContextAfter: &shell.PromptContext{
+			User:         "openclaw",
+			Host:         "openclaw",
+			Directory:    "~",
+			PromptSymbol: "$",
+			Remote:       true,
+			RawLine:      "openclaw@openclaw ~ $",
+		},
+	}
+
+	if model.canAttemptLocalInterrupt() {
+		t.Fatal("expected remote execution context to suppress local interrupt")
+	}
+}
+
+func TestActiveExecutionCardShowsFullscreenKeyHintsWithoutKill(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.shellContext = shell.PromptContext{
+		User:         "jsmith",
+		Host:         "linuxdesktop",
+		Directory:    "/home/jsmith/source/repos/aiterm",
+		PromptSymbol: "%",
+		RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+	}
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "wrapped-btop",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionInteractiveFullscreen,
+		StartedAt: time.Now(),
+	}
+
+	card := model.renderActiveExecutionCard(100)
+	if !strings.Contains(card, "Fullscreen terminal app detected.") {
+		t.Fatalf("expected fullscreen notice, got %q", card)
+	}
+	if !strings.Contains(card, "F2 take control  S send keys") {
+		t.Fatalf("expected fullscreen key hints, got %q", card)
+	}
+	if strings.Contains(card, "K attempt local interrupt") {
+		t.Fatalf("expected fullscreen card to suppress dangerous kill hint, got %q", card)
+	}
+}
+
+func TestSubmitShellCommandWhileFullscreenPromptsForConfirmation(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.mode = ShellMode
+	model.input = "ls"
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "nano file.txt",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionInteractiveFullscreen,
+		StartedAt: time.Now(),
+	}
+
+	updated, cmd := model.submit()
+	next := updated.(Model)
+
+	if cmd != nil {
+		t.Fatal("expected fullscreen submit to stop for confirmation")
+	}
+	if next.pendingFullscreen == nil || next.pendingFullscreen.Command != "ls" {
+		t.Fatalf("expected pending fullscreen confirmation, got %#v", next.pendingFullscreen)
+	}
+	if len(ctrl.shellCommands) != 0 {
+		t.Fatalf("expected no shell command dispatch before confirmation, got %#v", ctrl.shellCommands)
+	}
+}
+
+func TestFullscreenConfirmationYRunsShellCommand(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.pendingFullscreen = &fullscreenAction{
+		Kind:    fullscreenActionShellSubmit,
+		Command: "ls",
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	next := updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected confirmation to run shell command")
+	}
+
+	_ = controllerEventsFromCmd(t, cmd)
+	if len(ctrl.shellCommands) != 1 || ctrl.shellCommands[0] != "ls" {
+		t.Fatalf("expected confirmed shell command to run, got %#v", ctrl.shellCommands)
+	}
+	if next.pendingFullscreen != nil {
+		t.Fatalf("expected fullscreen confirmation to clear, got %#v", next.pendingFullscreen)
+	}
+}
+
+func TestSStartsFullscreenKeyMode(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "btop",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionInteractiveFullscreen,
+		StartedAt: time.Now(),
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	next := updated.(Model)
+
+	if !next.sendingFullscreenKeys {
+		t.Fatal("expected fullscreen key mode to start")
+	}
+}
+
+func TestSubmitFullscreenKeysBypassesShellCommandPath(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.sendingFullscreenKeys = true
+	model.input = "q"
+
+	updated, cmd := model.submit()
+	next := updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected fullscreen key send command")
+	}
+	if next.sendingFullscreenKeys {
+		t.Fatal("expected fullscreen key mode to clear after submit")
+	}
+	if len(ctrl.shellCommands) != 0 {
+		t.Fatalf("expected fullscreen keys to bypass shell submit, got %#v", ctrl.shellCommands)
+	}
+}
+
+func TestCarriageReturnRuneSubmitsFullscreenKeys(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.sendingFullscreenKeys = true
+	model.input = "hello"
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'\r'}})
+	next := updated.(Model)
+
+	if cmd == nil {
+		t.Fatal("expected carriage return rune to submit fullscreen keys")
+	}
+	if next.sendingFullscreenKeys {
+		t.Fatal("expected fullscreen key mode to clear after carriage return submit")
+	}
+}
+
+func TestEnterSubmitsFullscreenKeysWhileBusy(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.busy = true
+	model.sendingFullscreenKeys = true
+	model.input = "hello"
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(Model)
+
+	if cmd == nil {
+		t.Fatal("expected Enter to submit fullscreen keys while busy")
+	}
+	if next.sendingFullscreenKeys {
+		t.Fatal("expected fullscreen key mode to clear after busy Enter submit")
+	}
+}
+
+func TestFullscreenKeysSentMessageUpdatesActiveCardFeedback(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "nano foo.txt",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionInteractiveFullscreen,
+		StartedAt: time.Now(),
+	}
+
+	updated, _ := model.Update(fullscreenKeysSentMsg{keys: "hello"})
+	next := updated.(Model)
+
+	if next.lastFullscreenKeys != "hello" {
+		t.Fatalf("expected last fullscreen keys to be recorded, got %q", next.lastFullscreenKeys)
+	}
+	card := next.renderActiveExecutionCard(100)
+	if !strings.Contains(card, "last keys: hello") {
+		t.Fatalf("expected active execution card to show last keys, got %q", card)
+	}
+}
+
+func TestSyncActiveExecutionClearsFullscreenKeysWhenExecutionEnds(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.lastFullscreenKeys = "hello"
+	model.lastFullscreenKeysAt = time.Now()
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "nano foo.txt",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionInteractiveFullscreen,
+		StartedAt: time.Now(),
+	}
+
+	model.syncActiveExecution(nil)
+
+	if model.lastFullscreenKeys != "" {
+		t.Fatalf("expected fullscreen key preview to clear, got %q", model.lastFullscreenKeys)
+	}
+}
+
 func TestCanceledControllerEventSuppressedAfterTakeControl(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.suppressCancelErr = true

@@ -478,6 +478,10 @@ func buildTurnContext(input controller.AgentInput) string {
 		sections = append(sections, "Current active command:\n"+strings.Join(lines, "\n"))
 	}
 
+	if snapshot := compactShellOutput(input.Task.RecoverySnapshot, 20, 20, 4000); shouldIncludeContextSnippet(seenSnippets, snapshot) {
+		sections = append(sections, "Recovery terminal snapshot:\n"+snapshot)
+	}
+
 	if input.Task.ActivePlan != nil {
 		sections = append(sections, "Active plan:\n"+formatActivePlan(*input.Task.ActivePlan))
 	}

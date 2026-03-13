@@ -29,6 +29,7 @@ type TrackedExecution struct {
 type paneClient interface {
 	CapturePane(ctx context.Context, target string, startLine int) (string, error)
 	SendKeys(ctx context.Context, target string, command string, pressEnter bool) error
+	PaneInfo(ctx context.Context, target string) (tmux.Pane, error)
 }
 
 type Observer struct {
@@ -150,6 +151,8 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 	started := false
 	startDeadline := time.Now().Add(timeout)
 	lastCapture := ""
+	lastPaneInfoCheck := time.Time{}
+	alternateOn := false
 	for {
 		captured, err := o.client.CapturePane(ctx, paneID, -trackedCaptureLines)
 		if err != nil {
@@ -160,7 +163,13 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 				"command", command,
 				"last_capture_preview", logging.Preview(lastCapture, 1000),
 			)
-			monitor.finish(TrackedExecution{CommandID: markers.CommandID, Command: command}, fmt.Errorf("capture pane: %w", err), MonitorStateFailed)
+			monitor.finish(TrackedExecution{
+				CommandID:  markers.CommandID,
+				Command:    command,
+				Cause:      CompletionCauseUnknown,
+				Confidence: ConfidenceLow,
+				Captured:   monitorTail(lastCapture, transportCommand),
+			}, fmt.Errorf("capture pane: %w", err), MonitorStateLost)
 			return
 		}
 		lastCapture = captured
@@ -168,6 +177,12 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 		monitor.updateTail(tail)
 		if shellContext, ok := ParsePromptContextFromCapture(captured); ok {
 			monitor.updateShellContext(shellContext)
+		}
+		if lastPaneInfoCheck.IsZero() || time.Since(lastPaneInfoCheck) >= 200*time.Millisecond {
+			lastPaneInfoCheck = time.Now()
+			if paneInfo, paneErr := o.client.PaneInfo(ctx, paneID); paneErr == nil {
+				alternateOn = paneInfo.AlternateOn
+			}
 		}
 
 		if !started && sawTrackedCommandStart(captured, markers) {
@@ -192,7 +207,7 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 			)
 		}
 		if started {
-			monitor.setState(classifyActiveMonitorState(command, tail))
+			monitor.setState(classifyActiveMonitorState(command, tail, alternateOn))
 		}
 
 		result, complete, err := protocol.ParseCommandResult(captured, markers)
@@ -207,7 +222,13 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 				"command_id", markers.CommandID,
 				"capture_preview", logging.Preview(captured, 1000),
 			)
-			monitor.finish(TrackedExecution{CommandID: markers.CommandID, Command: command}, fmt.Errorf("parse tracked command result: %w", err), MonitorStateFailed)
+			monitor.finish(TrackedExecution{
+				CommandID:  markers.CommandID,
+				Command:    command,
+				Cause:      CompletionCauseUnknown,
+				Confidence: ConfidenceLow,
+				Captured:   tail,
+			}, fmt.Errorf("parse tracked command result: %w", err), MonitorStateLost)
 			return
 		}
 		if !complete {
@@ -225,7 +246,13 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 					"command_id", markers.CommandID,
 					"capture_preview", logging.Preview(captured, 1000),
 				)
-				monitor.finish(TrackedExecution{CommandID: markers.CommandID, Command: command}, fmt.Errorf("parse tracked command result from end marker: %w", err), MonitorStateFailed)
+				monitor.finish(TrackedExecution{
+					CommandID:  markers.CommandID,
+					Command:    command,
+					Cause:      CompletionCauseUnknown,
+					Confidence: ConfidenceLow,
+					Captured:   tail,
+				}, fmt.Errorf("parse tracked command result from end marker: %w", err), MonitorStateLost)
 				return
 			}
 		}
@@ -256,7 +283,7 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 			return
 		}
 
-		if started && allowPromptReturnInference(command) {
+		if started && allowPromptReturnInference(command, alternateOn) {
 			promptContext := monitor.Snapshot().ShellContext
 			if TailSuggestsPromptReturn(captured, promptContext) {
 				cleanBody := sanitizeCapturedBody(capturePaneDelta(beforeCapture, captured))
@@ -294,7 +321,13 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 				"command_id", markers.CommandID,
 				"capture_preview", logging.Preview(captured, 2000),
 			)
-			monitor.finish(TrackedExecution{CommandID: markers.CommandID, Command: command}, err, MonitorStateFailed)
+			monitor.finish(TrackedExecution{
+				CommandID:  markers.CommandID,
+				Command:    command,
+				Cause:      CompletionCauseUnknown,
+				Confidence: ConfidenceLow,
+				Captured:   tail,
+			}, err, MonitorStateLost)
 			return
 		}
 
@@ -316,7 +349,10 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 	}
 }
 
-func classifyActiveMonitorState(command string, tail string) MonitorState {
+func classifyActiveMonitorState(command string, tail string, alternateOn bool) MonitorState {
+	if alternateOn {
+		return MonitorStateInteractiveFullscreen
+	}
 	if TailSuggestsAwaitingInput(tail) {
 		return MonitorStateAwaitingInput
 	}
@@ -326,8 +362,8 @@ func classifyActiveMonitorState(command string, tail string) MonitorState {
 	return MonitorStateRunning
 }
 
-func allowPromptReturnInference(command string) bool {
-	return !IsInteractiveCommand(command)
+func allowPromptReturnInference(command string, alternateOn bool) bool {
+	return !alternateOn && !IsInteractiveCommand(command)
 }
 
 func monitorStateFromError(err error) MonitorState {
@@ -337,7 +373,7 @@ func monitorStateFromError(err error) MonitorState {
 	if errors.Is(err, context.Canceled) {
 		return MonitorStateCanceled
 	}
-	return MonitorStateFailed
+	return MonitorStateLost
 }
 
 func trackedCommandLikelyStarted(beforeCapture string, captured string) bool {
@@ -675,9 +711,15 @@ func stripEchoedCommand(body string, command string) string {
 	if stripped, ok := stripEchoedCommandLines(bodyLines, commandLines); ok {
 		return stripped
 	}
+	if stripped, ok := stripWrappedEchoedSingleLine(bodyLines, command); ok {
+		return stripped
+	}
 
 	if len(bodyLines) > len(commandLines) && lineLooksLikePrompt(bodyLines[0]) {
 		if stripped, ok := stripEchoedCommandLines(bodyLines[1:], commandLines); ok {
+			return stripped
+		}
+		if stripped, ok := stripWrappedEchoedSingleLine(bodyLines[1:], command); ok {
 			return stripped
 		}
 	}
@@ -697,6 +739,31 @@ func stripEchoedCommandLines(bodyLines []string, commandLines []string) (string,
 	}
 
 	return strings.TrimSpace(strings.Join(bodyLines[len(commandLines):], "\n")), true
+}
+
+func stripWrappedEchoedSingleLine(bodyLines []string, command string) (string, bool) {
+	if strings.Contains(command, "\n") || len(bodyLines) == 0 {
+		return "", false
+	}
+
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return "", false
+	}
+
+	var joined strings.Builder
+	for index, line := range bodyLines {
+		joined.WriteString(strings.TrimRight(line, " \t"))
+		current := joined.String()
+		if current == command {
+			return strings.TrimSpace(strings.Join(bodyLines[index+1:], "\n")), true
+		}
+		if !strings.HasPrefix(command, current) {
+			return "", false
+		}
+	}
+
+	return "", false
 }
 
 func lineLooksLikePrompt(line string) bool {

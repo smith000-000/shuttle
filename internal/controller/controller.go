@@ -16,7 +16,9 @@ import (
 const autoContinuePrompt = "The previously approved or proposed command has completed. First summarize the result briefly. If there is an active plan, continue it from the current step. If there is no active plan, do not propose another command unless the user's request clearly still requires more shell work. For one-off commands, demos, or tests, prefer stopping after reporting the outcome. If another action is truly needed, propose it. If risky, request approval."
 const continuePlanPrompt = "Continue the active plan from the current step. Propose the next safe action if one is needed. If the next action is risky, request approval. If the plan is complete, answer briefly."
 const resumeAfterTakeControlPrompt = "The user temporarily took control of the shell to handle an interactive step such as a password prompt, remote login, or fullscreen terminal app. Reassess the latest shell state and continue the task. If another action is needed, propose it. If risky, request approval. If the task is complete, answer briefly."
-const activeExecutionCheckInPrompt = "An agent-started shell command is still active. Use the execution state and latest shell output to decide whether it is running normally or waiting for input. If there is no new output, say that no new shell output has appeared yet. Do not claim the command has completed or that the shell returned to a prompt unless the context shows that. Do not propose a new command, plan, or approval unless the shell is clearly blocked and needs user intervention; if so, say that the user should press F2 to take control."
+const activeExecutionCheckInPrompt = "An agent-started shell command is still active. Use the execution state and latest shell output to decide whether it is running normally, waiting for input, or occupying a fullscreen interactive terminal app. If there is no new output, say that no new shell output has appeared yet. Do not claim the command has completed or that the shell returned to a prompt unless the context shows that. Do not propose a new command, plan, or approval unless the shell is clearly blocked and needs user intervention; if so, say that the user should press F2 to take control."
+
+const recoverySnapshotLines = 200
 
 type ShellRunner interface {
 	RunTrackedCommand(ctx context.Context, paneID string, command string, timeout time.Duration) (shell.TrackedExecution, error)
@@ -146,7 +148,7 @@ func (c *LocalController) CheckActiveExecution(ctx context.Context) ([]Transcrip
 		return nil, nil
 	}
 
-	if c.task.CurrentExecution.State != CommandExecutionAwaitingInput {
+	if c.task.CurrentExecution.State != CommandExecutionAwaitingInput && c.task.CurrentExecution.State != CommandExecutionInteractiveFullscreen {
 		c.task.CurrentExecution.State = CommandExecutionBackgroundMonitor
 	}
 	session := c.session
@@ -161,19 +163,21 @@ func (c *LocalController) CheckActiveExecution(ctx context.Context) ([]Transcrip
 			recentOutput = captured
 		}
 	}
+	recoverySnapshot := c.captureRecoverySnapshot(ctx, topPaneID, task.CurrentExecution)
 
 	c.mu.Lock()
 	if c.task.CurrentExecution == nil || !isAgentOwnedExecution(c.task.CurrentExecution.Origin) {
 		c.mu.Unlock()
 		return nil, nil
 	}
-	if c.task.CurrentExecution.State != CommandExecutionAwaitingInput {
+	if c.task.CurrentExecution.State != CommandExecutionAwaitingInput && c.task.CurrentExecution.State != CommandExecutionInteractiveFullscreen {
 		c.task.CurrentExecution.State = CommandExecutionBackgroundMonitor
 	}
 	if strings.TrimSpace(recentOutput) != "" {
 		c.task.CurrentExecution.LatestOutputTail = recentOutput
 		c.session.RecentShellOutput = recentOutput
 	}
+	c.task.RecoverySnapshot = recoverySnapshot
 	session = c.session
 	task = c.task
 	c.mu.Unlock()
@@ -249,10 +253,12 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 		session.RecentShellOutput = recentOutput
 		c.session.RecentShellOutput = recentOutput
 	}
+	task := c.task
+	task.RecoverySnapshot = c.captureRecoverySnapshot(ctx, c.session.TopPaneID, task.CurrentExecution)
 
 	input := AgentInput{
 		Session: session,
-		Task:    c.task,
+		Task:    task,
 		Prompt:  agentPrompt,
 	}
 	if refinement != nil {
@@ -466,6 +472,56 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 			logging.Trace("controller.shell_command.canceled", "execution_id", execution.ID, "command", command, "origin", origin)
 			return []TranscriptEvent{startEvent}, err
 		}
+		if result.State == shell.MonitorStateLost {
+			lostExecution := execution
+			lostExecution.State = CommandExecutionLost
+			lostExecution.Error = err.Error()
+			if strings.TrimSpace(result.Captured) != "" {
+				lostExecution.LatestOutputTail = result.Captured
+			} else {
+				lostExecution.LatestOutputTail = c.bestEffortRecentOutputLocked()
+			}
+			completedAt := time.Now()
+			lostExecution.CompletedAt = &completedAt
+			if result.ShellContext.PromptLine() != "" {
+				shellContext := result.ShellContext
+				lostExecution.ShellContextAfter = &shellContext
+				c.session.CurrentShell = &shellContext
+				if shellContext.Directory != "" {
+					c.session.WorkingDirectory = shellContext.Directory
+				}
+			}
+
+			summary := CommandResultSummary{
+				ExecutionID: execution.ID,
+				CommandID:   result.CommandID,
+				Command:     result.Command,
+				Origin:      origin,
+				State:       CommandExecutionLost,
+				Cause:       result.Cause,
+				Confidence:  result.Confidence,
+				ExitCode:    result.ExitCode,
+				Summary:     lostExecution.LatestOutputTail,
+			}
+			if result.ShellContext.PromptLine() != "" {
+				shellContext := result.ShellContext
+				summary.ShellContext = &shellContext
+			}
+			c.session.RecentShellOutput = lostExecution.LatestOutputTail
+			c.task.LastCommandResult = &summary
+			c.task.CurrentExecution = nil
+			resultEvent := c.newEvent(EventCommandResult, summary)
+			c.appendEvents(resultEvent)
+			logging.Trace(
+				"controller.shell_command.lost",
+				"execution_id", execution.ID,
+				"command", command,
+				"origin", origin,
+				"error", err.Error(),
+				"tail_preview", logging.Preview(lostExecution.LatestOutputTail, 1000),
+			)
+			return []TranscriptEvent{startEvent, resultEvent}, nil
+		}
 		failedExecution := execution
 		failedExecution.State = CommandExecutionFailed
 		failedExecution.Error = err.Error()
@@ -620,6 +676,10 @@ func (c *LocalController) applyMonitorSnapshot(executionID string, snapshot shel
 		if execution.State != CommandExecutionHandoffActive {
 			execution.State = CommandExecutionAwaitingInput
 		}
+	case shell.MonitorStateInteractiveFullscreen:
+		if execution.State != CommandExecutionHandoffActive {
+			execution.State = CommandExecutionInteractiveFullscreen
+		}
 	case shell.MonitorStateCanceled:
 		execution.State = CommandExecutionCanceled
 	case shell.MonitorStateFailed:
@@ -767,6 +827,19 @@ func (c *LocalController) PeekShellTail(ctx context.Context, lines int) (string,
 	return c.reader.CaptureRecentOutput(ctx, c.session.TopPaneID, lines)
 }
 
+func (c *LocalController) captureRecoverySnapshot(ctx context.Context, topPaneID string, execution *CommandExecution) string {
+	if c.reader == nil || topPaneID == "" || !shouldCaptureRecoverySnapshot(execution) {
+		return ""
+	}
+
+	captured, err := c.reader.CaptureRecentOutput(ctx, topPaneID, recoverySnapshotLines)
+	if err != nil {
+		return ""
+	}
+
+	return strings.TrimSpace(captured)
+}
+
 func (c *LocalController) newEvent(kind TranscriptEventKind, payload any) TranscriptEvent {
 	return TranscriptEvent{
 		ID:        fmt.Sprintf("evt-%d", c.counter.Add(1)),
@@ -806,6 +879,19 @@ func (c *LocalController) bestEffortRecentOutputLocked() string {
 	}
 
 	return output
+}
+
+func shouldCaptureRecoverySnapshot(execution *CommandExecution) bool {
+	if execution == nil {
+		return false
+	}
+
+	switch execution.State {
+	case CommandExecutionAwaitingInput, CommandExecutionInteractiveFullscreen, CommandExecutionHandoffActive, CommandExecutionLost:
+		return true
+	default:
+		return false
+	}
 }
 
 func isAgentOwnedExecution(origin CommandOrigin) bool {

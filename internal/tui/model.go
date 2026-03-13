@@ -63,6 +63,25 @@ type shellInterruptMsg struct {
 	err error
 }
 
+type fullscreenKeysSentMsg struct {
+	keys string
+	err  error
+}
+
+type fullscreenActionKind string
+
+const (
+	fullscreenActionShellSubmit fullscreenActionKind = "shell_submit"
+	fullscreenActionProposalRun fullscreenActionKind = "proposal_run"
+	fullscreenActionApprovalRun fullscreenActionKind = "approval_run"
+)
+
+type fullscreenAction struct {
+	Kind       fullscreenActionKind
+	Command    string
+	ApprovalID string
+}
+
 const (
 	agentTurnTimeout     = 60 * time.Second
 	shellTailPollLines   = 40
@@ -72,45 +91,49 @@ const (
 )
 
 type Model struct {
-	workspace          tmux.Workspace
-	ctrl               controller.Controller
-	mode               Mode
-	input              string
-	cursor             int
-	entries            []Entry
-	selectedEntry      int
-	width              int
-	height             int
-	busy               bool
-	busyStartedAt      time.Time
-	transcriptScroll   int
-	transcriptFollow   bool
-	detailOpen         bool
-	detailScroll       int
-	shellHistory       composerHistory
-	agentHistory       composerHistory
-	activePlan         *controller.ActivePlan
-	shellContext       shell.PromptContext
-	pendingApproval    *controller.ApprovalRequest
-	pendingProposal    *controller.ProposalPayload
-	refiningApproval   *controller.ApprovalRequest
-	refiningProposal   *controller.ProposalPayload
-	editingProposal    *controller.ProposalPayload
-	approvalInFlight   bool
-	proposalRunPending bool
-	directShellPending bool
-	inFlightCancel     context.CancelFunc
-	suppressCancelErr  bool
-	resumeAfterHandoff bool
-	handoffVisible     bool
-	handoffPriorState  controller.CommandExecutionState
-	takeControl        takeControlConfig
-	liveShellTail      string
-	showShellTail      bool
-	activeExecution    *controller.CommandExecution
-	checkInInFlight    bool
-	lastCheckInAt      time.Time
-	styles             styles
+	workspace             tmux.Workspace
+	ctrl                  controller.Controller
+	mode                  Mode
+	input                 string
+	cursor                int
+	entries               []Entry
+	selectedEntry         int
+	width                 int
+	height                int
+	busy                  bool
+	busyStartedAt         time.Time
+	transcriptScroll      int
+	transcriptFollow      bool
+	detailOpen            bool
+	detailScroll          int
+	shellHistory          composerHistory
+	agentHistory          composerHistory
+	activePlan            *controller.ActivePlan
+	shellContext          shell.PromptContext
+	pendingApproval       *controller.ApprovalRequest
+	pendingProposal       *controller.ProposalPayload
+	refiningApproval      *controller.ApprovalRequest
+	refiningProposal      *controller.ProposalPayload
+	editingProposal       *controller.ProposalPayload
+	approvalInFlight      bool
+	proposalRunPending    bool
+	directShellPending    bool
+	inFlightCancel        context.CancelFunc
+	suppressCancelErr     bool
+	resumeAfterHandoff    bool
+	handoffVisible        bool
+	handoffPriorState     controller.CommandExecutionState
+	takeControl           takeControlConfig
+	liveShellTail         string
+	showShellTail         bool
+	activeExecution       *controller.CommandExecution
+	pendingFullscreen     *fullscreenAction
+	sendingFullscreenKeys bool
+	lastFullscreenKeys    string
+	lastFullscreenKeysAt  time.Time
+	checkInInFlight       bool
+	lastCheckInAt         time.Time
+	styles                styles
 }
 
 func NewModel(workspace tmux.Workspace, ctrl controller.Controller) Model {
@@ -365,6 +388,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.selectedEntry = len(m.entries) - 1
 		m.clampSelection()
 		return m, tea.Batch(m.pollShellTailCmd(), m.pollActiveExecutionCmd())
+	case fullscreenKeysSentMsg:
+		pinned := m.isTranscriptPinned()
+		if msg.err != nil {
+			m.entries = append(m.entries, Entry{
+				Title: "error",
+				Body:  "send fullscreen keys: " + msg.err.Error(),
+			})
+		} else {
+			m.lastFullscreenKeys = msg.keys
+			m.lastFullscreenKeysAt = time.Now()
+			m.entries = append(m.entries, Entry{
+				Title: "system",
+				Body:  "Sent keys to fullscreen app: " + previewFullscreenKeys(msg.keys),
+			})
+		}
+		if pinned {
+			m.scrollTranscriptToBottom()
+		} else {
+			m.clampTranscriptScroll()
+		}
+		m.selectedEntry = len(m.entries) - 1
+		m.clampSelection()
+		return m, tea.Batch(m.pollActiveExecutionCmd(), m.pollShellTailCmd())
 	case busyTickMsg:
 		if !m.busy && m.activeExecution == nil {
 			return m, nil
@@ -372,6 +418,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, tea.Batch(tickBusy(), m.pollShellTailCmd(), m.pollActiveExecutionCmd(), m.maybeExecutionCheckInCmd(time.Time(msg)))
 	case tea.KeyMsg:
+		if m.sendingFullscreenKeys {
+			logging.Trace("tui.fullscreen_keys.key", "type", int(msg.Type), "text", msg.String(), "runes", string(msg.Runes))
+		}
 		if m.detailOpen {
 			return m.updateDetail(msg)
 		}
@@ -384,6 +433,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyF2:
 			return m.takeControlNow()
 		case tea.KeyEsc:
+			if m.sendingFullscreenKeys {
+				m.sendingFullscreenKeys = false
+				m.setInput("")
+				return m, nil
+			}
 			if m.busy || m.activeExecution != nil {
 				return m.interruptInFlight()
 			}
@@ -522,6 +576,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		default:
 			if !msg.Alt && msg.Type == tea.KeyRunes {
+				if len(msg.Runes) == 1 && (msg.Runes[0] == '\r' || msg.Runes[0] == '\n') {
+					if m.composerLocked() {
+						return m, nil
+					}
+					return m.submit()
+				}
+				if len(msg.Runes) == 1 && unicode.ToUpper(msg.Runes[0]) == 'S' && m.canSendFullscreenKeys() && strings.TrimSpace(m.input) == "" {
+					m.sendingFullscreenKeys = true
+					m.setInput("")
+					return m, nil
+				}
+				if len(msg.Runes) == 1 && unicode.ToUpper(msg.Runes[0]) == 'K' && m.activeExecution != nil && m.activeExecution.State != controller.CommandExecutionInteractiveFullscreen && !m.composerLocked() {
+					return m.interruptInFlight()
+				}
 				if len(msg.Runes) == 1 && strings.TrimSpace(m.input) == "" && m.editingProposal == nil && m.refiningProposal == nil && m.refiningApproval == nil {
 					switch msg.Runes[0] {
 					case 'Y':
@@ -555,7 +623,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) composerLocked() bool {
-	return (m.pendingProposal != nil || m.pendingApproval != nil) && m.editingProposal == nil && m.refiningProposal == nil && m.refiningApproval == nil
+	return (m.pendingFullscreen != nil || m.pendingProposal != nil || m.pendingApproval != nil) && m.editingProposal == nil && m.refiningProposal == nil && m.refiningApproval == nil
 }
 
 func (m Model) handleActionCardKey(msg tea.KeyMsg) (tea.Model, bool, tea.Cmd) {
@@ -565,6 +633,18 @@ func (m Model) handleActionCardKey(msg tea.KeyMsg) (tea.Model, bool, tea.Cmd) {
 
 	if msg.Type != tea.KeyRunes || len(msg.Runes) != 1 || msg.Alt {
 		return m, false, nil
+	}
+
+	if m.pendingFullscreen != nil {
+		switch unicode.ToUpper(msg.Runes[0]) {
+		case 'Y':
+			model, cmd := m.confirmFullscreenAction()
+			return model, true, cmd
+		case 'N':
+			m.pendingFullscreen = nil
+			return m, true, nil
+		}
+		return m, true, nil
 	}
 
 	switch unicode.ToUpper(msg.Runes[0]) {
@@ -653,7 +733,22 @@ func (m Model) View() string {
 
 func (m Model) submit() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.input)
-	if text == "" || m.busy {
+	if m.sendingFullscreenKeys {
+		rawKeys := normalizeFullscreenKeys(m.input)
+		if rawKeys == "" {
+			return m, nil
+		}
+		logging.Trace("tui.fullscreen_keys.submit", "keys", rawKeys)
+		m.sendingFullscreenKeys = false
+		m.setInput("")
+		return m, sendFullscreenKeysCmd(m.takeControl, rawKeys)
+	}
+
+	if m.busy {
+		return m, nil
+	}
+
+	if text == "" {
 		return m, nil
 	}
 
@@ -720,6 +815,13 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		})
 		return m, nil
 	}
+	if m.shouldConfirmFullscreenBeforeShellAction() {
+		m.pendingFullscreen = &fullscreenAction{
+			Kind:    fullscreenActionShellSubmit,
+			Command: text,
+		}
+		return m, nil
+	}
 
 	m.busy = true
 	m.busyStartedAt = time.Now()
@@ -752,6 +854,86 @@ func (m Model) primaryAction() (tea.Model, tea.Cmd) {
 	case m.activePlan != nil:
 		logging.Trace("tui.primary_action", "action", "continue_plan", "summary", m.activePlan.Summary)
 		return m.continueActivePlan()
+	default:
+		return m, nil
+	}
+}
+
+func (m Model) confirmFullscreenAction() (tea.Model, tea.Cmd) {
+	if m.pendingFullscreen == nil || m.ctrl == nil {
+		return m, nil
+	}
+
+	action := *m.pendingFullscreen
+	m.pendingFullscreen = nil
+
+	switch action.Kind {
+	case fullscreenActionShellSubmit:
+		m.busy = true
+		m.busyStartedAt = time.Now()
+		m.directShellPending = true
+		m.showShellTail = true
+		m.syncActiveExecution(newLocalExecution(action.Command, controller.CommandOriginUserShell))
+		m.setInput("")
+		ctx, cancel := context.WithCancel(context.Background())
+		m.inFlightCancel = cancel
+		return m, tea.Batch(func() tea.Msg {
+			defer cancel()
+			events, err := m.ctrl.SubmitShellCommand(ctx, action.Command)
+			return controllerEventsMsg{events: events, err: err}
+		}, tickBusy(), m.pollShellTailCmd(), m.pollActiveExecutionCmd())
+	case fullscreenActionProposalRun:
+		if m.pendingProposal == nil || strings.TrimSpace(m.pendingProposal.Command) == "" {
+			return m, nil
+		}
+		logging.Trace("tui.proposal.run", "command", m.pendingProposal.Command)
+		m.busy = true
+		m.busyStartedAt = time.Now()
+		m.proposalRunPending = true
+		m.showShellTail = true
+		command := m.pendingProposal.Command
+		m.pendingProposal = nil
+		m.refiningProposal = nil
+		m.editingProposal = nil
+		m.syncActiveExecution(newLocalExecution(command, controller.CommandOriginAgentProposal))
+		ctx, cancel := context.WithCancel(context.Background())
+		m.inFlightCancel = cancel
+
+		return m, tea.Batch(func() tea.Msg {
+			defer cancel()
+			events, err := m.ctrl.SubmitProposedShellCommand(ctx, command)
+			return controllerEventsMsg{events: events, err: err}
+		}, tickBusy(), m.pollShellTailCmd(), m.pollActiveExecutionCmd())
+	case fullscreenActionApprovalRun:
+		if m.pendingApproval == nil || m.pendingApproval.ID != action.ApprovalID {
+			return m, nil
+		}
+		logging.Trace(
+			"tui.approval.decide",
+			"approval_id", m.pendingApproval.ID,
+			"decision", controller.DecisionApprove,
+			"command", m.pendingApproval.Command,
+		)
+		m.busy = true
+		m.busyStartedAt = time.Now()
+		m.approvalInFlight = true
+		m.showShellTail = true
+		approvalID := m.pendingApproval.ID
+		command := m.pendingApproval.Command
+		m.pendingApproval = nil
+		m.pendingProposal = nil
+		m.refiningApproval = nil
+		m.refiningProposal = nil
+		m.editingProposal = nil
+		m.syncActiveExecution(newLocalExecution(command, controller.CommandOriginAgentApproval))
+		ctx, cancel := context.WithCancel(context.Background())
+		m.inFlightCancel = cancel
+
+		return m, tea.Batch(func() tea.Msg {
+			defer cancel()
+			events, err := m.ctrl.DecideApproval(ctx, approvalID, controller.DecisionApprove, "")
+			return controllerEventsMsg{events: events, err: err}
+		}, tickBusy(), m.pollShellTailCmd(), m.pollActiveExecutionCmd())
 	default:
 		return m, nil
 	}
@@ -841,6 +1023,36 @@ func (m Model) interruptInFlight() (tea.Model, tea.Cmd) {
 		"active_execution", activeExecutionID(m.activeExecution),
 	)
 	if m.activeExecution != nil && m.takeControl.enabled() {
+		if m.activeExecution.State == controller.CommandExecutionInteractiveFullscreen {
+			pinned := m.isTranscriptPinned()
+			m.entries = append(m.entries, Entry{
+				Title: "system",
+				Body:  "Fullscreen app is still active. Use F2 to take control and exit it manually, or use KEYS> to send input.",
+			})
+			if pinned {
+				m.scrollTranscriptToBottom()
+			} else {
+				m.clampTranscriptScroll()
+			}
+			m.selectedEntry = len(m.entries) - 1
+			m.clampSelection()
+			return m, nil
+		}
+		if !m.canAttemptLocalInterrupt() {
+			pinned := m.isTranscriptPinned()
+			m.entries = append(m.entries, Entry{
+				Title: "system",
+				Body:  "Active command is not confirmed local. Use F2 to take control and interrupt it manually.",
+			})
+			if pinned {
+				m.scrollTranscriptToBottom()
+			} else {
+				m.clampTranscriptScroll()
+			}
+			m.selectedEntry = len(m.entries) - 1
+			m.clampSelection()
+			return m, nil
+		}
 		m.showShellTail = true
 		return m, interruptShellCmd(m.takeControl)
 	}
@@ -914,6 +1126,38 @@ func interruptShellCmd(config takeControlConfig) tea.Cmd {
 		}
 		err = client.SendKeys(ctx, config.TopPaneID, "C-c", false)
 		return shellInterruptMsg{err: err}
+	}
+}
+
+func sendFullscreenKeysCmd(config takeControlConfig, keys string) tea.Cmd {
+	if !config.enabled() {
+		return nil
+	}
+
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		client, err := tmux.NewClient(config.SocketName)
+		if err != nil {
+			return fullscreenKeysSentMsg{keys: keys, err: err}
+		}
+
+		parts := strings.Split(strings.ReplaceAll(keys, "\r\n", "\n"), "\n")
+		for index, part := range parts {
+			if part != "" {
+				if err := client.SendLiteralKeys(ctx, config.TopPaneID, part); err != nil {
+					return fullscreenKeysSentMsg{keys: keys, err: err}
+				}
+			}
+			if index < len(parts)-1 {
+				if err := client.SendKeys(ctx, config.TopPaneID, "Enter", false); err != nil {
+					return fullscreenKeysSentMsg{keys: keys, err: err}
+				}
+			}
+		}
+
+		return fullscreenKeysSentMsg{keys: keys}
 	}
 }
 
@@ -1051,6 +1295,9 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 
 	if execution == nil {
 		m.activeExecution = nil
+		m.pendingFullscreen = nil
+		m.lastFullscreenKeys = ""
+		m.lastFullscreenKeysAt = time.Time{}
 		m.checkInInFlight = false
 		m.lastCheckInAt = time.Time{}
 		m.handoffVisible = false
@@ -1059,6 +1306,8 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 	}
 
 	if currentID != execution.ID {
+		m.lastFullscreenKeys = ""
+		m.lastFullscreenKeysAt = time.Time{}
 		m.checkInInFlight = false
 		m.lastCheckInAt = time.Time{}
 		m.handoffVisible = false
@@ -1077,6 +1326,11 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 		execution = &executionCopy
 	}
 	m.activeExecution = execution
+	if execution.State != controller.CommandExecutionInteractiveFullscreen {
+		m.pendingFullscreen = nil
+		m.lastFullscreenKeys = ""
+		m.lastFullscreenKeysAt = time.Time{}
+	}
 }
 
 func (m Model) formatShellError(err error) string {
@@ -1206,6 +1460,20 @@ func (m Model) renderHeader(width int) string {
 }
 
 func (m Model) renderActionCard(width int) string {
+	if m.pendingFullscreen != nil {
+		body := []string{
+			"A fullscreen terminal app still appears active in the shell pane.",
+			"command: " + m.pendingFullscreen.Command,
+			"Y send anyway  N cancel  F2 take control",
+		}
+		content := lipgloss.JoinVertical(
+			lipgloss.Left,
+			m.styles.actionTitle.Render("Fullscreen Still Active"),
+			m.styles.actionBody.Render(strings.Join(body, "\n")),
+		)
+		return m.styles.actionCard.BorderForeground(lipgloss.Color("214")).Width(width).Render(content)
+	}
+
 	if m.pendingApproval != nil {
 		body := []string{
 			m.pendingApproval.Title,
@@ -1341,14 +1609,23 @@ func (m Model) renderActiveExecutionCard(width int) string {
 		fmt.Sprintf("elapsed: %s", humanizeExecutionElapsed(m.activeExecution.StartedAt)),
 		"command: " + m.activeExecution.Command,
 	}
-	if strings.TrimSpace(m.activeExecution.LatestOutputTail) != "" {
+	if m.activeExecution.State == controller.CommandExecutionInteractiveFullscreen {
+		body = append(body, "Fullscreen terminal app detected.")
+		if strings.TrimSpace(m.lastFullscreenKeys) != "" {
+			body = append(body, "last keys: "+previewFullscreenKeys(m.lastFullscreenKeys))
+		}
+		body = append(body, "F2 take control  S send keys")
+		body = append(body, "Exit or control the fullscreen app manually from the shell view.")
+	} else if strings.TrimSpace(m.activeExecution.LatestOutputTail) != "" {
 		lines := strings.Split(strings.TrimSpace(m.activeExecution.LatestOutputTail), "\n")
 		if len(lines) > 2 {
 			lines = lines[len(lines)-2:]
 		}
 		body = append(body, "tail: "+strings.Join(lines, " | "))
+		body = append(body, "F2 take control")
+	} else {
+		body = append(body, "F2 take control")
 	}
-	body = append(body, "F2 take control")
 
 	content := lipgloss.JoinVertical(
 		lipgloss.Left,
@@ -1379,6 +1656,9 @@ func (m Model) renderComposer(width int) string {
 	promptStyle := m.styles.composerPromptShell
 	prompt := "$>"
 	switch {
+	case m.sendingFullscreenKeys:
+		promptStyle = m.styles.composerPromptRefine
+		prompt = "KEYS>"
 	case m.editingProposal != nil:
 		promptStyle = m.styles.composerPromptRefine
 		prompt = "CMD>"
@@ -1462,6 +1742,9 @@ func (m Model) renderShellTail(width int) string {
 	if !m.showShellTail {
 		return ""
 	}
+	if m.activeExecution != nil && m.activeExecution.State == controller.CommandExecutionInteractiveFullscreen {
+		return ""
+	}
 
 	tail := strings.TrimSpace(m.liveShellTail)
 	if tail == "" {
@@ -1501,11 +1784,22 @@ func (m Model) footerParts(width int) []string {
 	if m.busy || m.activeExecution != nil {
 		escHint = "[Esc] interrupt"
 	}
+	if m.activeExecution != nil && !m.canAttemptLocalInterrupt() {
+		escHint = "[Esc] manual"
+	}
 
 	switch {
 	case width < 72:
 		parts := []string{"[Tab]", "[Pg]", "[Enter]", "[Esc]", "[F2]", "[Ctrl+O]", "[Ctrl+C]"}
-		if m.pendingApproval != nil {
+		if m.canSendFullscreenKeys() {
+			parts = append(parts, "[S]")
+		}
+		if m.activeExecution != nil && m.activeExecution.State != controller.CommandExecutionInteractiveFullscreen && m.canAttemptLocalInterrupt() {
+			parts = append(parts, "[K]")
+		}
+		if m.pendingFullscreen != nil {
+			parts = append(parts, "[Y/N]")
+		} else if m.pendingApproval != nil {
 			parts = append(parts, "[Y/N/R]")
 		} else if m.editingProposal != nil {
 			parts = append(parts, "[Enter]")
@@ -1519,7 +1813,15 @@ func (m Model) footerParts(width int) []string {
 		return parts
 	case width < 100:
 		parts := []string{"[Tab] mode", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Enter] submit", escHint, "[F2] shell", "[Ctrl+C] quit"}
-		if m.pendingApproval != nil {
+		if m.canSendFullscreenKeys() {
+			parts = append(parts, "[S] keys")
+		}
+		if m.activeExecution != nil && m.activeExecution.State != controller.CommandExecutionInteractiveFullscreen && m.canAttemptLocalInterrupt() {
+			parts = append(parts, "[K] kill")
+		}
+		if m.pendingFullscreen != nil {
+			parts = append(parts, "[Y/N] fullscreen")
+		} else if m.pendingApproval != nil {
 			parts = append(parts, "[Y/N/R]")
 		} else if m.editingProposal != nil {
 			parts = append(parts, "[Enter] save")
@@ -1534,7 +1836,15 @@ func (m Model) footerParts(width int) []string {
 	}
 
 	parts := []string{"[Tab] mode", "[Up/Down] history", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Ctrl+U/D] half-page", "[Home/End] bounds", "[Enter] submit", escHint, "[Ctrl+J] newline", "[F2] shell"}
-	if m.pendingApproval != nil {
+	if m.canSendFullscreenKeys() {
+		parts = append(parts, "[S] send keys")
+	}
+	if m.activeExecution != nil && m.activeExecution.State != controller.CommandExecutionInteractiveFullscreen && m.canAttemptLocalInterrupt() {
+		parts = append(parts, "[K] kill local")
+	}
+	if m.pendingFullscreen != nil {
+		parts = append(parts, "[Y] send anyway", "[N] cancel")
+	} else if m.pendingApproval != nil {
 		parts = append(parts, "[Y] continue", "[N] reject", "[R] refine")
 	} else if m.editingProposal != nil {
 		parts = append(parts, "[Enter] save edited command")
@@ -2201,6 +2511,13 @@ func (m Model) runProposalCommand() (tea.Model, tea.Cmd) {
 	if m.busy || m.ctrl == nil || m.pendingProposal == nil || m.pendingProposal.Command == "" {
 		return m, nil
 	}
+	if m.shouldConfirmFullscreenBeforeShellAction() {
+		m.pendingFullscreen = &fullscreenAction{
+			Kind:    fullscreenActionProposalRun,
+			Command: m.pendingProposal.Command,
+		}
+		return m, nil
+	}
 
 	logging.Trace("tui.proposal.run", "command", m.pendingProposal.Command)
 	m.busy = true
@@ -2247,6 +2564,14 @@ func (m Model) decideApproval(decision controller.ApprovalDecision) (tea.Model, 
 	}
 	approvalID := m.pendingApproval.ID
 	command := m.pendingApproval.Command
+	if decision == controller.DecisionApprove && m.shouldConfirmFullscreenBeforeShellAction() {
+		m.pendingFullscreen = &fullscreenAction{
+			Kind:       fullscreenActionApprovalRun,
+			Command:    command,
+			ApprovalID: approvalID,
+		}
+		return m, nil
+	}
 	if decision == controller.DecisionApprove {
 		m.pendingApproval = nil
 		m.pendingProposal = nil
@@ -2724,12 +3049,75 @@ func isAgentOwnedExecution(origin controller.CommandOrigin) bool {
 	}
 }
 
+func (m Model) canAttemptLocalInterrupt() bool {
+	if m.activeExecution == nil {
+		return false
+	}
+
+	remoteSeen := false
+	localSeen := false
+
+	consider := func(context *shell.PromptContext) {
+		if context == nil || context.PromptLine() == "" {
+			return
+		}
+		if context.Remote {
+			remoteSeen = true
+			return
+		}
+		localSeen = true
+	}
+
+	contextCopy := m.shellContext
+	consider(&contextCopy)
+	consider(m.activeExecution.ShellContextAfter)
+	consider(m.activeExecution.ShellContextBefore)
+
+	if remoteSeen {
+		return false
+	}
+	if localSeen {
+		return true
+	}
+
+	return false
+}
+
+func (m Model) shouldConfirmFullscreenBeforeShellAction() bool {
+	return m.pendingFullscreen == nil &&
+		m.activeExecution != nil &&
+		m.activeExecution.State == controller.CommandExecutionInteractiveFullscreen
+}
+
+func (m Model) canSendFullscreenKeys() bool {
+	return m.pendingFullscreen == nil &&
+		m.activeExecution != nil &&
+		m.activeExecution.State == controller.CommandExecutionInteractiveFullscreen
+}
+
+func previewFullscreenKeys(keys string) string {
+	keys = strings.ReplaceAll(keys, "\n", "\\n")
+	keys = strings.Trim(keys, "\r\n")
+	if keys == "" {
+		return "(empty)"
+	}
+	return logging.Preview(keys, 80)
+}
+
+func normalizeFullscreenKeys(keys string) string {
+	keys = strings.ReplaceAll(keys, "\r\n", "\n")
+	keys = strings.Trim(keys, "\r")
+	return keys
+}
+
 func humanizeExecutionState(state controller.CommandExecutionState) string {
 	switch state {
 	case controller.CommandExecutionRunning:
 		return "running"
 	case controller.CommandExecutionAwaitingInput:
 		return "awaiting input"
+	case controller.CommandExecutionInteractiveFullscreen:
+		return "interactive fullscreen"
 	case controller.CommandExecutionHandoffActive:
 		return "handoff active"
 	case controller.CommandExecutionBackgroundMonitor:
@@ -2880,6 +3268,30 @@ func eventsToEntries(events []controller.TranscriptEvent, collapseResults bool) 
 				entries = append(entries, Entry{
 					Title:  "result",
 					Body:   "status=canceled\n" + body,
+					Detail: strings.Join(detail, "\n"),
+				})
+				break
+			}
+			if payload.State == controller.CommandExecutionLost {
+				detail := []string{
+					"command:",
+					payload.Command,
+					"",
+					"status:",
+					"lost",
+				}
+				if payload.Cause != "" {
+					detail = append(detail, "", "cause:", string(payload.Cause))
+				}
+				if payload.Confidence != "" {
+					detail = append(detail, "confidence:", string(payload.Confidence))
+				}
+				if strings.TrimSpace(fullBody) != "" && fullBody != "(no output)" {
+					detail = append(detail, "", "latest observed output:", fullBody)
+				}
+				entries = append(entries, Entry{
+					Title:  "result",
+					Body:   "status=lost\n" + body,
 					Detail: strings.Join(detail, "\n"),
 				})
 				break

@@ -33,6 +33,7 @@ type TaskContext struct {
 	LastCommandResult *CommandResultSummary
 	ActivePlan        *ActivePlan
 	CurrentExecution  *CommandExecution
+	RecoverySnapshot  string
 }
 
 type AgentResponse struct {
@@ -147,15 +148,16 @@ const (
 type CommandExecutionState string
 
 const (
-	CommandExecutionQueued            CommandExecutionState = "queued"
-	CommandExecutionRunning           CommandExecutionState = "running"
-	CommandExecutionAwaitingInput     CommandExecutionState = "awaiting_input"
-	CommandExecutionHandoffActive     CommandExecutionState = "handoff_active"
-	CommandExecutionBackgroundMonitor CommandExecutionState = "background_monitoring"
-	CommandExecutionCompleted         CommandExecutionState = "completed"
-	CommandExecutionFailed            CommandExecutionState = "failed"
-	CommandExecutionCanceled          CommandExecutionState = "canceled"
-	CommandExecutionLost              CommandExecutionState = "lost"
+	CommandExecutionQueued                CommandExecutionState = "queued"
+	CommandExecutionRunning               CommandExecutionState = "running"
+	CommandExecutionAwaitingInput         CommandExecutionState = "awaiting_input"
+	CommandExecutionInteractiveFullscreen CommandExecutionState = "interactive_fullscreen"
+	CommandExecutionHandoffActive         CommandExecutionState = "handoff_active"
+	CommandExecutionBackgroundMonitor     CommandExecutionState = "background_monitoring"
+	CommandExecutionCompleted             CommandExecutionState = "completed"
+	CommandExecutionFailed                CommandExecutionState = "failed"
+	CommandExecutionCanceled              CommandExecutionState = "canceled"
+	CommandExecutionLost                  CommandExecutionState = "lost"
 )
 
 type CommandExecution struct {

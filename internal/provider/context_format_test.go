@@ -63,3 +63,21 @@ func TestBuildTurnContextDeduplicatesRepeatedShellOutput(t *testing.T) {
 		t.Fatalf("expected duplicate summary to be omitted, got %q", context)
 	}
 }
+
+func TestBuildTurnContextIncludesRecoverySnapshot(t *testing.T) {
+	context := buildTurnContext(controller.AgentInput{
+		Prompt: "figure out what happened",
+		Task: controller.TaskContext{
+			CurrentExecution: &controller.CommandExecution{
+				ID:      "cmd-1",
+				Command: "nano goo.txt",
+				State:   controller.CommandExecutionInteractiveFullscreen,
+			},
+			RecoverySnapshot: "line 1\nline 2\nline 3",
+		},
+	})
+
+	if !strings.Contains(context, "Recovery terminal snapshot:\nline 1\nline 2\nline 3") {
+		t.Fatalf("expected recovery snapshot section, got %q", context)
+	}
+}

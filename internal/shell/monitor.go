@@ -27,13 +27,14 @@ const (
 )
 
 const (
-	MonitorStateQueued        MonitorState = "queued"
-	MonitorStateRunning       MonitorState = "running"
-	MonitorStateAwaitingInput MonitorState = "awaiting_input"
-	MonitorStateCompleted     MonitorState = "completed"
-	MonitorStateFailed        MonitorState = "failed"
-	MonitorStateCanceled      MonitorState = "canceled"
-	MonitorStateLost          MonitorState = "lost"
+	MonitorStateQueued                MonitorState = "queued"
+	MonitorStateRunning               MonitorState = "running"
+	MonitorStateAwaitingInput         MonitorState = "awaiting_input"
+	MonitorStateInteractiveFullscreen MonitorState = "interactive_fullscreen"
+	MonitorStateCompleted             MonitorState = "completed"
+	MonitorStateFailed                MonitorState = "failed"
+	MonitorStateCanceled              MonitorState = "canceled"
+	MonitorStateLost                  MonitorState = "lost"
 )
 
 type MonitorSnapshot struct {

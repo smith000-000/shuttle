@@ -165,6 +165,52 @@ func TestLocalControllerSubmitShellCommandCanceledReturnsResultEvent(t *testing.
 	}
 }
 
+func TestLocalControllerSubmitShellCommandLostReturnsResultEvent(t *testing.T) {
+	controller := New(nil, &stubRunner{
+		result: shell.TrackedExecution{
+			CommandID:  "cmd-1",
+			Command:    "rg -n foo ~",
+			State:      shell.MonitorStateLost,
+			Cause:      shell.CompletionCauseUnknown,
+			Confidence: shell.ConfidenceLow,
+			Captured:   "partial output",
+		},
+		err: context.DeadlineExceeded,
+	}, nil, SessionContext{TopPaneID: "%0"})
+
+	events, err := controller.SubmitShellCommand(context.Background(), "rg -n foo ~")
+	if err != nil {
+		t.Fatalf("SubmitShellCommand() error = %v", err)
+	}
+
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+	if events[0].Kind != EventCommandStart || events[1].Kind != EventCommandResult {
+		t.Fatalf("unexpected event kinds: %#v", events)
+	}
+
+	resultPayload, ok := events[1].Payload.(CommandResultSummary)
+	if !ok {
+		t.Fatalf("expected command result payload, got %#v", events[1].Payload)
+	}
+	if resultPayload.State != CommandExecutionLost {
+		t.Fatalf("expected lost result state, got %q", resultPayload.State)
+	}
+	if resultPayload.Confidence != shell.ConfidenceLow {
+		t.Fatalf("expected low confidence, got %q", resultPayload.Confidence)
+	}
+	if resultPayload.Summary != "partial output" {
+		t.Fatalf("expected partial output summary, got %q", resultPayload.Summary)
+	}
+	if controller.ActiveExecution() != nil {
+		t.Fatal("expected active execution to clear after lost result")
+	}
+	if controller.task.LastCommandResult == nil || controller.task.LastCommandResult.State != CommandExecutionLost {
+		t.Fatalf("expected lost last command result, got %#v", controller.task.LastCommandResult)
+	}
+}
+
 func TestLocalControllerSubmitProposedShellCommandTracksAgentOrigin(t *testing.T) {
 	controller := New(nil, &stubRunner{
 		result: shell.TrackedExecution{
@@ -358,7 +404,7 @@ func TestLocalControllerCheckActiveExecutionPreservesAwaitingInputState(t *testi
 			Message: "The command is waiting for input.",
 		},
 	}
-	controller := New(agent, nil, nil, SessionContext{TopPaneID: "%0"})
+	controller := New(agent, nil, &stubContextReader{snapshot: "snapshot lines"}, SessionContext{TopPaneID: "%0"})
 	controller.task.CurrentExecution = &CommandExecution{
 		ID:               "cmd-agent",
 		Command:          "python3 -c \"input('name: ')\"",
@@ -374,6 +420,37 @@ func TestLocalControllerCheckActiveExecutionPreservesAwaitingInputState(t *testi
 	}
 	if agent.lastInput.Task.CurrentExecution == nil || agent.lastInput.Task.CurrentExecution.State != CommandExecutionAwaitingInput {
 		t.Fatalf("expected awaiting_input state to be preserved, got %#v", agent.lastInput.Task.CurrentExecution)
+	}
+	if agent.lastInput.Task.RecoverySnapshot != "snapshot lines" {
+		t.Fatalf("expected recovery snapshot, got %q", agent.lastInput.Task.RecoverySnapshot)
+	}
+}
+
+func TestLocalControllerCheckActiveExecutionPreservesInteractiveFullscreenState(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "The command is occupying a fullscreen terminal app.",
+		},
+	}
+	controller := New(agent, nil, &stubContextReader{snapshot: "fullscreen snapshot"}, SessionContext{TopPaneID: "%0"})
+	controller.task.CurrentExecution = &CommandExecution{
+		ID:               "cmd-agent",
+		Command:          "wrapped-btop",
+		Origin:           CommandOriginAgentProposal,
+		State:            CommandExecutionInteractiveFullscreen,
+		StartedAt:        time.Now().Add(-15 * time.Second),
+		LatestOutputTail: "",
+	}
+
+	_, err := controller.CheckActiveExecution(context.Background())
+	if err != nil {
+		t.Fatalf("CheckActiveExecution() error = %v", err)
+	}
+	if agent.lastInput.Task.CurrentExecution == nil || agent.lastInput.Task.CurrentExecution.State != CommandExecutionInteractiveFullscreen {
+		t.Fatalf("expected interactive_fullscreen state to be preserved, got %#v", agent.lastInput.Task.CurrentExecution)
+	}
+	if agent.lastInput.Task.RecoverySnapshot != "fullscreen snapshot" {
+		t.Fatalf("expected fullscreen recovery snapshot, got %q", agent.lastInput.Task.RecoverySnapshot)
 	}
 }
 
@@ -466,6 +543,55 @@ func TestLocalControllerMonitorMapsAwaitingInputState(t *testing.T) {
 		Command:   "python3 -c \"input('name: ')\"",
 		ExitCode:  shell.InterruptedExitCode,
 		Captured:  "name:\n",
+	}, context.Canceled)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for monitored command to finish")
+	}
+}
+
+func TestLocalControllerMonitorMapsInteractiveFullscreenState(t *testing.T) {
+	monitor := newManualMonitor()
+	runner := &monitoringRunner{
+		monitor: monitor,
+		started: make(chan struct{}, 1),
+	}
+	controller := New(nil, runner, nil, SessionContext{TopPaneID: "%0"})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = controller.SubmitShellCommand(context.Background(), "wrapped-btop")
+	}()
+
+	runner.waitForStart(t)
+	monitor.publish(shell.MonitorSnapshot{
+		CommandID:        "cmd-monitor",
+		Command:          "wrapped-btop",
+		State:            shell.MonitorStateInteractiveFullscreen,
+		StartedAt:        time.Now(),
+		LatestOutputTail: "",
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		active := controller.ActiveExecution()
+		if active != nil && active.State == CommandExecutionInteractiveFullscreen {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected active execution to enter interactive_fullscreen, got %#v", active)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	monitor.finish(shell.TrackedExecution{
+		CommandID: "cmd-monitor",
+		Command:   "wrapped-btop",
+		ExitCode:  shell.InterruptedExitCode,
+		Captured:  "",
 	}, context.Canceled)
 
 	select {
@@ -656,13 +782,12 @@ type stubRunner struct {
 }
 
 func (s *stubRunner) RunTrackedCommand(_ context.Context, _ string, command string, _ time.Duration) (shell.TrackedExecution, error) {
-	if s.err != nil {
-		return shell.TrackedExecution{}, s.err
-	}
-
 	s.commands = append(s.commands, command)
 	if s.result.Command == "" {
 		s.result.Command = command
+	}
+	if s.err != nil {
+		return s.result, s.err
 	}
 	return s.result, nil
 }
@@ -950,13 +1075,17 @@ func TestLocalControllerContinueActivePlanUsesActivePlanContext(t *testing.T) {
 }
 
 type stubContextReader struct {
-	output string
-	err    error
+	output   string
+	snapshot string
+	err      error
 }
 
 func (s *stubContextReader) CaptureRecentOutput(context.Context, string, int) (string, error) {
 	if s.err != nil {
 		return "", s.err
+	}
+	if s.snapshot != "" {
+		return s.snapshot, nil
 	}
 
 	return s.output, nil
