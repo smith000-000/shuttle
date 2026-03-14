@@ -16,20 +16,26 @@ import (
 )
 
 type TrackedExecution struct {
-	CommandID    string
-	Command      string
-	State        MonitorState
-	Cause        CompletionCause
-	Confidence   SignalConfidence
-	ExitCode     int
-	Captured     string
-	ShellContext PromptContext
+	CommandID      string
+	Command        string
+	State          MonitorState
+	Cause          CompletionCause
+	Confidence     SignalConfidence
+	SemanticShell  bool
+	SemanticSource string
+	ExitCode       int
+	Captured       string
+	ShellContext   PromptContext
 }
 
 type paneClient interface {
 	CapturePane(ctx context.Context, target string, startLine int) (string, error)
 	SendKeys(ctx context.Context, target string, command string, pressEnter bool) error
 	PaneInfo(ctx context.Context, target string) (tmux.Pane, error)
+}
+
+type escapedPaneClient interface {
+	CapturePaneEscaped(ctx context.Context, target string, startLine int) (string, error)
 }
 
 type Observer struct {
@@ -125,7 +131,7 @@ func (o *Observer) CaptureShellContext(ctx context.Context, paneID string) (Prom
 	context, ok := ParsePromptContextFromCapture(captured)
 	if ok {
 		if paneInfo, paneErr := o.client.PaneInfo(ctx, paneID); paneErr == nil {
-			if semanticState, semanticOK := readSemanticShellState(o.stateDir, paneInfo.TTY); semanticOK {
+			if semanticState, _, semanticOK := o.captureSemanticShellState(ctx, paneID, paneInfo.TTY, strings.TrimSpace(paneInfo.CurrentCommand), context); semanticOK {
 				context = synthesizePromptContext(context, semanticState)
 			}
 		}
@@ -134,7 +140,7 @@ func (o *Observer) CaptureShellContext(ctx context.Context, paneID string) (Prom
 	}
 
 	if paneInfo, paneErr := o.client.PaneInfo(ctx, paneID); paneErr == nil {
-		if semanticState, semanticOK := readSemanticShellState(o.stateDir, paneInfo.TTY); semanticOK {
+		if semanticState, _, semanticOK := o.captureSemanticShellState(ctx, paneID, paneInfo.TTY, strings.TrimSpace(paneInfo.CurrentCommand), o.promptHint); semanticOK {
 			context = synthesizePromptContext(o.promptHint, semanticState)
 			o.promptHint = context
 			return context, nil
@@ -191,7 +197,11 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 		lastCapture = captured
 		tail := monitorTail(captured, transportCommand)
 		monitor.updateTail(tail)
+		var parsedShellContext PromptContext
+		hasParsedShellContext := false
 		if shellContext, ok := ParsePromptContextFromCapture(captured); ok {
+			parsedShellContext = shellContext
+			hasParsedShellContext = true
 			monitor.updateShellContext(shellContext)
 		}
 		if lastPaneInfoCheck.IsZero() || time.Since(lastPaneInfoCheck) >= 200*time.Millisecond {
@@ -203,13 +213,19 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 				monitor.updateForegroundCommand(currentPaneCommand)
 			}
 		}
-		semanticState, hasSemanticState := readSemanticShellState(o.stateDir, paneTTY)
+		semanticBaseContext := monitor.Snapshot().ShellContext
+		if semanticBaseContext.PromptLine() == "" {
+			semanticBaseContext = o.promptHint
+		}
+		if hasParsedShellContext {
+			semanticBaseContext = parsedShellContext
+		}
+		semanticState, semanticSource, hasSemanticState := o.captureSemanticShellState(ctx, paneID, paneTTY, currentPaneCommand, semanticBaseContext)
 		if hasSemanticState {
-			baseContext := monitor.Snapshot().ShellContext
-			if baseContext.PromptLine() == "" {
-				baseContext = o.promptHint
-			}
-			monitor.updateShellContext(synthesizePromptContext(baseContext, semanticState))
+			monitor.updateSemanticMetadata(true, semanticSource)
+			monitor.updateShellContext(synthesizePromptContext(semanticBaseContext, semanticState))
+		} else {
+			monitor.updateSemanticMetadata(false, "")
 		}
 
 		if !started && sawTrackedCommandStart(captured, markers) {
@@ -356,13 +372,15 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 				"capture_preview", logging.Preview(cleanBody, 1200),
 			)
 			monitor.finish(TrackedExecution{
-				CommandID:    markers.CommandID,
-				Command:      command,
-				Cause:        CompletionCausePromptReturn,
-				Confidence:   ConfidenceStrong,
-				ExitCode:     exitCode,
-				Captured:     cleanBody,
-				ShellContext: promptContext,
+				CommandID:      markers.CommandID,
+				Command:        command,
+				Cause:          CompletionCausePromptReturn,
+				Confidence:     ConfidenceStrong,
+				SemanticShell:  true,
+				SemanticSource: semanticSource,
+				ExitCode:       exitCode,
+				Captured:       cleanBody,
+				ShellContext:   promptContext,
 			}, nil, state)
 			return
 		}
@@ -845,6 +863,35 @@ func sanitizeCapturedBody(body string) string {
 	}
 
 	return strings.TrimSpace(strings.Join(stripShuttlePlumbingLines(filtered), "\n"))
+}
+
+func (o *Observer) captureSemanticShellState(ctx context.Context, paneID string, paneTTY string, currentPaneCommand string, promptContext PromptContext) (semanticShellState, string, bool) {
+	if shouldIgnoreLocalSemanticState(currentPaneCommand, promptContext) {
+		return semanticShellState{}, semanticSourceNone, false
+	}
+	if escapedClient, ok := o.client.(escapedPaneClient); ok {
+		if raw, err := escapedClient.CapturePaneEscaped(ctx, paneID, -200); err == nil {
+			if state, ok := parseSemanticShellStateFromOSCCapture(raw); ok {
+				return state, semanticSourceOSCCapture, true
+			}
+		}
+	}
+	if state, ok := readSemanticShellState(o.stateDir, paneTTY); ok {
+		return state, semanticSourceState, true
+	}
+	return semanticShellState{}, semanticSourceNone, false
+}
+
+func shouldIgnoreLocalSemanticState(currentPaneCommand string, promptContext PromptContext) bool {
+	if promptContext.Remote {
+		return true
+	}
+	switch strings.TrimSpace(strings.ToLower(currentPaneCommand)) {
+	case "ssh", "mosh", "mosh-client", "slogin", "telnet":
+		return true
+	default:
+		return false
+	}
 }
 
 func stripShuttlePlumbingLines(lines []string) []string {

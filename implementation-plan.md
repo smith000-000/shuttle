@@ -15,8 +15,9 @@ As of March 11, 2026, the implementation state is:
 Execution-monitor redesign status on `command-execution-redesign`:
 - implemented: first-class command monitor, local managed shell transport, `awaiting_input` detection, `interactive_fullscreen` detection, `lost` execution state, `F2` handoff/reconciliation, raw `KEYS>` terminal input, remote prompt-return reconciliation, and agent-driven `keys` proposals
 - implemented: state-aware agent recovery guidance using active execution state plus a larger recovery snapshot
+- implemented: first-pass local semantic shell integration using `OSC 133` / `OSC 7` shims plus semantic metadata in monitor/provider context, with best-effort raw-marker parsing from tmux capture
 - in progress: reducing ambiguity between `running`, `awaiting_input`, and `lost` in edge cases where the shell is quiet or terminal ownership changes unexpectedly
-- next: stronger monitor-side confidence and recovery logic so fewer situations fall back to heuristic recovery messaging
+- next: keep local semantic-shell behavior stable while preventing bleed-through into remote/subshell flows, then add conservative subshell bootstrap
 
 Milestone 5 currently includes:
 - provider profile and resolver scaffolding
@@ -40,8 +41,9 @@ Milestone 5 still needs:
 - stronger monitor-side confidence so active-command classification such as `awaiting_input`, `interactive_fullscreen`, and `lost` is driven by better evidence and fewer fallback heuristics
 - pane-stream/fullscreen detection beyond tmux alternate-screen heuristics so aliases, wrappers, and remote fullscreen apps can be recognized from terminal behavior instead of command-name lists alone
 - richer state-aware agent recovery actions for ambiguous shell takeovers, including deciding when to propose raw terminal input versus simple recovery guidance
-- semantic shell integration for local shells using signals such as `OSC 133` and `OSC 7`; this is not implemented yet and remains the next standards-based execution-monitor slice
+- broader semantic shell integration and subshell/bootstrap support using signals such as `OSC 133` and `OSC 7`
 - any richer bootstrap or injected helper mode should come later, after the standards-based marker path exists
+- before touching richer subshell/bootstrap behavior for `ssh`, `docker exec -it`, or nested shells, run the manual regression checklist in [shell-execution-strategy.md](shell-execution-strategy.md) to avoid regressing the current moderately functional context-transition path
 
 ## Guiding Decisions
 - Build `P0` only first. That means Epics 1 through 4 in [requirements-mvp.md](requirements-mvp.md).

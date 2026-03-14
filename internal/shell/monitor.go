@@ -38,16 +38,18 @@ const (
 )
 
 type MonitorSnapshot struct {
-	CommandID        string
-	Command          string
-	State            MonitorState
-	StartedAt        time.Time
-	CompletedAt      *time.Time
-	LatestOutputTail string
+	CommandID         string
+	Command           string
+	State             MonitorState
+	StartedAt         time.Time
+	CompletedAt       *time.Time
+	LatestOutputTail  string
 	ForegroundCommand string
-	ExitCode         *int
-	ShellContext     PromptContext
-	Error            string
+	SemanticShell     bool
+	SemanticSource    string
+	ExitCode          *int
+	ShellContext      PromptContext
+	Error             string
 }
 
 const InterruptedExitCode = 130
@@ -135,6 +137,19 @@ func (m *trackedCommandMonitor) updateForegroundCommand(command string) {
 	m.publish(snapshot)
 }
 
+func (m *trackedCommandMonitor) updateSemanticMetadata(enabled bool, source string) {
+	m.mu.Lock()
+	if m.snapshot.SemanticShell == enabled && m.snapshot.SemanticSource == source {
+		m.mu.Unlock()
+		return
+	}
+	m.snapshot.SemanticShell = enabled
+	m.snapshot.SemanticSource = source
+	snapshot := m.snapshot
+	m.mu.Unlock()
+	m.publish(snapshot)
+}
+
 func (m *trackedCommandMonitor) updateShellContext(context PromptContext) {
 	if context.PromptLine() == "" {
 		return
@@ -160,6 +175,8 @@ func (m *trackedCommandMonitor) finish(result TrackedExecution, err error, state
 	m.snapshot.State = state
 	m.snapshot.CompletedAt = &completedAt
 	m.snapshot.LatestOutputTail = result.Captured
+	m.snapshot.SemanticShell = result.SemanticShell
+	m.snapshot.SemanticSource = result.SemanticSource
 	if result.ShellContext.PromptLine() != "" {
 		m.snapshot.ShellContext = result.ShellContext
 	}

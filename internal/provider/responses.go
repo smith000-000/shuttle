@@ -463,6 +463,12 @@ func buildTurnContext(input controller.AgentInput) string {
 		if last.Confidence != "" {
 			lines = append(lines, "confidence="+string(last.Confidence))
 		}
+		if last.SemanticShell {
+			lines = append(lines, "semantic_shell=true")
+		}
+		if strings.TrimSpace(last.SemanticSource) != "" {
+			lines = append(lines, "semantic_source="+last.SemanticSource)
+		}
 		if summary := compactShellOutput(last.Summary, 8, 4, 800); shouldIncludeContextSnippet(seenSnippets, summary) {
 			lines = append(lines, "summary="+summary)
 		}
@@ -479,6 +485,12 @@ func buildTurnContext(input controller.AgentInput) string {
 		}
 		if strings.TrimSpace(current.ForegroundCommand) != "" {
 			lines = append(lines, "foreground_command="+current.ForegroundCommand)
+		}
+		if current.SemanticShell {
+			lines = append(lines, "semantic_shell=true")
+		}
+		if strings.TrimSpace(current.SemanticSource) != "" {
+			lines = append(lines, "semantic_source="+current.SemanticSource)
 		}
 		if !current.StartedAt.IsZero() {
 			lines = append(lines, fmt.Sprintf("elapsed_seconds=%d", int(time.Since(current.StartedAt).Seconds())))

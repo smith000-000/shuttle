@@ -42,12 +42,14 @@ func TestBuildTurnContextDeduplicatesRepeatedShellOutput(t *testing.T) {
 		},
 		Task: controller.TaskContext{
 			LastCommandResult: &controller.CommandResultSummary{
-				Command:    "rg -n foo ~",
-				State:      controller.CommandExecutionCompleted,
-				Cause:      "end_marker",
-				Confidence: "strong",
-				ExitCode:   0,
-				Summary:    shared,
+				Command:        "rg -n foo ~",
+				State:          controller.CommandExecutionCompleted,
+				Cause:          "end_marker",
+				Confidence:     "strong",
+				SemanticShell:  true,
+				SemanticSource: "osc_capture",
+				ExitCode:       0,
+				Summary:        shared,
 			},
 		},
 	})
@@ -60,6 +62,9 @@ func TestBuildTurnContextDeduplicatesRepeatedShellOutput(t *testing.T) {
 	}
 	if !strings.Contains(context, "cause=end_marker") || !strings.Contains(context, "confidence=strong") {
 		t.Fatalf("expected cause/confidence metadata, got %q", context)
+	}
+	if !strings.Contains(context, "semantic_shell=true") || !strings.Contains(context, "semantic_source=osc_capture") {
+		t.Fatalf("expected semantic metadata, got %q", context)
 	}
 	if strings.Contains(context, "\nsummary=") {
 		t.Fatalf("expected duplicate summary to be omitted, got %q", context)
@@ -106,6 +111,8 @@ func TestBuildTurnContextIncludesExecutionMetadata(t *testing.T) {
 				Command:            "ssh openclaw@openclaw",
 				State:              controller.CommandExecutionAwaitingInput,
 				ForegroundCommand:  "ssh",
+				SemanticShell:      true,
+				SemanticSource:     "state_file",
 				StartedAt:          time.Now().Add(-12 * time.Second),
 				ShellContextBefore: &before,
 				ShellContextAfter:  &after,
@@ -115,6 +122,9 @@ func TestBuildTurnContextIncludesExecutionMetadata(t *testing.T) {
 
 	if !strings.Contains(context, "foreground_command=ssh") {
 		t.Fatalf("expected foreground command metadata, got %q", context)
+	}
+	if !strings.Contains(context, "semantic_shell=true") || !strings.Contains(context, "semantic_source=state_file") {
+		t.Fatalf("expected semantic shell metadata, got %q", context)
 	}
 	if !strings.Contains(context, "elapsed_seconds=") {
 		t.Fatalf("expected elapsed_seconds metadata, got %q", context)

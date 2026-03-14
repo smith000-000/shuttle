@@ -16,13 +16,14 @@ What is working now:
 - approval and refine flow
 - local and remote handoff with `F2`
 - `KEYS>` mode for sending raw terminal input
+- partial semantic shell integration for local shells
 - real OpenAI Responses API path with API-key auth
 
 What is still in progress:
 - provider onboarding and saved profiles
 - patch application and file creation flow
 - more execution-monitor confidence hardening
-- semantic shell integration (`OSC 133` / `OSC 7`) for local shells
+- broader semantic shell integration (`OSC 133` / `OSC 7`) consumption and subshell/bootstrap support
 - any richer shell bootstrap/helper mode beyond those standards
 - release packaging
 

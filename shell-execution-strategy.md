@@ -76,7 +76,7 @@ What is still not done:
 - fullscreen/interactive detection still needs stronger terminal-behavior signals beyond current tmux metadata heuristics
 - noisy transport/script echoes still need occasional cleanup in tails and recovery snapshots
 - the agent still needs tighter guardrails around when it should propose raw keys versus when it should simply tell the user to take control
-- semantic shell integration is not implemented yet; Shuttle does not currently consume `OSC 133` or `OSC 7` markers from the shell
+- semantic shell integration is only partially implemented; local shells now have a first-pass semantic shim, but Shuttle still needs broader raw-marker consumption and subshell/bootstrap support
 
 ## Recommended Direction
 
@@ -91,6 +91,56 @@ Keep this line explicit:
 - later, if needed, add an optional richer bootstrap/helper mode similar to Warp's subshell setup or Wave's shell bridge
 
 Shuttle should not jump straight to a proprietary bootstrap model before implementing the standards-based marker path.
+
+### Subshell Bootstrap
+
+After the standards-based local shell path is stable, Shuttle should add a separate subshell bootstrap layer for transitions such as:
+- `ssh`
+- `docker exec -it`
+- `kubectl exec -it`
+- nested `bash` / `zsh`
+- `sudo -i` / `sudo -s`
+
+This is distinct from basic `OSC 133` / `OSC 7` support:
+- semantic shell integration:
+  - local shell emits portable markers
+  - Shuttle consumes them
+- subshell bootstrap:
+  - Shuttle detects a context transition
+  - waits for the new shell prompt to settle
+  - then injects an idempotent integration snippet into that new shell if it is safe to do so
+
+Rules for subshell bootstrap:
+- conservative by default
+- only after prompt return, not mid-transition
+- idempotent per shell session
+- best-effort, never required for correctness
+- silent fallback to heuristic monitoring if bootstrap fails
+- do not assume Linux, tmux, or extra helper binaries on the remote target
+
+This should be treated as a later capability layer, not as part of the first local semantic-shell milestone.
+
+### Subshell Regression Checklist
+
+Before changing subshell/bootstrap behavior, manually verify:
+- `ssh host`
+  - prompt returns cleanly
+  - remote shell context is still detected
+  - long-running remote command still reconciles after `F2 -> Ctrl+C -> F2`
+- remote awaiting-input command over `ssh`
+  - `awaiting_input` still works
+  - `KEYS>` still works
+  - agent `keys` proposal still works
+- remote fullscreen app over `ssh`
+  - `interactive_fullscreen` still works
+  - `KEYS>` still works
+  - no bogus local interrupt behavior returns
+- `docker exec -it ... sh`
+  - context transition still settles
+  - prompt detection does not regress into `lost`
+- nested local subshell such as `bash`
+  - local prompt still stabilizes
+  - tracked commands still complete normally
 
 ### 1. Introduce First-Class Command Executions
 Every shell command should create a tracked execution record.

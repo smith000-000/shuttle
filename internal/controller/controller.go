@@ -206,15 +206,17 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 	}
 
 	summary := CommandResultSummary{
-		ExecutionID: execution.ID,
-		CommandID:   execution.ID,
-		Command:     execution.Command,
-		Origin:      execution.Origin,
-		State:       state,
-		Cause:       shell.CompletionCausePromptReturn,
-		Confidence:  shell.ConfidenceStrong,
-		ExitCode:    exitCode,
-		Summary:     recentOutput,
+		ExecutionID:    execution.ID,
+		CommandID:      execution.ID,
+		Command:        execution.Command,
+		Origin:         execution.Origin,
+		State:          state,
+		Cause:          shell.CompletionCausePromptReturn,
+		Confidence:     shell.ConfidenceStrong,
+		SemanticShell:  true,
+		SemanticSource: "state_file",
+		ExitCode:       exitCode,
+		Summary:        recentOutput,
 	}
 	contextCopy := promptContext
 	summary.ShellContext = &contextCopy
@@ -623,15 +625,17 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 			}
 
 			summary := CommandResultSummary{
-				ExecutionID: execution.ID,
-				CommandID:   result.CommandID,
-				Command:     result.Command,
-				Origin:      origin,
-				State:       CommandExecutionLost,
-				Cause:       result.Cause,
-				Confidence:  result.Confidence,
-				ExitCode:    result.ExitCode,
-				Summary:     lostExecution.LatestOutputTail,
+				ExecutionID:    execution.ID,
+				CommandID:      result.CommandID,
+				Command:        result.Command,
+				Origin:         origin,
+				State:          CommandExecutionLost,
+				Cause:          result.Cause,
+				Confidence:     result.Confidence,
+				SemanticShell:  result.SemanticShell,
+				SemanticSource: result.SemanticSource,
+				ExitCode:       result.ExitCode,
+				Summary:        lostExecution.LatestOutputTail,
 			}
 			if result.ShellContext.PromptLine() != "" {
 				shellContext := result.ShellContext
@@ -699,15 +703,17 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 		canceledExecution.ExitCode = &exitCode
 
 		summary := CommandResultSummary{
-			ExecutionID: execution.ID,
-			CommandID:   result.CommandID,
-			Command:     result.Command,
-			Origin:      origin,
-			State:       CommandExecutionCanceled,
-			Cause:       result.Cause,
-			Confidence:  result.Confidence,
-			ExitCode:    result.ExitCode,
-			Summary:     result.Captured,
+			ExecutionID:    execution.ID,
+			CommandID:      result.CommandID,
+			Command:        result.Command,
+			Origin:         origin,
+			State:          CommandExecutionCanceled,
+			Cause:          result.Cause,
+			Confidence:     result.Confidence,
+			SemanticShell:  result.SemanticShell,
+			SemanticSource: result.SemanticSource,
+			ExitCode:       result.ExitCode,
+			Summary:        result.Captured,
 		}
 		if result.ShellContext.PromptLine() != "" {
 			shellContext := result.ShellContext
@@ -745,15 +751,17 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 	completedExecution.ExitCode = &exitCode
 
 	summary := CommandResultSummary{
-		ExecutionID: execution.ID,
-		CommandID:   result.CommandID,
-		Command:     result.Command,
-		Origin:      origin,
-		State:       CommandExecutionCompleted,
-		Cause:       result.Cause,
-		Confidence:  result.Confidence,
-		ExitCode:    result.ExitCode,
-		Summary:     result.Captured,
+		ExecutionID:    execution.ID,
+		CommandID:      result.CommandID,
+		Command:        result.Command,
+		Origin:         origin,
+		State:          CommandExecutionCompleted,
+		Cause:          result.Cause,
+		Confidence:     result.Confidence,
+		SemanticShell:  result.SemanticShell,
+		SemanticSource: result.SemanticSource,
+		ExitCode:       result.ExitCode,
+		Summary:        result.Captured,
 	}
 	if result.ShellContext.PromptLine() != "" {
 		shellContext := result.ShellContext
@@ -927,6 +935,8 @@ func (c *LocalController) applyMonitorSnapshot(executionID string, snapshot shel
 	if strings.TrimSpace(snapshot.ForegroundCommand) != "" {
 		execution.ForegroundCommand = snapshot.ForegroundCommand
 	}
+	execution.SemanticShell = snapshot.SemanticShell
+	execution.SemanticSource = snapshot.SemanticSource
 	if snapshot.ShellContext.PromptLine() != "" {
 		contextCopy := snapshot.ShellContext
 		execution.ShellContextAfter = &contextCopy

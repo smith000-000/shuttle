@@ -129,6 +129,14 @@ func (c *Client) InterruptForegroundProcess(ctx context.Context, target string) 
 }
 
 func (c *Client) CapturePane(ctx context.Context, target string, startLine int) (string, error) {
+	return c.capturePane(ctx, target, startLine, false)
+}
+
+func (c *Client) CapturePaneEscaped(ctx context.Context, target string, startLine int) (string, error) {
+	return c.capturePane(ctx, target, startLine, true)
+}
+
+func (c *Client) capturePane(ctx context.Context, target string, startLine int, escaped bool) (string, error) {
 	if len(target) == 0 || target[0] != '%' {
 		return "", fmt.Errorf("invalid pane target %q", target)
 	}
@@ -137,7 +145,11 @@ func (c *Client) CapturePane(ctx context.Context, target string, startLine int) 
 		return "", fmt.Errorf("invalid pane target %q", target)
 	}
 
-	output, err := c.run(ctx, "capture-pane", "-p", "-t", target, "-S", strconv.Itoa(startLine))
+	args := []string{"capture-pane", "-p", "-t", target, "-S", strconv.Itoa(startLine)}
+	if escaped {
+		args = append(args, "-e")
+	}
+	output, err := c.run(ctx, args...)
 	if err != nil {
 		return "", err
 	}

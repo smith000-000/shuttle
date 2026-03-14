@@ -172,22 +172,26 @@ type CommandExecution struct {
 	ExitCode           *int
 	LatestOutputTail   string
 	ForegroundCommand  string
+	SemanticShell      bool
+	SemanticSource     string
 	Error              string
 	ShellContextBefore *shell.PromptContext
 	ShellContextAfter  *shell.PromptContext
 }
 
 type CommandResultSummary struct {
-	ExecutionID  string
-	CommandID    string
-	Command      string
-	Origin       CommandOrigin
-	State        CommandExecutionState
-	Cause        shell.CompletionCause
-	Confidence   shell.SignalConfidence
-	ExitCode     int
-	Summary      string
-	ShellContext *shell.PromptContext
+	ExecutionID    string
+	CommandID      string
+	Command        string
+	Origin         CommandOrigin
+	State          CommandExecutionState
+	Cause          shell.CompletionCause
+	Confidence     shell.SignalConfidence
+	SemanticShell  bool
+	SemanticSource string
+	ExitCode       int
+	Summary        string
+	ShellContext   *shell.PromptContext
 }
 
 type Controller interface {

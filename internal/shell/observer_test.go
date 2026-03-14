@@ -153,6 +153,18 @@ func TestAllowPromptReturnInferenceAllowsRemoteTransportPaneCommands(t *testing.
 	}
 }
 
+func TestShouldIgnoreLocalSemanticStateForRemotePromptContext(t *testing.T) {
+	if !shouldIgnoreLocalSemanticState("zsh", PromptContext{Remote: true}) {
+		t.Fatal("expected remote prompt context to suppress local semantic state")
+	}
+}
+
+func TestShouldIgnoreLocalSemanticStateForSSHPaneCommand(t *testing.T) {
+	if !shouldIgnoreLocalSemanticState("ssh", PromptContext{}) {
+		t.Fatal("expected ssh pane command to suppress local semantic state")
+	}
+}
+
 func TestPaneCommandIsShell(t *testing.T) {
 	if !paneCommandIsShell("zsh") {
 		t.Fatal("expected zsh to be treated as shell")
