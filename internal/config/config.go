@@ -31,6 +31,8 @@ type Config struct {
 	ProviderBaseURL      string
 	ProviderAPIKey       string
 	ProviderAPIKeyEnvVar string
+	ProviderCLICommand   string
+	ProviderFlagsSet     bool
 }
 
 func Parse(args []string) (Config, error) {
@@ -46,6 +48,7 @@ func Parse(args []string) (Config, error) {
 	providerAuthMethod := envOrDefault("SHUTTLE_AUTH", "auto")
 	providerModel := os.Getenv("SHUTTLE_MODEL")
 	providerBaseURL := os.Getenv("SHUTTLE_BASE_URL")
+	providerCLICommand := os.Getenv("SHUTTLE_CLI_COMMAND")
 
 	fs := flag.NewFlagSet("shuttle", flag.ContinueOnError)
 
@@ -59,14 +62,21 @@ func Parse(args []string) (Config, error) {
 	fs.StringVar(&cfg.Track, "track", "", "inject a tracked shell command into the top pane and wait for its result")
 	fs.BoolVar(&cfg.TUI, "tui", false, "run the minimal interactive TUI shell")
 	fs.BoolVar(&cfg.InjectEnter, "enter", true, "append Enter when injecting a command")
-	fs.StringVar(&cfg.ProviderType, "provider", providerType, "agent provider to use: mock, openai, openrouter, or custom")
-	fs.StringVar(&cfg.ProviderAuthMethod, "auth", providerAuthMethod, "auth method for the selected provider: auto, api_key, or none")
+	fs.StringVar(&cfg.ProviderType, "provider", providerType, "agent provider to use: mock, openai, openrouter, anthropic, ollama, codex_cli, or custom")
+	fs.StringVar(&cfg.ProviderAuthMethod, "auth", providerAuthMethod, "auth method for the selected provider: auto, api_key, codex_login, or none")
 	fs.StringVar(&cfg.ProviderModel, "model", providerModel, "model name for the selected provider")
 	fs.StringVar(&cfg.ProviderBaseURL, "base-url", providerBaseURL, "base URL for the selected provider API")
+	fs.StringVar(&cfg.ProviderCLICommand, "cli-command", providerCLICommand, "CLI command path for CLI-backed providers")
 
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
 	}
+	fs.Visit(func(flag *flag.Flag) {
+		switch flag.Name {
+		case "provider", "auth", "model", "base-url", "cli-command":
+			cfg.ProviderFlagsSet = true
+		}
+	})
 
 	if cfg.SessionName == "" {
 		return Config{}, errors.New("session name must not be empty")
@@ -119,6 +129,12 @@ func normalizeProviderType(value string) string {
 		return "mock"
 	case "openai-responses":
 		return "openai"
+	case "anthropic":
+		return "anthropic"
+	case "ollama":
+		return "ollama"
+	case "codex-cli":
+		return "codex_cli"
 	default:
 		return strings.ToLower(strings.TrimSpace(value))
 	}
@@ -130,10 +146,12 @@ func normalizeProviderAuthMethod(value string) (string, error) {
 		return "auto", nil
 	case "api_key":
 		return "api_key", nil
+	case "codex_login":
+		return "codex_login", nil
 	case "none":
 		return "none", nil
 	default:
-		return "", errors.New("auth method must be one of: auto, api_key, none")
+		return "", errors.New("auth method must be one of: auto, api_key, codex_login, none")
 	}
 }
 
@@ -143,6 +161,13 @@ func resolveProviderAPIKey(providerType string, authMethod string) (string, stri
 	}
 
 	switch normalizeProviderType(providerType) {
+	case "ollama", "codex_cli":
+		return "", ""
+	case "anthropic":
+		return firstNonEmptyEnv(
+			"SHUTTLE_API_KEY",
+			"ANTHROPIC_API_KEY",
+		)
 	case "openrouter":
 		return firstNonEmptyEnv(
 			"SHUTTLE_API_KEY",

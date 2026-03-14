@@ -7,7 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"aiterm/internal/config"
 	"aiterm/internal/controller"
+	"aiterm/internal/provider"
 	"aiterm/internal/shell"
 	"aiterm/internal/tmux"
 
@@ -44,6 +46,44 @@ type refreshedShellContextMsg struct {
 type shellTailMsg struct {
 	tail string
 	err  error
+}
+
+type providerSwitchedMsg struct {
+	ctrl       controller.Controller
+	profile    provider.Profile
+	err        error
+	persistErr error
+}
+
+type providerModelsLoadedMsg struct {
+	candidate provider.OnboardingCandidate
+	models    []provider.ModelOption
+	err       error
+}
+
+type onboardingStep string
+
+const (
+	onboardingStepProviders onboardingStep = "providers"
+	onboardingStepConfig    onboardingStep = "config"
+	onboardingStepModels    onboardingStep = "models"
+)
+
+type onboardingField struct {
+	key         string
+	label       string
+	value       string
+	placeholder string
+	required    bool
+	secret      bool
+}
+
+type onboardingFormState struct {
+	title   string
+	intro   string
+	profile provider.Profile
+	fields  []onboardingField
+	index   int
 }
 
 const (
@@ -83,6 +123,20 @@ type Model struct {
 	takeControl        takeControlConfig
 	liveShellTail      string
 	showShellTail      bool
+	activeProvider     provider.Profile
+	onboardingOpen     bool
+	onboardingStep     onboardingStep
+	onboardingIndex    int
+	onboardingChoices  []provider.OnboardingCandidate
+	onboardingSelected *provider.OnboardingCandidate
+	onboardingForm     *onboardingFormState
+	onboardingModels   []provider.ModelOption
+	onboardingModelIdx int
+	loadOnboarding     func() ([]provider.OnboardingCandidate, error)
+	loadModels         func(provider.Profile) ([]provider.ModelOption, error)
+	switchProvider     func(provider.Profile, *shell.PromptContext) (controller.Controller, provider.Profile, error)
+	saveProvider       func(provider.Profile) error
+	lastModelInfo      *controller.AgentModelInfo
 	styles             styles
 }
 
@@ -99,7 +153,7 @@ func NewModel(workspace tmux.Workspace, ctrl controller.Controller) Model {
 			},
 			{
 				Title: "system",
-				Body:  "Tab mode. Up/Down history. PgUp/PgDn scroll. Enter submit. F2 take control. Esc clear. Ctrl+C quit.",
+				Body:  "Tab mode. Up/Down history. PgUp/PgDn scroll. Enter submit. F2 take control. F3 providers. /onboard opens provider onboarding. Esc clear. Ctrl+C quit.",
 			},
 		},
 		selectedEntry: 1,
@@ -123,6 +177,21 @@ func (m Model) WithTakeControl(socketName string, sessionName string, topPaneID 
 		DetachKey:   detachKey,
 	}
 
+	return m
+}
+
+func (m Model) WithProviderOnboarding(
+	active provider.Profile,
+	load func() ([]provider.OnboardingCandidate, error),
+	loadModels func(provider.Profile) ([]provider.ModelOption, error),
+	switcher func(provider.Profile, *shell.PromptContext) (controller.Controller, provider.Profile, error),
+	saver func(provider.Profile) error,
+) Model {
+	m.activeProvider = active
+	m.loadOnboarding = load
+	m.loadModels = loadModels
+	m.switchProvider = switcher
+	m.saveProvider = saver
 	return m
 }
 
@@ -240,6 +309,70 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.liveShellTail = msg.tail
 		}
 		return m, nil
+	case providerSwitchedMsg:
+		m.busy = false
+		m.busyStartedAt = time.Time{}
+		m.inFlightCancel = nil
+		if msg.err != nil {
+			m.entries = append(m.entries, Entry{
+				Title: "error",
+				Body:  fmt.Sprintf("switch provider: %v", msg.err),
+			})
+			m.selectedEntry = len(m.entries) - 1
+			m.clampSelection()
+			return m, nil
+		}
+
+		m.ctrl = msg.ctrl
+		m.activeProvider = msg.profile
+		m.onboardingOpen = false
+		m.onboardingStep = onboardingStepProviders
+		m.onboardingIndex = 0
+		m.onboardingChoices = nil
+		m.onboardingSelected = nil
+		m.onboardingForm = nil
+		m.onboardingModels = nil
+		m.onboardingModelIdx = 0
+		m.pendingApproval = nil
+		m.pendingProposal = nil
+		m.refiningApproval = nil
+		m.activePlan = nil
+		m.lastModelInfo = nil
+		m.approvalInFlight = false
+		m.proposalRunPending = false
+		m.directShellPending = false
+		m.entries = append(m.entries, Entry{
+			Title: "system",
+			Body:  fmt.Sprintf("Provider switched to %s (%s, %s, auth %s).", msg.profile.Name, msg.profile.Preset, msg.profile.Model, providerAuthSourceLabel(msg.profile)),
+		})
+		if msg.persistErr != nil {
+			m.entries = append(m.entries, Entry{
+				Title: "error",
+				Body:  fmt.Sprintf("save provider config: %v", msg.persistErr),
+			})
+		}
+		m.selectedEntry = len(m.entries) - 1
+		m.clampSelection()
+		return m, nil
+	case providerModelsLoadedMsg:
+		m.busy = false
+		m.busyStartedAt = time.Time{}
+		m.inFlightCancel = nil
+		if msg.err != nil {
+			m.entries = append(m.entries, Entry{
+				Title: "error",
+				Body:  fmt.Sprintf("load models for %s: %v", msg.candidate.Profile.Name, msg.err),
+			})
+			m.selectedEntry = len(m.entries) - 1
+			m.clampSelection()
+			return m, nil
+		}
+		m.onboardingStep = onboardingStepModels
+		candidate := msg.candidate
+		m.onboardingSelected = &candidate
+		m.onboardingModels = append([]provider.ModelOption(nil), msg.models...)
+		m.onboardingModelIdx = m.currentProviderModelIndex()
+		return m, nil
 	case busyTickMsg:
 		if !m.busy {
 			return m, nil
@@ -247,6 +380,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, tea.Batch(tickBusy(), m.pollShellTailCmd())
 	case tea.KeyMsg:
+		if m.onboardingOpen {
+			return m.updateOnboarding(msg)
+		}
 		if m.detailOpen {
 			return m.updateDetail(msg)
 		}
@@ -255,6 +391,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case tea.KeyF2:
 			return m.takeControlNow()
+		case tea.KeyF3:
+			return m.openOnboarding()
 		case tea.KeyEsc:
 			m.input = ""
 			return m, nil
@@ -335,6 +473,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) View() string {
+	if m.onboardingOpen {
+		return m.renderOnboardingView()
+	}
 	if m.detailOpen {
 		return m.renderDetailView()
 	}
@@ -390,6 +531,10 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.input)
 	if text == "" || m.busy {
 		return m, nil
+	}
+
+	if handled, next, cmd := m.handleComposerCommand(text); handled {
+		return next, cmd
 	}
 
 	m.input = ""
@@ -456,6 +601,18 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 			err:    err,
 		}
 	}, tickBusy(), m.pollShellTailCmd())
+}
+
+func (m Model) handleComposerCommand(text string) (bool, tea.Model, tea.Cmd) {
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "/onboard", "/onboarding", "/provider", "/providers":
+		m.input = ""
+		m.currentHistory().reset()
+		next, cmd := m.openOnboarding()
+		return true, next, cmd
+	default:
+		return false, m, nil
+	}
 }
 
 func (m Model) primaryAction() (tea.Model, tea.Cmd) {
@@ -529,6 +686,48 @@ func (m Model) takeControlNow() (tea.Model, tea.Cmd) {
 	return m, newTakeControlCmd(m.takeControl)
 }
 
+func (m Model) openOnboarding() (tea.Model, tea.Cmd) {
+	if m.loadOnboarding == nil || m.switchProvider == nil {
+		m.entries = append(m.entries, Entry{
+			Title: "error",
+			Body:  "provider onboarding is not configured in this session",
+		})
+		m.selectedEntry = len(m.entries) - 1
+		m.clampSelection()
+		return m, nil
+	}
+
+	choices, err := m.loadOnboarding()
+	if err != nil {
+		m.entries = append(m.entries, Entry{
+			Title: "error",
+			Body:  fmt.Sprintf("load provider onboarding candidates: %v", err),
+		})
+		m.selectedEntry = len(m.entries) - 1
+		m.clampSelection()
+		return m, nil
+	}
+	if len(choices) == 0 {
+		m.entries = append(m.entries, Entry{
+			Title: "system",
+			Body:  "No provider onboarding candidates detected. Set OPENAI_API_KEY, OPENROUTER_API_KEY, or SHUTTLE_BASE_URL and try again.",
+		})
+		m.selectedEntry = len(m.entries) - 1
+		m.clampSelection()
+		return m, nil
+	}
+
+	m.onboardingChoices = append([]provider.OnboardingCandidate(nil), choices...)
+	m.onboardingStep = onboardingStepProviders
+	m.onboardingIndex = m.currentProviderChoiceIndex()
+	m.onboardingSelected = nil
+	m.onboardingForm = nil
+	m.onboardingModels = nil
+	m.onboardingModelIdx = 0
+	m.onboardingOpen = true
+	return m, nil
+}
+
 func (m Model) refreshShellContextCmd() tea.Cmd {
 	if m.ctrl == nil {
 		return nil
@@ -580,6 +779,311 @@ func (m Model) formatShellError(err error) string {
 	}
 
 	return strings.TrimSpace(message + "\nlast shell output:\n" + strings.Join(lines, "\n"))
+}
+
+func (m Model) updateOnboarding(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		return m, tea.Quit
+	case tea.KeyF2:
+		return m.takeControlNow()
+	case tea.KeyEsc:
+		if m.onboardingStep == onboardingStepConfig {
+			m.onboardingStep = onboardingStepProviders
+			m.onboardingForm = nil
+			m.onboardingSelected = nil
+			return m, nil
+		}
+		if m.onboardingStep == onboardingStepModels {
+			m.onboardingStep = onboardingStepProviders
+			m.onboardingSelected = nil
+			m.onboardingForm = nil
+			m.onboardingModels = nil
+			m.onboardingModelIdx = 0
+			return m, nil
+		}
+		m.onboardingOpen = false
+		m.onboardingStep = onboardingStepProviders
+		m.onboardingIndex = 0
+		m.onboardingChoices = nil
+		m.onboardingSelected = nil
+		m.onboardingForm = nil
+		m.onboardingModels = nil
+		m.onboardingModelIdx = 0
+		return m, nil
+	case tea.KeyUp:
+		if m.onboardingStep == onboardingStepConfig {
+			if m.onboardingForm != nil && m.onboardingForm.index > 0 {
+				m.onboardingForm.index--
+			}
+			return m, nil
+		}
+		if m.onboardingStep == onboardingStepModels {
+			if m.onboardingModelIdx > 0 {
+				m.onboardingModelIdx--
+			}
+			return m, nil
+		}
+		if m.onboardingIndex > 0 {
+			m.onboardingIndex--
+		}
+		return m, nil
+	case tea.KeyDown:
+		if m.onboardingStep == onboardingStepConfig {
+			if m.onboardingForm != nil && m.onboardingForm.index < len(m.onboardingForm.fields)-1 {
+				m.onboardingForm.index++
+			}
+			return m, nil
+		}
+		if m.onboardingStep == onboardingStepModels {
+			if m.onboardingModelIdx < len(m.onboardingModels)-1 {
+				m.onboardingModelIdx++
+			}
+			return m, nil
+		}
+		if m.onboardingIndex < len(m.onboardingChoices)-1 {
+			m.onboardingIndex++
+		}
+		return m, nil
+	case tea.KeyTab:
+		if m.onboardingStep == onboardingStepConfig {
+			if m.onboardingForm != nil && len(m.onboardingForm.fields) > 0 {
+				m.onboardingForm.index = (m.onboardingForm.index + 1) % len(m.onboardingForm.fields)
+			}
+			return m, nil
+		}
+		return m, nil
+	case tea.KeyPgUp:
+		if m.onboardingStep == onboardingStepModels {
+			m.onboardingModelIdx -= 8
+			if m.onboardingModelIdx < 0 {
+				m.onboardingModelIdx = 0
+			}
+		}
+		return m, nil
+	case tea.KeyPgDown:
+		if m.onboardingStep == onboardingStepModels {
+			m.onboardingModelIdx += 8
+			if m.onboardingModelIdx >= len(m.onboardingModels) {
+				m.onboardingModelIdx = max(0, len(m.onboardingModels)-1)
+			}
+		}
+		return m, nil
+	case tea.KeyEnter:
+		return m.applyOnboardingSelection()
+	case tea.KeyBackspace, tea.KeyDelete:
+		if m.onboardingStep == onboardingStepConfig && m.onboardingForm != nil {
+			field := &m.onboardingForm.fields[m.onboardingForm.index]
+			if len(field.value) > 0 {
+				field.value = field.value[:len(field.value)-1]
+			}
+			return m, nil
+		}
+		return m, nil
+	case tea.KeySpace:
+		if m.onboardingStep == onboardingStepConfig && m.onboardingForm != nil {
+			m.onboardingForm.fields[m.onboardingForm.index].value += " "
+			return m, nil
+		}
+		return m, nil
+	default:
+		if m.onboardingStep == onboardingStepConfig && m.onboardingForm != nil && !msg.Alt && msg.Type == tea.KeyRunes {
+			m.onboardingForm.fields[m.onboardingForm.index].value += string(msg.Runes)
+			return m, nil
+		}
+		return m, nil
+	}
+}
+
+func (m Model) applyOnboardingSelection() (tea.Model, tea.Cmd) {
+	if m.busy || m.switchProvider == nil || len(m.onboardingChoices) == 0 {
+		return m, nil
+	}
+
+	if m.onboardingStep == onboardingStepProviders {
+		choice := m.onboardingChoices[m.onboardingIndex]
+		if choice.Manual {
+			return m.openOnboardingConfig(choice)
+		}
+		if m.loadModels == nil {
+			return m.switchOnboardingProfile(choice.Profile)
+		}
+
+		m.busy = true
+		m.busyStartedAt = time.Now()
+		return m, func() tea.Msg {
+			models, err := m.loadModels(choice.Profile)
+			return providerModelsLoadedMsg{
+				candidate: choice,
+				models:    models,
+				err:       err,
+			}
+		}
+	}
+
+	if m.onboardingStep == onboardingStepConfig {
+		return m.submitOnboardingConfig()
+	}
+
+	if m.onboardingSelected == nil || len(m.onboardingModels) == 0 {
+		return m, nil
+	}
+
+	selectedProfile := m.onboardingSelected.Profile
+	selectedModel := m.onboardingModels[m.onboardingModelIdx]
+	selectedProfile.Model = selectedModel.ID
+	selectedProfile.SelectedModel = &selectedModel
+	return m.switchOnboardingProfile(selectedProfile)
+}
+
+func (m Model) switchOnboardingProfile(profile provider.Profile) (tea.Model, tea.Cmd) {
+	shellContext := m.currentShellContext()
+	m.busy = true
+	m.busyStartedAt = time.Now()
+	return m, func() tea.Msg {
+		ctrl, profile, err := m.switchProvider(profile, shellContext)
+		var persistErr error
+		if err == nil && m.saveProvider != nil {
+			persistErr = m.saveProvider(profile)
+		}
+		return providerSwitchedMsg{
+			ctrl:       ctrl,
+			profile:    profile,
+			err:        err,
+			persistErr: persistErr,
+		}
+	}
+}
+
+func (m Model) openOnboardingConfig(choice provider.OnboardingCandidate) (tea.Model, tea.Cmd) {
+	form := buildOnboardingForm(choice)
+	m.onboardingStep = onboardingStepConfig
+	m.onboardingSelected = &choice
+	m.onboardingForm = &form
+	m.onboardingModels = nil
+	m.onboardingModelIdx = 0
+	return m, nil
+}
+
+func (m Model) submitOnboardingConfig() (tea.Model, tea.Cmd) {
+	if m.onboardingForm == nil {
+		return m, nil
+	}
+
+	profile, err := m.resolveOnboardingFormProfile()
+	if err != nil {
+		m.entries = append(m.entries, Entry{
+			Title: "error",
+			Body:  fmt.Sprintf("provider onboarding: %v", err),
+		})
+		m.selectedEntry = len(m.entries) - 1
+		m.clampSelection()
+		return m, nil
+	}
+
+	return m.switchOnboardingProfile(profile)
+}
+
+func (m Model) resolveOnboardingFormProfile() (provider.Profile, error) {
+	if m.onboardingForm == nil {
+		return provider.Profile{}, errors.New("onboarding form is not active")
+	}
+
+	values := map[string]string{}
+	for _, field := range m.onboardingForm.fields {
+		values[field.key] = strings.TrimSpace(field.value)
+		if field.required && values[field.key] == "" {
+			return provider.Profile{}, fmt.Errorf("%s is required", strings.ToLower(field.label))
+		}
+	}
+
+	profile := m.onboardingForm.profile
+	cfg := config.Config{
+		ProviderType:       string(profile.Preset),
+		ProviderAuthMethod: onboardingAuthMethod(profile.Preset, values["api_key"]),
+		ProviderBaseURL:    values["base_url"],
+		ProviderModel:      values["model"],
+		ProviderAPIKey:     values["api_key"],
+		ProviderCLICommand: values["cli_command"],
+	}
+
+	resolved, err := provider.ResolveProfile(cfg)
+	if err != nil {
+		return provider.Profile{}, err
+	}
+	if values["api_key"] != "" {
+		resolved.APIKey = values["api_key"]
+		resolved.APIKeyEnvVar = "os_keyring"
+	}
+	if values["api_key"] == "" && profile.AuthMethod == provider.AuthAPIKey {
+		resolved.AuthMethod = provider.AuthAPIKey
+	}
+	return resolved, nil
+}
+
+func buildOnboardingForm(choice provider.OnboardingCandidate) onboardingFormState {
+	profile := choice.Profile
+	form := onboardingFormState{
+		title:   "Configure " + profile.Name,
+		intro:   "Enter the provider settings to save and activate.",
+		profile: profile,
+	}
+
+	switch profile.Preset {
+	case provider.PresetOpenAI, provider.PresetOpenRouter, provider.PresetAnthropic:
+		form.fields = []onboardingField{
+			{key: "base_url", label: "Base URL", value: profile.BaseURL, required: true},
+			{key: "model", label: "Model", value: profile.Model, required: true},
+			{key: "api_key", label: "API Key", value: "", placeholder: "stored in OS keyring", required: true, secret: true},
+		}
+	case provider.PresetOllama:
+		form.fields = []onboardingField{
+			{key: "base_url", label: "Base URL", value: profile.BaseURL, required: true},
+			{key: "model", label: "Model", value: profile.Model, required: true},
+			{key: "api_key", label: "API Key", value: "", placeholder: "optional", secret: true},
+		}
+	case provider.PresetCustom:
+		form.fields = []onboardingField{
+			{key: "base_url", label: "Base URL", value: profile.BaseURL, required: true},
+			{key: "model", label: "Model", value: profile.Model, required: true},
+			{key: "api_key", label: "API Key", value: "", placeholder: "optional", secret: true},
+		}
+	case provider.PresetCodexCLI:
+		form.fields = []onboardingField{
+			{key: "cli_command", label: "CLI Command", value: profile.CLICommand, required: true},
+			{key: "model", label: "Model", value: profile.Model, placeholder: "optional"},
+		}
+		form.intro = "Use an installed Codex CLI and the existing local login."
+	default:
+		form.fields = []onboardingField{
+			{key: "model", label: "Model", value: profile.Model},
+		}
+	}
+
+	return form
+}
+
+func onboardingAuthMethod(preset provider.ProviderPreset, apiKey string) string {
+	switch preset {
+	case provider.PresetOllama, provider.PresetCustom:
+		if strings.TrimSpace(apiKey) == "" {
+			return "none"
+		}
+		return "api_key"
+	case provider.PresetCodexCLI:
+		return "codex_login"
+	default:
+		return "api_key"
+	}
+}
+
+func (m Model) currentShellContext() *shell.PromptContext {
+	if m.shellContext.PromptLine() == "" {
+		return nil
+	}
+
+	contextCopy := m.shellContext
+	return &contextCopy
 }
 
 func (m Model) transcriptLines(width int) []string {
@@ -840,9 +1344,18 @@ func (m Model) renderFooter(width int) string {
 
 func (m Model) renderStatusLine(width int) string {
 	left := m.renderShellContext()
-	rightParts := make([]string, 0, 3)
+	rightParts := make([]string, 0, 4)
 	if m.shellContext.Remote {
 		rightParts = append(rightParts, m.styles.statusRemote.Render("REMOTE"))
+	}
+	if m.lastModelInfo != nil {
+		label := strings.TrimSpace(m.lastModelInfo.ResponseModel)
+		if label == "" {
+			label = strings.TrimSpace(m.lastModelInfo.RequestedModel)
+		}
+		if label != "" {
+			rightParts = append(rightParts, m.styles.statusRemote.Render("MODEL "+label))
+		}
 	}
 	if m.busy {
 		elapsed := 0
@@ -918,7 +1431,7 @@ func (m Model) renderShellContext() string {
 func (m Model) footerParts(width int) []string {
 	switch {
 	case width < 72:
-		parts := []string{"[Tab]", "[Pg]", "[Enter]", "[Esc]", "[F2]", "[Ctrl+O]", "[Ctrl+C]"}
+		parts := []string{"[Tab]", "[Pg]", "[Enter]", "[Esc]", "[F2]", "[F3]", "[Ctrl+O]", "[Ctrl+C]"}
 		if m.pendingApproval != nil {
 			parts = append(parts, "[E/N/R]")
 		} else if m.refiningApproval != nil {
@@ -930,7 +1443,7 @@ func (m Model) footerParts(width int) []string {
 		}
 		return parts
 	case width < 100:
-		parts := []string{"[Tab] mode", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Enter] submit", "[Esc] clear", "[F2] shell", "[Ctrl+C] quit"}
+		parts := []string{"[Tab] mode", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Enter] submit", "[Esc] clear", "[F2] shell", "[F3] providers", "[Ctrl+C] quit"}
 		if m.pendingApproval != nil {
 			parts = append(parts, "[Ctrl+E/N/R]")
 		} else if m.refiningApproval != nil {
@@ -943,7 +1456,7 @@ func (m Model) footerParts(width int) []string {
 		return parts
 	}
 
-	parts := []string{"[Tab] mode", "[Up/Down] history", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Ctrl+U/D] half-page", "[Home/End] bounds", "[Enter] submit", "[Esc] clear", "[Ctrl+J] newline", "[F2] shell"}
+	parts := []string{"[Tab] mode", "[Up/Down] history", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Ctrl+U/D] half-page", "[Home/End] bounds", "[Enter] submit", "[Esc] clear", "[Ctrl+J] newline", "[F2] shell", "[F3] providers"}
 	if m.pendingApproval != nil {
 		parts = append(parts, "[Ctrl+E] continue", "[Ctrl+N] reject", "[Ctrl+R] refine")
 	} else if m.refiningApproval != nil {
@@ -1199,6 +1712,148 @@ func (m Model) renderDetailView() string {
 	lines = append(lines, "", m.styles.detailMeta.Render(m.renderDetailFooter(contentWidth)))
 
 	return m.styles.detail.Width(contentWidth).Render(strings.Join(lines, "\n"))
+}
+
+func (m Model) renderOnboardingView() string {
+	width := m.width
+	if width <= 0 {
+		width = 100
+	}
+
+	contentWidth := m.contentWidthFor(width, m.styles.detail)
+	lines := []string{m.styles.detailTitle.Render("PROVIDER ONBOARDING")}
+	if m.onboardingStep == onboardingStepConfig && m.onboardingForm != nil {
+		lines = append(lines, m.styles.detailMeta.Render(m.onboardingForm.title))
+	} else if m.onboardingStep == onboardingStepModels && m.onboardingSelected != nil {
+		lines = append(lines, m.styles.detailMeta.Render("Select a model for "+m.onboardingSelected.Profile.Name))
+	} else {
+		lines = append(lines, m.styles.detailMeta.Render("Choose a saved, detected, or manual provider setup"))
+	}
+	lines = append(lines, "", m.styles.detailBody.Render("Current"), m.styles.detailMeta.Render(providerSummaryLine(m.activeProvider)), "")
+
+	if m.onboardingStep == onboardingStepConfig && m.onboardingForm != nil {
+		lines = append(lines, m.renderOnboardingConfig(contentWidth)...)
+	} else if m.onboardingStep == onboardingStepModels && m.onboardingSelected != nil {
+		lines = append(lines, m.renderOnboardingModels(contentWidth)...)
+	} else {
+		lines = append(lines, m.renderOnboardingProviders(contentWidth)...)
+	}
+
+	lines = append(lines, "", m.styles.detailMeta.Render(onboardingFooter(width, m.onboardingStep)))
+	return m.styles.detail.Width(contentWidth).Render(strings.Join(lines, "\n"))
+}
+
+func (m Model) renderOnboardingProviders(contentWidth int) []string {
+	lines := make([]string, 0, len(m.onboardingChoices)*4)
+	for index, choice := range m.onboardingChoices {
+		prefix := "  "
+		if index == m.onboardingIndex {
+			prefix = "› "
+		}
+
+		label := fmt.Sprintf("%s%s", prefix, choice.Profile.Name)
+		if choice.Profile.Preset == m.activeProvider.Preset && choice.Profile.Preset != "" {
+			label += " (current)"
+		}
+
+		lines = append(lines, m.styles.detailBody.Render(label))
+		lines = append(lines, m.styles.detailMeta.Render("   "+providerSummaryLine(choice.Profile)))
+		if choice.Manual {
+			lines = append(lines, m.styles.detailMeta.Render("   setup: manual entry"))
+		}
+		if choice.AuthSource != "" {
+			lines = append(lines, m.styles.detailMeta.Render("   auth source: "+choice.AuthSource))
+		}
+		if strings.TrimSpace(choice.Reason) != "" {
+			wrapped := wrapParagraphs(choice.Reason, max(10, contentWidth-3))
+			for _, line := range wrapped {
+				lines = append(lines, m.styles.detailMeta.Render("   "+line))
+			}
+		}
+		lines = append(lines, "")
+	}
+
+	return lines
+}
+
+func (m Model) renderOnboardingConfig(contentWidth int) []string {
+	lines := []string{}
+	if m.onboardingForm == nil {
+		return lines
+	}
+
+	if intro := strings.TrimSpace(m.onboardingForm.intro); intro != "" {
+		for _, line := range wrapParagraphs(intro, max(10, contentWidth)) {
+			lines = append(lines, m.styles.detailMeta.Render(line))
+		}
+		lines = append(lines, "")
+	}
+
+	lines = append(lines, m.styles.detailMeta.Render(providerSummaryLine(m.onboardingForm.profile)), "")
+	for index, field := range m.onboardingForm.fields {
+		prefix := "  "
+		if index == m.onboardingForm.index {
+			prefix = "› "
+		}
+
+		value := field.value
+		switch {
+		case field.secret && strings.TrimSpace(value) != "":
+			value = strings.Repeat("*", min(12, len(value)))
+		case strings.TrimSpace(value) == "" && field.placeholder != "":
+			value = "<" + field.placeholder + ">"
+		case strings.TrimSpace(value) == "":
+			value = "<empty>"
+		}
+
+		label := fmt.Sprintf("%s%s: %s", prefix, field.label, value)
+		lines = append(lines, m.styles.detailBody.Render(label))
+	}
+
+	lines = append(lines, "", m.styles.detailMeta.Render("API keys entered here are stored in the OS keyring."))
+	return lines
+}
+
+func (m Model) renderOnboardingModels(contentWidth int) []string {
+	lines := []string{}
+	if m.onboardingSelected == nil {
+		return lines
+	}
+
+	lines = append(lines, m.styles.detailMeta.Render(providerSummaryLine(m.onboardingSelected.Profile)), "")
+	if len(m.onboardingModels) == 0 {
+		lines = append(lines, m.styles.detailBody.Render("No models returned by this provider."))
+		return lines
+	}
+
+	start, end := onboardingModelWindow(len(m.onboardingModels), m.onboardingModelIdx, 8)
+	if start > 0 {
+		lines = append(lines, m.styles.detailMeta.Render(fmt.Sprintf("... %d earlier models ...", start)))
+	}
+	for index := start; index < end; index++ {
+		model := m.onboardingModels[index]
+		prefix := "  "
+		if index == m.onboardingModelIdx {
+			prefix = "› "
+		}
+		label := fmt.Sprintf("%s%s", prefix, model.ID)
+		if model.ID == m.activeProvider.Model {
+			label += " (current)"
+		}
+		lines = append(lines, m.styles.detailBody.Render(label))
+		detail := modelDetailLine(model)
+		if detail != "" {
+			for _, line := range wrapParagraphs(detail, max(10, contentWidth-3)) {
+				lines = append(lines, m.styles.detailMeta.Render("   "+line))
+			}
+		}
+		lines = append(lines, "")
+	}
+	if end < len(m.onboardingModels) {
+		lines = append(lines, m.styles.detailMeta.Render(fmt.Sprintf("... %d more models ...", len(m.onboardingModels)-end)))
+	}
+
+	return lines
 }
 
 func (m Model) renderDetailFooter(width int) string {
@@ -1626,6 +2281,9 @@ func (m *Model) syncActionState(events []controller.TranscriptEvent) {
 	if shellContext := latestShellContext(events); shellContext != nil {
 		m.shellContext = *shellContext
 	}
+	if modelInfo := latestModelInfo(events); modelInfo != nil {
+		m.lastModelInfo = modelInfo
+	}
 
 	newPlan := latestPlan(events)
 	if newPlan != nil {
@@ -1851,6 +2509,134 @@ func latestProposal(events []controller.TranscriptEvent) *controller.ProposalPay
 	return nil
 }
 
+func latestModelInfo(events []controller.TranscriptEvent) *controller.AgentModelInfo {
+	for index := len(events) - 1; index >= 0; index-- {
+		if events[index].Kind != controller.EventModelInfo {
+			continue
+		}
+
+		payload, ok := events[index].Payload.(controller.AgentModelInfo)
+		if !ok {
+			continue
+		}
+
+		info := payload
+		return &info
+	}
+
+	return nil
+}
+
+func (m Model) currentProviderChoiceIndex() int {
+	for index, choice := range m.onboardingChoices {
+		if choice.Profile.Preset == m.activeProvider.Preset && choice.Profile.Model == m.activeProvider.Model && choice.Profile.BaseURL == m.activeProvider.BaseURL {
+			return index
+		}
+	}
+
+	return 0
+}
+
+func (m Model) currentProviderModelIndex() int {
+	currentModel := m.activeProvider.Model
+	if m.onboardingSelected != nil && strings.TrimSpace(m.onboardingSelected.Profile.Model) != "" {
+		currentModel = m.onboardingSelected.Profile.Model
+	}
+
+	for index, model := range m.onboardingModels {
+		if model.ID == currentModel {
+			return index
+		}
+	}
+
+	return 0
+}
+
+func providerSummaryLine(profile provider.Profile) string {
+	if profile.Preset == "" {
+		return "provider not configured"
+	}
+
+	return fmt.Sprintf("preset=%s  model=%s  base=%s", profile.Preset, profile.Model, profile.BaseURL)
+}
+
+func providerAuthSourceLabel(profile provider.Profile) string {
+	if strings.TrimSpace(profile.APIKeyEnvVar) != "" {
+		return profile.APIKeyEnvVar
+	}
+	if profile.AuthMethod == provider.AuthNone {
+		return "none"
+	}
+	return string(profile.AuthMethod)
+}
+
+func onboardingFooter(width int, step onboardingStep) string {
+	if width < 72 {
+		if step == onboardingStepConfig {
+			return "Type edit  Tab next  Enter save  Esc back  F2 shell"
+		}
+		if step == onboardingStepModels {
+			return "Enter apply  Esc back  Up/Down move  Pg page  F2 shell"
+		}
+		return "Enter models  Esc close  Up/Down move  F2 shell"
+	}
+
+	if step == onboardingStepConfig {
+		return "Type to edit fields  Tab/Up/Down move  Enter save and switch  Esc back  F2 shell"
+	}
+	if step == onboardingStepModels {
+		return "Enter switch provider with selected model  Esc back  Up/Down move  PgUp/PgDn page  F2 shell"
+	}
+
+	return "Enter inspect models  Esc close  Up/Down move  F2 shell"
+}
+
+func onboardingModelWindow(total int, index int, size int) (int, int) {
+	if total <= size {
+		return 0, total
+	}
+
+	start := index - size/2
+	if start < 0 {
+		start = 0
+	}
+	end := start + size
+	if end > total {
+		end = total
+		start = max(0, end-size)
+	}
+
+	return start, end
+}
+
+func modelDetailLine(model provider.ModelOption) string {
+	parts := make([]string, 0, 7)
+	if model.Name != "" && model.Name != model.ID {
+		parts = append(parts, model.Name)
+	}
+	if model.ContextWindow > 0 {
+		parts = append(parts, fmt.Sprintf("context %d", model.ContextWindow))
+	}
+	if model.MaxCompletionTokens > 0 {
+		parts = append(parts, fmt.Sprintf("max out %d", model.MaxCompletionTokens))
+	}
+	if model.PromptPrice != "" || model.CompletionPrice != "" {
+		price := fmt.Sprintf("pricing p=%s c=%s", model.PromptPrice, model.CompletionPrice)
+		parts = append(parts, price)
+	}
+	if model.Architecture.Modality != "" {
+		parts = append(parts, "mode "+model.Architecture.Modality)
+	}
+	if len(model.SupportedParameters) > 0 {
+		parts = append(parts, "params "+strings.Join(model.SupportedParameters[:min(3, len(model.SupportedParameters))], ","))
+	}
+	if model.Description != "" {
+		parts = append(parts, model.Description)
+	}
+
+	return strings.Join(parts, "  ")
+}
+
 type composerHistory struct {
 	entries  []string
 	index    int
@@ -1948,6 +2734,20 @@ func eventsToEntries(events []controller.TranscriptEvent, collapseResults bool) 
 				Body:   fmt.Sprintf("exit=%d\n%s", payload.ExitCode, body),
 				Detail: formatResultDetail(payload.Command, payload.ExitCode, fullBody),
 			})
+		case controller.EventModelInfo:
+			payload, _ := event.Payload.(controller.AgentModelInfo)
+			model := strings.TrimSpace(payload.ResponseModel)
+			if model == "" {
+				model = strings.TrimSpace(payload.RequestedModel)
+			}
+			body := "provider model metadata unavailable"
+			if model != "" {
+				body = "reply model: " + model
+			}
+			if payload.RequestedModel != "" && payload.ResponseModel != "" && payload.RequestedModel != payload.ResponseModel {
+				body = fmt.Sprintf("reply model: %s (requested %s)", payload.ResponseModel, payload.RequestedModel)
+			}
+			entries = append(entries, Entry{Title: "system", Body: body})
 		case controller.EventSystemNotice:
 			payload, _ := event.Payload.(controller.TextPayload)
 			entries = append(entries, Entry{Title: "system", Body: payload.Text})
