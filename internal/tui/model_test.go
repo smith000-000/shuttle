@@ -140,6 +140,32 @@ func TestUppercaseEEntersProposalCommandEditMode(t *testing.T) {
 	}
 }
 
+func TestLowercaseKDuringActiveExecutionDoesNotInterrupt(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.mode = AgentMode
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 30",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+	}
+	interrupted := false
+	model.inFlightCancel = func() {
+		interrupted = true
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	next := updated.(Model)
+
+	if interrupted {
+		t.Fatal("expected lowercase k to remain normal input")
+	}
+	if next.input != "k" {
+		t.Fatalf("expected input %q, got %q", "k", next.input)
+	}
+}
+
 func TestUppercaseNRejectsProposal(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.pendingProposal = &controller.ProposalPayload{
@@ -239,6 +265,43 @@ func TestSendKeysModeBypassesComposerLockOnEnter(t *testing.T) {
 	}
 	if next.sendingFullscreenKeys {
 		t.Fatal("expected send-keys mode to submit and exit")
+	}
+}
+
+func TestAgentSubmitAllowedDuringActiveExecution(t *testing.T) {
+	ctrl := &fakeController{
+		agentEvents: []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventAgentMessage,
+				Payload: controller.TextPayload{Text: "Press F2 or use KEYS>."},
+			},
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.mode = AgentMode
+	model.busy = true
+	model.showShellTail = true
+	model.liveShellTail = "Press any key"
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "read",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now(),
+	}
+	model.setInput("what should I do now?")
+
+	updated, cmd := model.submit()
+	next := updated.(Model)
+
+	if cmd == nil {
+		t.Fatal("expected agent submit command during active execution")
+	}
+	if next.activeExecution == nil || next.activeExecution.ID != "cmd-1" {
+		t.Fatalf("expected active execution to remain visible, got %#v", next.activeExecution)
+	}
+	if !next.showShellTail {
+		t.Fatal("expected shell tail visibility to be preserved during recovery prompt")
 	}
 }
 
@@ -1492,6 +1555,80 @@ func TestProposalCanBeRejected(t *testing.T) {
 	}
 	if next.entries[len(next.entries)-1].Body != "Proposal dismissed." {
 		t.Fatalf("unexpected dismissal entry: %#v", next.entries[len(next.entries)-1])
+	}
+}
+
+func TestAgentModeKeysProposalBecomesPendingProposal(t *testing.T) {
+	ctrl := &fakeController{
+		agentEvents: []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventUserMessage,
+				Payload: controller.TextPayload{Text: "go ahead and press enter"},
+			},
+			{
+				Kind:    controller.EventAgentMessage,
+				Payload: controller.TextPayload{Text: "Sending Enter to the active prompt to continue."},
+			},
+			{
+				Kind: controller.EventProposal,
+				Payload: controller.ProposalPayload{
+					Kind:        controller.ProposalKeys,
+					Keys:        "\n",
+					Description: "Send Enter to the active terminal.",
+				},
+			},
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.mode = AgentMode
+	model.input = "go ahead and press enter"
+
+	updated, cmd := model.submit()
+	next := updated.(Model)
+	msg := controllerEventsFromCmd(t, cmd)
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+
+	if next.pendingProposal == nil {
+		t.Fatal("expected pending keys proposal")
+	}
+	if next.pendingProposal.Kind != controller.ProposalKeys {
+		t.Fatalf("expected keys proposal kind, got %#v", next.pendingProposal)
+	}
+	if next.pendingProposal.Keys != "\n" {
+		t.Fatalf("expected enter key payload, got %#v", next.pendingProposal.Keys)
+	}
+}
+
+func TestPrimaryActionRunsEnterOnlyKeysProposal(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.takeControl = takeControlConfig{
+		SocketName:  "shuttle-test",
+		SessionName: "shuttle-test",
+		TopPaneID:   "%0",
+		DetachKey:   TakeControlKey,
+	}
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   `bash -lc 'read -n 1 -s -r -p "Press any key" _'`,
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now(),
+	}
+	model.pendingProposal = &controller.ProposalPayload{
+		Kind:        controller.ProposalKeys,
+		Keys:        "\n",
+		Description: "Send Enter to the active terminal.",
+	}
+
+	updated, cmd := model.primaryAction()
+	next := updated.(Model)
+
+	if cmd == nil {
+		t.Fatal("expected keys proposal primary action to return a send command")
+	}
+	if next.pendingProposal != nil {
+		t.Fatalf("expected pending proposal to clear after sending keys, got %#v", next.pendingProposal)
 	}
 }
 

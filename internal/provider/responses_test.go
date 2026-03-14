@@ -185,6 +185,54 @@ func TestResponsesAgentMapsApprovalAndPlan(t *testing.T) {
 	}
 }
 
+func TestResponsesAgentMapsKeysProposal(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(http.StatusOK, `{
+			"output":[
+				{
+					"type":"message",
+					"content":[
+						{
+							"type":"output_text",
+							"text":"{\"message\":\"I can send Enter to continue.\",\"plan_summary\":\"\",\"plan_steps\":[],\"proposal_kind\":\"keys\",\"proposal_command\":\"\",\"proposal_keys\":\"\\n\",\"proposal_patch\":\"\",\"proposal_description\":\"Send Enter to the active terminal.\",\"approval_kind\":\"\",\"approval_title\":\"\",\"approval_summary\":\"\",\"approval_command\":\"\",\"approval_patch\":\"\",\"approval_risk\":\"\"}"
+						}
+					]
+				}
+			]
+		}`), nil
+	})}
+
+	agent, err := NewResponsesAgent(Profile{
+		BackendFamily: BackendResponsesHTTP,
+		Preset:        PresetOpenAI,
+		AuthMethod:    AuthAPIKey,
+		BaseURL:       "https://provider.test/v1",
+		Model:         "gpt-5-nano-2025-08-07",
+		APIKey:        "test-key",
+		APIKeyEnvVar:  "OPENAI_API_KEY",
+	}, client)
+	if err != nil {
+		t.Fatalf("NewResponsesAgent() error = %v", err)
+	}
+
+	response, err := agent.Respond(context.Background(), controller.AgentInput{
+		Prompt: "go ahead and press enter",
+	})
+	if err != nil {
+		t.Fatalf("Respond() error = %v", err)
+	}
+
+	if response.Proposal == nil {
+		t.Fatal("expected keys proposal")
+	}
+	if response.Proposal.Kind != controller.ProposalKeys {
+		t.Fatalf("expected keys proposal, got %s", response.Proposal.Kind)
+	}
+	if response.Proposal.Keys != "\n" {
+		t.Fatalf("expected enter key proposal, got %#v", response.Proposal.Keys)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {

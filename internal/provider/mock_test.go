@@ -133,3 +133,88 @@ func TestMockAgentHandlesRefinementWithPendingApproval(t *testing.T) {
 		t.Fatalf("expected refinement note in summary, got %q", response.Approval.Summary)
 	}
 }
+
+func TestMockAgentPrioritizesRecoveryForAwaitingInput(t *testing.T) {
+	agent := NewMockAgent()
+
+	response, err := agent.Respond(context.Background(), controller.AgentInput{
+		Prompt: "what should I do now?",
+		Task: controller.TaskContext{
+			CurrentExecution: &controller.CommandExecution{
+				ID:               "cmd-1",
+				Command:          `bash -lc 'read -n 1 -s -r -p "Press any key" _'`,
+				State:            controller.CommandExecutionAwaitingInput,
+				LatestOutputTail: "Press any key",
+			},
+			RecoverySnapshot: "Press any key\n",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Respond() error = %v", err)
+	}
+
+	if response.Message == "" {
+		t.Fatal("expected recovery guidance message")
+	}
+	if !strings.Contains(strings.ToLower(response.Message), "press f2") {
+		t.Fatalf("expected take-control guidance, got %q", response.Message)
+	}
+	if response.Proposal != nil || response.Approval != nil || response.Plan != nil {
+		t.Fatalf("expected recovery-only response, got %#v", response)
+	}
+}
+
+func TestMockAgentPrioritizesRecoveryForFullscreen(t *testing.T) {
+	agent := NewMockAgent()
+
+	response, err := agent.Respond(context.Background(), controller.AgentInput{
+		Prompt: "help",
+		Task: controller.TaskContext{
+			CurrentExecution: &controller.CommandExecution{
+				ID:               "cmd-1",
+				Command:          "nano ui-scratchpad.md",
+				State:            controller.CommandExecutionInteractiveFullscreen,
+				LatestOutputTail: "",
+			},
+			RecoverySnapshot: "GNU nano 7.2\n",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Respond() error = %v", err)
+	}
+
+	if !strings.Contains(strings.ToLower(response.Message), "fullscreen") {
+		t.Fatalf("expected fullscreen guidance, got %q", response.Message)
+	}
+	if !strings.Contains(strings.ToLower(response.Message), "press f2") {
+		t.Fatalf("expected take-control guidance, got %q", response.Message)
+	}
+}
+
+func TestMockAgentCanProposeKeysForAwaitingInput(t *testing.T) {
+	agent := NewMockAgent()
+
+	response, err := agent.Respond(context.Background(), controller.AgentInput{
+		Prompt: "go ahead and send a keystroke, press enter",
+		Task: controller.TaskContext{
+			CurrentExecution: &controller.CommandExecution{
+				ID:      "cmd-1",
+				Command: `bash -lc 'read -n 1 -s -r -p "Press any key" _'`,
+				State:   controller.CommandExecutionAwaitingInput,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Respond() error = %v", err)
+	}
+
+	if response.Proposal == nil {
+		t.Fatal("expected keys proposal")
+	}
+	if response.Proposal.Kind != controller.ProposalKeys {
+		t.Fatalf("expected keys proposal, got %s", response.Proposal.Kind)
+	}
+	if response.Proposal.Keys != "\n" {
+		t.Fatalf("expected enter key proposal, got %#v", response.Proposal.Keys)
+	}
+}

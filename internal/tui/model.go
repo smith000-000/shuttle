@@ -617,9 +617,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.setInput("")
 					return m, nil
 				}
-				if len(msg.Runes) == 1 && unicode.ToUpper(msg.Runes[0]) == 'K' && m.activeExecution != nil && m.activeExecution.State != controller.CommandExecutionInteractiveFullscreen && !m.composerLocked() {
-					return m.interruptInFlight()
-				}
 				if len(msg.Runes) == 1 && strings.TrimSpace(m.input) == "" && m.editingProposal == nil && m.refiningProposal == nil && m.refiningApproval == nil {
 					switch msg.Runes[0] {
 					case 'Y':
@@ -774,7 +771,8 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		return m, sendFullscreenKeysCmd(m.takeControl, rawKeys)
 	}
 
-	if m.busy {
+	recoveryAgentPrompt := m.mode == AgentMode && m.activeExecution != nil
+	if m.busy && !recoveryAgentPrompt {
 		return m, nil
 	}
 
@@ -807,9 +805,11 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 
 		m.busy = true
 		m.busyStartedAt = time.Now()
-		m.showShellTail = false
-		m.liveShellTail = ""
-		m.syncActiveExecution(nil)
+		if !recoveryAgentPrompt {
+			m.showShellTail = false
+			m.liveShellTail = ""
+			m.syncActiveExecution(nil)
+		}
 		prompt := text
 		refining := m.refiningApproval
 		refiningProposal := m.refiningProposal
@@ -878,6 +878,9 @@ func (m Model) primaryAction() (tea.Model, tea.Cmd) {
 	case m.pendingApproval != nil:
 		logging.Trace("tui.primary_action", "action", "approve", "approval_id", m.pendingApproval.ID)
 		return m.decideApproval(controller.DecisionApprove)
+	case m.pendingProposal != nil && m.pendingProposal.Keys != "":
+		logging.Trace("tui.primary_action", "action", "send_proposal_keys", "keys", previewFullscreenKeys(m.pendingProposal.Keys))
+		return m.runProposalKeys()
 	case m.pendingProposal != nil && m.pendingProposal.Command != "":
 		logging.Trace("tui.primary_action", "action", "run_proposal", "command", m.pendingProposal.Command)
 		return m.runProposalCommand()
@@ -1456,7 +1459,7 @@ func (m Model) renderHeader(width int) string {
 		meta = append(meta, m.styles.modeApproval.Render("APPROVAL "+risk))
 	} else if m.refiningApproval != nil {
 		meta = append(meta, m.styles.modeProposal.Render("REFINING"))
-	} else if m.pendingProposal != nil && m.pendingProposal.Command != "" {
+	} else if m.pendingProposal != nil && (m.pendingProposal.Command != "" || m.pendingProposal.Keys != "") {
 		meta = append(meta, m.styles.modeProposal.Render("PROPOSAL"))
 	}
 
@@ -1556,6 +1559,21 @@ func (m Model) renderActionCard(width int) string {
 			m.styles.actionBody.Render(strings.Join(body, "\n")),
 		)
 		return m.styles.actionCard.BorderForeground(lipgloss.Color("111")).Width(width).Render(content)
+	}
+
+	if m.pendingProposal != nil && m.pendingProposal.Keys != "" {
+		body := []string{}
+		if m.pendingProposal.Description != "" {
+			body = append(body, m.pendingProposal.Description)
+		}
+		body = append(body, "keys: "+previewFullscreenKeys(m.pendingProposal.Keys))
+		body = append(body, "Y send keys  N reject  R ask agent")
+		content := lipgloss.JoinVertical(
+			lipgloss.Left,
+			m.styles.actionTitle.Render("Proposed Terminal Input"),
+			m.styles.actionBody.Render(strings.Join(body, "\n")),
+		)
+		return m.styles.actionCard.BorderForeground(lipgloss.Color("31")).Width(width).Render(content)
 	}
 
 	if m.pendingProposal != nil && m.pendingProposal.Command != "" {
@@ -1804,9 +1822,6 @@ func (m Model) footerParts(width int) []string {
 		if m.canSendActiveKeys() {
 			parts = append(parts, "[S]")
 		}
-		if m.activeExecution != nil && m.activeExecution.State != controller.CommandExecutionInteractiveFullscreen && m.canAttemptLocalInterrupt() {
-			parts = append(parts, "[K]")
-		}
 		if m.pendingFullscreen != nil {
 			parts = append(parts, "[Y/N]")
 		} else if m.pendingApproval != nil {
@@ -1815,6 +1830,8 @@ func (m Model) footerParts(width int) []string {
 			parts = append(parts, "[Enter]")
 		} else if m.refiningApproval != nil || m.refiningProposal != nil {
 			parts = append(parts, "[Enter]")
+		} else if m.pendingProposal != nil && m.pendingProposal.Keys != "" {
+			parts = append(parts, "[Y/N/R]")
 		} else if m.pendingProposal != nil && m.pendingProposal.Command != "" {
 			parts = append(parts, "[Y/N/R/E]")
 		} else if m.activePlan != nil {
@@ -1826,9 +1843,6 @@ func (m Model) footerParts(width int) []string {
 		if m.canSendActiveKeys() {
 			parts = append(parts, "[S] keys")
 		}
-		if m.activeExecution != nil && m.activeExecution.State != controller.CommandExecutionInteractiveFullscreen && m.canAttemptLocalInterrupt() {
-			parts = append(parts, "[K] kill")
-		}
 		if m.pendingFullscreen != nil {
 			parts = append(parts, "[Y/N] fullscreen")
 		} else if m.pendingApproval != nil {
@@ -1837,6 +1851,8 @@ func (m Model) footerParts(width int) []string {
 			parts = append(parts, "[Enter] save")
 		} else if m.refiningApproval != nil || m.refiningProposal != nil {
 			parts = append(parts, "[Enter] refine")
+		} else if m.pendingProposal != nil && m.pendingProposal.Keys != "" {
+			parts = append(parts, "[Y/N/R]")
 		} else if m.pendingProposal != nil && m.pendingProposal.Command != "" {
 			parts = append(parts, "[Y/N/R/E]")
 		} else if m.activePlan != nil {
@@ -1849,9 +1865,6 @@ func (m Model) footerParts(width int) []string {
 	if m.canSendActiveKeys() {
 		parts = append(parts, "[S] send keys")
 	}
-	if m.activeExecution != nil && m.activeExecution.State != controller.CommandExecutionInteractiveFullscreen && m.canAttemptLocalInterrupt() {
-		parts = append(parts, "[K] kill local")
-	}
 	if m.pendingFullscreen != nil {
 		parts = append(parts, "[Y] send anyway", "[N] cancel")
 	} else if m.pendingApproval != nil {
@@ -1860,6 +1873,8 @@ func (m Model) footerParts(width int) []string {
 		parts = append(parts, "[Enter] save edited command")
 	} else if m.refiningApproval != nil || m.refiningProposal != nil {
 		parts = append(parts, "[Enter] submit refine note")
+	} else if m.pendingProposal != nil && m.pendingProposal.Keys != "" {
+		parts = append(parts, "[Y] send keys", "[N] reject", "[R] ask agent")
 	} else if m.pendingProposal != nil && m.pendingProposal.Command != "" {
 		parts = append(parts, "[Y] continue", "[N] reject", "[R] ask agent", "[E] tweak command")
 	} else if m.activePlan != nil {
@@ -2308,6 +2323,9 @@ func compactProposalEntry(payload controller.ProposalPayload) Entry {
 	if payload.Command != "" {
 		detailLines = append(detailLines, "command: "+payload.Command)
 	}
+	if payload.Keys != "" {
+		detailLines = append(detailLines, "keys: "+previewFullscreenKeys(payload.Keys))
+	}
 	if payload.Patch != "" {
 		if len(detailLines) > 0 {
 			detailLines = append(detailLines, "")
@@ -2326,6 +2344,8 @@ func compactProposalEntry(payload controller.ProposalPayload) Entry {
 	switch {
 	case payload.Command != "":
 		previewLines = append(previewLines, "command: "+payload.Command)
+	case payload.Keys != "":
+		previewLines = append(previewLines, "keys: "+previewFullscreenKeys(payload.Keys))
 	case payload.Patch != "":
 		previewLines = append(previewLines, fmt.Sprintf("patch attached (%d lines, Ctrl+O to inspect)", countNonEmptyLines(payload.Patch)))
 	case payload.Kind != "":
@@ -2551,6 +2571,20 @@ func (m Model) runProposalCommand() (tea.Model, tea.Cmd) {
 			err:    err,
 		}
 	}, tickBusy(), m.pollShellTailCmd(), m.pollActiveExecutionCmd())
+}
+
+func (m Model) runProposalKeys() (tea.Model, tea.Cmd) {
+	if m.pendingProposal == nil || m.pendingProposal.Keys == "" || !m.canSendActiveKeys() {
+		return m, nil
+	}
+
+	keys := normalizeFullscreenKeys(m.pendingProposal.Keys)
+	logging.Trace("tui.proposal.send_keys", "keys", previewFullscreenKeys(keys))
+	m.pendingProposal = nil
+	m.refiningProposal = nil
+	m.editingProposal = nil
+	m.setInput("")
+	return m, sendFullscreenKeysCmd(m.takeControl, keys)
 }
 
 func (m Model) decideApproval(decision controller.ApprovalDecision) (tea.Model, tea.Cmd) {
@@ -3011,7 +3045,7 @@ func latestProposal(events []controller.TranscriptEvent) *controller.ProposalPay
 		}
 
 		payload, ok := events[index].Payload.(controller.ProposalPayload)
-		if !ok || payload.Command == "" {
+		if !ok || (payload.Command == "" && payload.Keys == "" && payload.Patch == "" && payload.Kind == "") {
 			continue
 		}
 

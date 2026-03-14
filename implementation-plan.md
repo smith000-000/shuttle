@@ -214,6 +214,9 @@ Execution plan: [provider-integration-plan.md](provider-integration-plan.md)
 Runtime lifecycle design: [runtime-management-design.md](runtime-management-design.md)
 Shell and agent execution strategy: [shell-execution-strategy.md](shell-execution-strategy.md)
 
+### Execution Regression Note
+- After meaningful execution-monitor changes, run the manual regression checklist in [shell-execution-strategy.md](shell-execution-strategy.md) before treating the branch as stable.
+
 ---
 
 # 3. Proposed Repository Layout

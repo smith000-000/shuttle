@@ -78,6 +78,7 @@ type shuttleStructuredResponse struct {
 	PlanSteps           []string `json:"plan_steps"`
 	ProposalKind        string   `json:"proposal_kind"`
 	ProposalCommand     string   `json:"proposal_command"`
+	ProposalKeys        string   `json:"proposal_keys"`
 	ProposalPatch       string   `json:"proposal_patch"`
 	ProposalDescription string   `json:"proposal_description"`
 	ApprovalKind        string   `json:"approval_kind"`
@@ -283,6 +284,7 @@ func (a *ResponsesAgent) toAgentResponse(input shuttleStructuredResponse) (contr
 func parseProposal(input shuttleStructuredResponse) (*controller.Proposal, error) {
 	if strings.TrimSpace(input.ProposalKind) == "" &&
 		strings.TrimSpace(input.ProposalCommand) == "" &&
+		strings.TrimSpace(input.ProposalKeys) == "" &&
 		strings.TrimSpace(input.ProposalPatch) == "" &&
 		strings.TrimSpace(input.ProposalDescription) == "" {
 		return nil, nil
@@ -294,12 +296,14 @@ func parseProposal(input shuttleStructuredResponse) (*controller.Proposal, error
 		switch {
 		case strings.TrimSpace(input.ProposalCommand) != "":
 			kind = controller.ProposalCommand
+		case strings.TrimSpace(input.ProposalKeys) != "":
+			kind = controller.ProposalKeys
 		case strings.TrimSpace(input.ProposalPatch) != "":
 			kind = controller.ProposalPatch
 		default:
 			kind = controller.ProposalAnswer
 		}
-	case controller.ProposalAnswer, controller.ProposalCommand, controller.ProposalPatch:
+	case controller.ProposalAnswer, controller.ProposalCommand, controller.ProposalKeys, controller.ProposalPatch:
 	default:
 		return nil, fmt.Errorf("unsupported proposal kind %q", input.ProposalKind)
 	}
@@ -307,6 +311,7 @@ func parseProposal(input shuttleStructuredResponse) (*controller.Proposal, error
 	return &controller.Proposal{
 		Kind:        kind,
 		Command:     strings.TrimSpace(input.ProposalCommand),
+		Keys:        input.ProposalKeys,
 		Patch:       strings.TrimSpace(input.ProposalPatch),
 		Description: strings.TrimSpace(input.ProposalDescription),
 	}, nil
@@ -632,6 +637,7 @@ func shuttleAgentResponseSchema() map[string]any {
 			"plan_steps",
 			"proposal_kind",
 			"proposal_command",
+			"proposal_keys",
 			"proposal_patch",
 			"proposal_description",
 			"approval_kind",
@@ -656,9 +662,12 @@ func shuttleAgentResponseSchema() map[string]any {
 			},
 			"proposal_kind": map[string]any{
 				"type": "string",
-				"enum": []string{"", "answer", "command", "patch"},
+				"enum": []string{"", "answer", "command", "keys", "patch"},
 			},
 			"proposal_command": map[string]any{
+				"type": "string",
+			},
+			"proposal_keys": map[string]any{
 				"type": "string",
 			},
 			"proposal_patch": map[string]any{
@@ -706,15 +715,18 @@ Rules:
 - Never imply that a proposed patch or diff has already been applied.
 - Do not claim that files created by a proposed patch already exist, are executable, or can be referenced by later commands until Shuttle explicitly confirms the patch was applied.
 - If you propose a shell action, set "proposal_kind" to "command" and fill "proposal_command".
+- If you propose sending a small raw key sequence to an already-active prompt or fullscreen app, set "proposal_kind" to "keys" and fill "proposal_keys". Use a literal newline in "proposal_keys" when Enter should be sent.
 - If you propose a patch, set "proposal_kind" to "patch" and fill "proposal_patch".
 - If no proposal is needed, leave proposal fields empty.
 - If an action is destructive, risky, or should be user-confirmed, leave proposal fields empty and fill the approval fields instead.
 - For approvals, set "approval_kind" to "command", "patch", or "plan" and set "approval_risk" to "low", "medium", or "high".
 - If the task is a refinement of a pending approval, preserve the original command or patch unless the context clearly requires changing it.
 - If the current turn says an active command is still running, use "message" for a brief status update. Do not emit a plan, proposal, or approval unless the shell is clearly waiting for user intervention.
-- If the current active command state is "awaiting_input", explain what input is likely needed from the shell output or recovery snapshot and tell the user to press F2 to take control. Mention KEYS> only when a small raw keystroke sequence would likely help.
+- If the current active command state is "awaiting_input", explain what input is likely needed from the shell output or recovery snapshot and tell the user to press F2 to take control. If a small raw keystroke sequence would likely help, you may propose it with "proposal_kind":"keys" and "proposal_keys".
 - If the current active command state is "interactive_fullscreen", explain that a fullscreen terminal app currently owns the pane and tell the user to press F2 to take control. Do not suggest unrelated shell commands while that app is active.
 - If the current active command state is "lost", explain that tracking confidence is low, use the recovery snapshot to infer what likely happened, and avoid claiming completion unless the context clearly proves it.
 - If a recovery terminal snapshot is present, use it to reason about the current terminal state. Prefer actionable recovery guidance over abstract commentary.
+- If a current active command is in "awaiting_input", "interactive_fullscreen", or "lost" and the user asks a general question such as what to do next, what happened, help, or how to continue, prioritize recovery guidance over new proposals or plans.
+- If a current active command is in "awaiting_input" or "interactive_fullscreen" and the user explicitly asks you to send the needed input on their behalf, prefer a "keys" proposal over prose.
 - After a proposed or approved command completes, if there is no active plan, default to summarizing the result and waiting for the user. Only chain into another command when the user's request clearly requires more shell work.
 - Leave unused fields as empty strings, and leave unused arrays empty.`

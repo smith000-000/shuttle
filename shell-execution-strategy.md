@@ -415,6 +415,98 @@ Status:
 - keep tracked executions recoverable across Shuttle restarts
 - treat remote SSH sessions as resumable state where possible
 
+## Manual Regression Checklist
+Use this checklist after meaningful execution-monitor changes. It reflects the real bug history on this branch and should be kept current.
+
+### 1. Local Long-Running Command
+Run:
+
+```bash
+bash -lc 'for i in {1..10}; do echo "$i"; sleep 1; done'
+```
+
+Expect:
+- active command card shows normal running state
+- no false cancel
+- command completes with visible output
+
+### 2. Local Awaiting Input
+Run:
+
+```bash
+bash -lc 'sleep 3; read -n 1 -s -r -p "Press any key to continue..." _; echo ready'
+```
+
+Expect:
+- state changes from running to `awaiting_input`
+- `F2` works
+- `S` / `KEYS>` works
+- after input, command completes cleanly
+
+### 3. Local Fullscreen App
+Run:
+
+```bash
+nano ui-scratchpad.md
+```
+
+Expect:
+- state becomes `interactive_fullscreen`
+- no live tail rendering while fullscreen is active
+- `S` / `KEYS>` works
+- `F2` handoff works
+
+### 4. Remote Awaiting Input
+SSH to a remote host and run:
+
+```bash
+bash -lc 'sleep 3; read -n 1 -s -r -p "Press any key to continue..." _; echo ready'
+```
+
+Expect:
+- remote prompt remains marked remote
+- `awaiting_input` is detected
+- `S` / `KEYS>` works without needing an `F2/F2` round trip
+- no bogus local interrupt path appears
+
+### 5. Remote Fullscreen App
+SSH to a remote host and run:
+
+```bash
+nano test.txt
+```
+
+or
+
+```bash
+less prd.md
+```
+
+Expect:
+- `interactive_fullscreen`
+- no local kill affordance
+- `S` / `KEYS>` works
+- `F2` handoff works
+- no false cancel while the app still owns the pane
+
+### 6. Handoff Cancel / Reconcile
+Local or remote, start a long-running command:
+
+```bash
+bash -lc 'for i in {1..30}; do echo "$i"; sleep 1; done'
+```
+
+Then:
+- `F2`
+- interrupt or exit from the shell side
+- `F2`
+
+Expect:
+- active command clears
+- no stale `handoff active`
+- no duplicate “not confirmed local” spam
+- no ghost “still running” message after the shell prompt returns
+
 ## Recommendation
 Do not keep tuning the current synchronous command-wait loop.
 

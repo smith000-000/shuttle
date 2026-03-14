@@ -45,6 +45,7 @@ type PlanPayload = ActivePlan
 type ProposalPayload struct {
 	Kind        ProposalKind
 	Command     string
+	Keys        string
 	Patch       string
 	Description string
 }
@@ -325,6 +326,7 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 		newEvents = append(newEvents, c.newEvent(EventProposal, ProposalPayload{
 			Kind:        response.Proposal.Kind,
 			Command:     response.Proposal.Command,
+			Keys:        response.Proposal.Keys,
 			Patch:       response.Proposal.Patch,
 			Description: response.Proposal.Description,
 		}))
@@ -939,6 +941,9 @@ func buildProposalRefinementPrompt(proposal ProposalPayload, note string) string
 	}
 	if proposal.Command != "" {
 		parts = append(parts, "Original command: "+proposal.Command)
+	}
+	if proposal.Keys != "" {
+		parts = append(parts, "Original keys: "+proposal.Keys)
 	}
 	if proposal.Patch != "" {
 		parts = append(parts, "Original patch:\n"+proposal.Patch)

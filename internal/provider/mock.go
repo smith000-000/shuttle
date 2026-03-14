@@ -26,6 +26,17 @@ func (m *MockAgent) Respond(_ context.Context, input controller.AgentInput) (con
 	}
 
 	lower := strings.ToLower(prompt)
+	if proposal := maybeKeyProposal(input.Task.CurrentExecution, lower); proposal != nil {
+		return controller.AgentResponse{
+			Message:  "I can send that keystroke to the active terminal.",
+			Proposal: proposal,
+		}, nil
+	}
+	if shouldPrioritizeRecovery(input.Task.CurrentExecution, lower) {
+		return controller.AgentResponse{
+			Message: summarizeActiveExecution(input),
+		}, nil
+	}
 
 	switch {
 	case containsAny(lower, "what happened", "summarize result", "what changed"):
@@ -84,6 +95,33 @@ func (m *MockAgent) Respond(_ context.Context, input controller.AgentInput) (con
 			},
 		}, nil
 	}
+}
+
+func shouldPrioritizeRecovery(execution *controller.CommandExecution, prompt string) bool {
+	if execution == nil {
+		return false
+	}
+
+	switch execution.State {
+	case controller.CommandExecutionAwaitingInput, controller.CommandExecutionInteractiveFullscreen, controller.CommandExecutionLost:
+	default:
+		return false
+	}
+
+	return containsAny(
+		prompt,
+		"what should i do",
+		"what now",
+		"what next",
+		"what happened",
+		"what's going on",
+		"whats going on",
+		"how do i recover",
+		"how do i continue",
+		"help",
+		"recover",
+		"continue",
+	)
 }
 
 func refineApprovalResponse(m *MockAgent, note string, approval controller.ApprovalRequest) controller.AgentResponse {
@@ -192,6 +230,50 @@ func summarizeActiveExecution(input controller.AgentInput) string {
 	}
 
 	return strings.Join(lines, "\n\n")
+}
+
+func maybeKeyProposal(execution *controller.CommandExecution, prompt string) *controller.Proposal {
+	if execution == nil {
+		return nil
+	}
+	switch execution.State {
+	case controller.CommandExecutionAwaitingInput, controller.CommandExecutionInteractiveFullscreen:
+	default:
+		return nil
+	}
+
+	if !containsAny(prompt, "send", "press", "type", "do it", "go ahead") {
+		return nil
+	}
+
+	switch {
+	case containsAny(prompt, "enter", "return", "newline"):
+		return &controller.Proposal{
+			Kind:        controller.ProposalKeys,
+			Keys:        "\n",
+			Description: "Send Enter to the active terminal.",
+		}
+	case containsAny(prompt, "space"):
+		return &controller.Proposal{
+			Kind:        controller.ProposalKeys,
+			Keys:        " ",
+			Description: "Send Space to the active terminal.",
+		}
+	case containsAny(prompt, "escape", "esc"):
+		return &controller.Proposal{
+			Kind:        controller.ProposalKeys,
+			Keys:        "\x1b",
+			Description: "Send Escape to the active terminal.",
+		}
+	case containsAny(prompt, "send y", "press y", "type y", "send the y key", "press the y key"):
+		return &controller.Proposal{
+			Kind:        controller.ProposalKeys,
+			Keys:        "y",
+			Description: "Send 'y' to the active terminal.",
+		}
+	}
+
+	return nil
 }
 
 func continueActivePlanResponse(input controller.AgentInput) controller.AgentResponse {

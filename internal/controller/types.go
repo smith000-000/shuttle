@@ -69,6 +69,7 @@ type ActivePlan struct {
 type Proposal struct {
 	Kind        ProposalKind
 	Command     string
+	Keys        string
 	Patch       string
 	Description string
 }
@@ -78,6 +79,7 @@ type ProposalKind string
 const (
 	ProposalAnswer  ProposalKind = "answer"
 	ProposalCommand ProposalKind = "command"
+	ProposalKeys    ProposalKind = "keys"
 	ProposalPatch   ProposalKind = "patch"
 )
 
