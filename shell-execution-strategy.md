@@ -61,6 +61,22 @@ The real problem is not just timeout values.
 
 The real problem is that Shuttle currently models shell execution as a blocking function call, when it should model it as a job with state transitions.
 
+## Current Branch Status
+On `command-execution-redesign`, Shuttle now has a usable first pass of the redesigned execution stack:
+- first-class monitored executions for tracked shell commands
+- local managed transport using sourced temp scripts instead of giant inline wrappers where possible
+- active execution states including `awaiting_input`, `interactive_fullscreen`, `background_monitoring`, `canceled`, and `lost`
+- `F2` take-control handoff and reconciliation back into Shuttle
+- raw `KEYS>` input for active prompts and fullscreen apps
+- agent-side recovery guidance informed by a larger recovery snapshot
+- first-class agent `keys` proposals so the model can ask Shuttle to send small raw key sequences instead of only narrating them
+
+What is still not done:
+- monitor-side confidence is still too heuristic in some quiet or ambiguous takeovers
+- fullscreen/interactive detection still needs stronger terminal-behavior signals beyond current tmux metadata heuristics
+- noisy transport/script echoes still need occasional cleanup in tails and recovery snapshots
+- the agent still needs tighter guardrails around when it should propose raw keys versus when it should simply tell the user to take control
+
 ## Recommended Direction
 
 ### 1. Introduce First-Class Command Executions
@@ -253,6 +269,13 @@ This should improve:
 - password and confirmation prompts
 - `read` / `input()` / "press any key" flows
 - agent check-ins that currently say "still running" when the shell is actually waiting for input
+
+### 8.2 Current In-Progress Hardening
+The next execution-monitor hardening pass should focus on:
+- improving confidence around quiet-but-still-valid long-running commands so they do not drift toward `lost`
+- distinguishing "shell returned to prompt" from "prompt-like output happened inside an app or script"
+- reducing duplicate or stale recovery messaging when the agent is already operating against a live ambiguous execution
+- refining when active ambiguous states should trigger a `keys` proposal versus plain recovery guidance
 
 ### 9. Model Shell Connectivity as Capability Tiers
 Shuttle should not assume every shell has the same observability.

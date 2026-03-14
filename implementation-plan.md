@@ -12,12 +12,21 @@ As of March 11, 2026, the implementation state is:
 - Milestone 4: complete for the mock-runtime path
 - Milestone 5: in progress
 
+Execution-monitor redesign status on `command-execution-redesign`:
+- implemented: first-class command monitor, local managed shell transport, `awaiting_input` detection, `interactive_fullscreen` detection, `lost` execution state, `F2` handoff/reconciliation, raw `KEYS>` terminal input, remote prompt-return reconciliation, and agent-driven `keys` proposals
+- implemented: state-aware agent recovery guidance using active execution state plus a larger recovery snapshot
+- in progress: reducing ambiguity between `running`, `awaiting_input`, and `lost` in edge cases where the shell is quiet or terminal ownership changes unexpectedly
+- next: stronger monitor-side confidence and recovery logic so fewer situations fall back to heuristic recovery messaging
+
 Milestone 5 currently includes:
 - provider profile and resolver scaffolding
 - backend/auth abstraction layers
 - provider factory wiring
 - one real `responses_http` path for the standard OpenAI API endpoint with API-key auth
 - `httptest` coverage for the OpenAI-compatible adapter
+- execution monitor redesign for long-running and interactive shell commands
+- raw terminal input flow for active prompts and fullscreen apps
+- first-class agent `keys` proposals for interactive recovery
 
 Milestone 5 still needs:
 - OpenRouter verification and preset-specific tests
@@ -26,12 +35,11 @@ Milestone 5 still needs:
 - Codex CLI delegation path
 - provider switching UI
 - release-grade runtime management for socket/session lifecycle and crash recovery
-- execution-state redesign for long-running and interactive shell commands
 - a real patch-application path so proposed diffs can become actual workspace changes
 - guardrails that prevent the agent from claiming proposed files exist before the patch is applied
-- stronger active-command classification such as `awaiting_input` and `lost`, so agent check-ins and the UI can distinguish a waiting shell from a merely slow command
-- pane-stream/fullscreen detection so aliases, wrappers, and remote fullscreen apps can be recognized from terminal behavior instead of command-name lists
-- richer state-aware agent recovery guidance so ambiguous shell takeovers are explained from a larger recovery snapshot instead of only a tiny live tail
+- stronger monitor-side confidence so active-command classification such as `awaiting_input`, `interactive_fullscreen`, and `lost` is driven by better evidence and fewer fallback heuristics
+- pane-stream/fullscreen detection beyond tmux alternate-screen heuristics so aliases, wrappers, and remote fullscreen apps can be recognized from terminal behavior instead of command-name lists alone
+- richer state-aware agent recovery actions for ambiguous shell takeovers, including deciding when to propose raw terminal input versus simple recovery guidance
 
 ## Guiding Decisions
 - Build `P0` only first. That means Epics 1 through 4 in [requirements-mvp.md](requirements-mvp.md).
@@ -187,6 +195,7 @@ Implemented now:
 - provider resolution and factory wiring in the app startup path
 - one real OpenAI-compatible Responses adapter using API-key auth
 - normalized mapping from structured provider output into Shuttle `AgentResponse`
+- agent/runtime support for `proposal_kind = "keys"` so the model can request raw terminal input for active prompts and fullscreen apps
 
 Next:
 - validate and harden the OpenRouter preset
@@ -207,6 +216,7 @@ Next:
 - That slice should prefer terminal behavior over command names so aliases, functions, and wrapped fullscreen apps do not regress back into weak prompt-return heuristics.
 - After fullscreen detection, add an explicit recovery-snapshot path so ambiguous shell takeovers can be fed back into the agent using a larger terminal page dump plus execution confidence metadata instead of only a tiny shell tail.
 - Recovery snapshots and state-aware agent check-ins are now implemented in a first pass; the next step is to improve monitor-side confidence so more ambiguous states are classified correctly before they reach the agent.
+- Agent-driven raw terminal input is now implemented in a first pass; the next step is to harden when the agent should use `keys` proposals versus plain recovery guidance, and to keep dangerous key sequences reviewable.
 
 Framework and ACP guidance: [agent-runtime-design.md](agent-runtime-design.md)
 Detailed provider decomposition: [provider-integration-design.md](provider-integration-design.md)
