@@ -55,6 +55,22 @@ func TestParseResolvesAnthropicAPIKeyByProvider(t *testing.T) {
 	}
 }
 
+func TestParseResolvesOpenWebUIAPIKeyByProvider(t *testing.T) {
+	t.Setenv("OPENWEBUI_API_KEY", "openwebui-key")
+
+	cfg, err := Parse([]string{"--provider", "openwebui"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	if cfg.ProviderAPIKey != "openwebui-key" {
+		t.Fatalf("expected OpenWebUI API key, got %q", cfg.ProviderAPIKey)
+	}
+	if cfg.ProviderAPIKeyEnvVar != "OPENWEBUI_API_KEY" {
+		t.Fatalf("expected OPENWEBUI_API_KEY source, got %q", cfg.ProviderAPIKeyEnvVar)
+	}
+}
+
 func TestParsePrefersShuttleAPIKeyOverride(t *testing.T) {
 	t.Setenv("SHUTTLE_API_KEY", "shuttle-key")
 	t.Setenv("OPENAI_API_KEY", "openai-key")

@@ -62,7 +62,7 @@ func Parse(args []string) (Config, error) {
 	fs.StringVar(&cfg.Track, "track", "", "inject a tracked shell command into the top pane and wait for its result")
 	fs.BoolVar(&cfg.TUI, "tui", false, "run the minimal interactive TUI shell")
 	fs.BoolVar(&cfg.InjectEnter, "enter", true, "append Enter when injecting a command")
-	fs.StringVar(&cfg.ProviderType, "provider", providerType, "agent provider to use: mock, openai, openrouter, anthropic, ollama, codex_cli, or custom")
+	fs.StringVar(&cfg.ProviderType, "provider", providerType, "agent provider to use: mock, openai, openrouter, openwebui, anthropic, ollama, codex_cli, or custom")
 	fs.StringVar(&cfg.ProviderAuthMethod, "auth", providerAuthMethod, "auth method for the selected provider: auto, api_key, codex_login, or none")
 	fs.StringVar(&cfg.ProviderModel, "model", providerModel, "model name for the selected provider")
 	fs.StringVar(&cfg.ProviderBaseURL, "base-url", providerBaseURL, "base URL for the selected provider API")
@@ -131,6 +131,8 @@ func normalizeProviderType(value string) string {
 		return "openai"
 	case "anthropic":
 		return "anthropic"
+	case "openwebui":
+		return "openwebui"
 	case "ollama":
 		return "ollama"
 	case "codex-cli":
@@ -167,6 +169,11 @@ func resolveProviderAPIKey(providerType string, authMethod string) (string, stri
 		return firstNonEmptyEnv(
 			"SHUTTLE_API_KEY",
 			"ANTHROPIC_API_KEY",
+		)
+	case "openwebui":
+		return firstNonEmptyEnv(
+			"SHUTTLE_API_KEY",
+			"OPENWEBUI_API_KEY",
 		)
 	case "openrouter":
 		return firstNonEmptyEnv(

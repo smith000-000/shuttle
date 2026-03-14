@@ -3,7 +3,6 @@ package provider
 import (
 	"errors"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"aiterm/internal/config"
@@ -40,9 +39,12 @@ func TestSaveStoredProviderConfigPrefersEnvReference(t *testing.T) {
 	if len(keyringStore) != 0 {
 		t.Fatalf("expected no keyring writes, got %#v", keyringStore)
 	}
+	if string(mustReadFile(t, selectedProviderPath(tempDir))) != "openai\n" {
+		t.Fatalf("expected openai to be selected, got %q", string(mustReadFile(t, selectedProviderPath(tempDir))))
+	}
 }
 
-func TestSaveStoredProviderConfigStoresManualKeyInKeyring(t *testing.T) {
+func TestSaveStoredProviderConfigStoresManualKeyPerPreset(t *testing.T) {
 	tempDir := t.TempDir()
 	keyringStore := withTestKeyring(t)
 
@@ -68,8 +70,47 @@ func TestSaveStoredProviderConfigStoresManualKeyInKeyring(t *testing.T) {
 	if stored.APIKeyRef != keyringSourceLabel {
 		t.Fatalf("expected keyring ref, got %q", stored.APIKeyRef)
 	}
-	if keyringStore[keyringServiceName+"|"+providerKeyAccount(tempDir)] != "manual-secret" {
+	if keyringStore[keyringServiceName+"|"+providerKeyAccount(tempDir, PresetAnthropic)] != "manual-secret" {
 		t.Fatalf("expected secret in keyring store, got %#v", keyringStore)
+	}
+}
+
+func TestLoadStoredProviderProfilesReturnsMultipleProfiles(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("OPENAI_API_KEY", "openai-key")
+	withTestKeyring(t)
+
+	if err := SaveStoredProviderConfig(tempDir, Profile{
+		Preset:       PresetOpenAI,
+		AuthMethod:   AuthAPIKey,
+		BaseURL:      "https://api.openai.com/v1",
+		Model:        "gpt-5-nano-2025-08-07",
+		APIKey:       "openai-key",
+		APIKeyEnvVar: "OPENAI_API_KEY",
+	}); err != nil {
+		t.Fatalf("SaveStoredProviderConfig(openai) error = %v", err)
+	}
+	if err := SaveStoredProviderConfig(tempDir, Profile{
+		Preset:     PresetOllama,
+		AuthMethod: AuthNone,
+		BaseURL:    "http://localhost:11434/api",
+		Model:      "qwen3.5:35b-a3b",
+	}); err != nil {
+		t.Fatalf("SaveStoredProviderConfig(ollama) error = %v", err)
+	}
+
+	profiles, selected, err := LoadStoredProviderProfiles(tempDir)
+	if err != nil {
+		t.Fatalf("LoadStoredProviderProfiles() error = %v", err)
+	}
+	if len(profiles) != 2 {
+		t.Fatalf("expected 2 profiles, got %d", len(profiles))
+	}
+	if selected != PresetOllama {
+		t.Fatalf("expected ollama selected, got %q", selected)
+	}
+	if profiles[0].Preset != PresetOllama {
+		t.Fatalf("expected selected preset first, got %s", profiles[0].Preset)
 	}
 }
 
@@ -78,7 +119,10 @@ func TestApplyStoredProviderConfigLoadsEnvReference(t *testing.T) {
 	t.Setenv("OPENROUTER_API_KEY", "env-openrouter-key")
 	withTestKeyring(t)
 
-	if err := os.WriteFile(filepath.Join(tempDir, "provider.json"), []byte(`{
+	if err := os.MkdirAll(providersDirPath(tempDir), 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(providerConfigPath(tempDir, PresetOpenRouter), []byte(`{
   "version": 1,
   "provider": "openrouter",
   "auth_method": "api_key",
@@ -87,6 +131,9 @@ func TestApplyStoredProviderConfigLoadsEnvReference(t *testing.T) {
   "api_key_ref": "OPENROUTER_API_KEY"
 }`), 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.WriteFile(selectedProviderPath(tempDir), []byte("openrouter\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(selected) error = %v", err)
 	}
 
 	cfg, err := ApplyStoredProviderConfig(config.Config{StateDir: tempDir})
@@ -105,12 +152,12 @@ func TestApplyStoredProviderConfigLoadsEnvReference(t *testing.T) {
 	}
 }
 
-func TestApplyStoredProviderConfigLoadsKeyringValue(t *testing.T) {
+func TestApplyStoredProviderConfigLoadsLegacyKeyringValue(t *testing.T) {
 	tempDir := t.TempDir()
 	keyringStore := withTestKeyring(t)
-	keyringStore[keyringServiceName+"|"+providerKeyAccount(tempDir)] = "stored-secret"
+	keyringStore[keyringServiceName+"|"+legacyProviderKeyAccount(tempDir)] = "stored-secret"
 
-	if err := os.WriteFile(filepath.Join(tempDir, "provider.json"), []byte(`{
+	if err := os.WriteFile(legacyProviderConfigPath(tempDir), []byte(`{
   "version": 1,
   "provider": "anthropic",
   "auth_method": "api_key",
@@ -150,6 +197,16 @@ func TestApplyStoredProviderConfigSkipsWhenProviderFlagsExplicit(t *testing.T) {
 	if cfg.ProviderType != "openai" || cfg.ProviderModel != "gpt-5.2-codex" {
 		t.Fatalf("expected explicit config to be preserved, got %#v", cfg)
 	}
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s) error = %v", path, err)
+	}
+	return data
 }
 
 func withTestKeyring(t *testing.T) map[string]string {

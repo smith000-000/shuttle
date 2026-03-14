@@ -28,6 +28,7 @@ const (
 	PresetMock       ProviderPreset = "mock"
 	PresetOpenAI     ProviderPreset = "openai"
 	PresetOpenRouter ProviderPreset = "openrouter"
+	PresetOpenWebUI  ProviderPreset = "openwebui"
 	PresetAnthropic  ProviderPreset = "anthropic"
 	PresetOllama     ProviderPreset = "ollama"
 	PresetCustom     ProviderPreset = "custom"
@@ -105,6 +106,9 @@ func ResolveProfile(cfg config.Config) (Profile, error) {
 	case PresetOpenRouter:
 		defaults := responsesPresetDefaults(PresetOpenRouter)
 		return resolveResponsesProfile(cfg, defaults), nil
+	case PresetOpenWebUI:
+		defaults := responsesPresetDefaults(PresetOpenWebUI)
+		return resolveResponsesProfile(cfg, defaults), nil
 	case PresetAnthropic:
 		return resolveAnthropicProfile(cfg), nil
 	case PresetOllama:
@@ -149,6 +153,14 @@ func responsesPresetDefaults(preset ProviderPreset) responsesDefaults {
 			backendFamily: BackendOpenRouter,
 			baseURL:       "https://openrouter.ai/api/v1",
 			model:         "openai/gpt-5",
+		}
+	case PresetOpenWebUI:
+		return responsesDefaults{
+			preset:        PresetOpenWebUI,
+			name:          "OpenWebUI",
+			backendFamily: BackendResponsesHTTP,
+			baseURL:       "http://localhost:3000/api/v1",
+			model:         "",
 		}
 	case PresetOllama:
 		return responsesDefaults{
@@ -307,6 +319,8 @@ func normalizePreset(value string) ProviderPreset {
 		return PresetOpenAI
 	case "openrouter":
 		return PresetOpenRouter
+	case "openwebui":
+		return PresetOpenWebUI
 	case "anthropic":
 		return PresetAnthropic
 	case "ollama":

@@ -86,6 +86,28 @@ func TestResolveProfileAnthropicDefaults(t *testing.T) {
 	}
 }
 
+func TestResolveProfileOpenWebUIDefaults(t *testing.T) {
+	profile, err := ResolveProfile(config.Config{
+		ProviderType:         "openwebui",
+		ProviderAuthMethod:   "api_key",
+		ProviderAPIKey:       "test-key",
+		ProviderAPIKeyEnvVar: "OPENWEBUI_API_KEY",
+	})
+	if err != nil {
+		t.Fatalf("ResolveProfile() error = %v", err)
+	}
+
+	if profile.BackendFamily != BackendResponsesHTTP {
+		t.Fatalf("expected responses backend, got %s", profile.BackendFamily)
+	}
+	if profile.BaseURL != "http://localhost:3000/api/v1" {
+		t.Fatalf("expected default OpenWebUI base URL, got %q", profile.BaseURL)
+	}
+	if profile.APIKeyEnvVar != "OPENWEBUI_API_KEY" {
+		t.Fatalf("expected OPENWEBUI_API_KEY source, got %q", profile.APIKeyEnvVar)
+	}
+}
+
 func TestResolveProfileCustomDefaults(t *testing.T) {
 	profile, err := ResolveProfile(config.Config{
 		ProviderType:       "custom",

@@ -164,7 +164,7 @@ func TestBuildOnboardingCandidatesIncludesStoredAndManualChoices(t *testing.T) {
 	if len(candidates) < 6 {
 		t.Fatalf("expected stored plus manual candidates, got %d", len(candidates))
 	}
-	if candidates[0].Reason != "Previously saved Shuttle provider configuration." {
+	if candidates[0].Reason != "Currently selected Shuttle provider configuration." {
 		t.Fatalf("expected saved profile first, got %q", candidates[0].Reason)
 	}
 

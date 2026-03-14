@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -37,10 +38,12 @@ func BuildOnboardingCandidates(stateDir string) ([]OnboardingCandidate, error) {
 	candidates := make([]OnboardingCandidate, 0, 8)
 	seen := map[string]struct{}{}
 
-	if stored, ok, err := loadStoredOnboardingCandidate(stateDir); err != nil {
+	if storedProfiles, selectedPreset, err := loadStoredOnboardingCandidates(stateDir); err != nil {
 		return nil, err
-	} else if ok {
-		candidates = appendCandidate(candidates, seen, stored)
+	} else {
+		for _, stored := range prioritizeStoredCandidates(storedProfiles, selectedPreset) {
+			candidates = appendCandidate(candidates, seen, stored)
+		}
 	}
 
 	detected, err := DetectOnboardingCandidates()
@@ -75,6 +78,14 @@ func DetectOnboardingCandidates() ([]OnboardingCandidate, error) {
 	}
 	if ok {
 		candidates = append(candidates, openRouterCandidate)
+	}
+
+	openWebUICandidate, ok, err := detectResponsesCandidate(PresetOpenWebUI, "OPENWEBUI_API_KEY")
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		candidates = append(candidates, openWebUICandidate)
 	}
 
 	anthropicCandidate, ok, err := detectResponsesCandidate(PresetAnthropic, "ANTHROPIC_API_KEY")
@@ -265,34 +276,34 @@ func firstSetEnv(keys ...string) (string, string) {
 	return "", ""
 }
 
-func loadStoredOnboardingCandidate(stateDir string) (OnboardingCandidate, bool, error) {
+func loadStoredOnboardingCandidates(stateDir string) ([]OnboardingCandidate, ProviderPreset, error) {
 	if strings.TrimSpace(stateDir) == "" {
-		return OnboardingCandidate{}, false, nil
+		return nil, "", nil
 	}
 
-	cfg, err := ApplyStoredProviderConfig(config.Config{StateDir: stateDir})
+	profiles, selectedPreset, err := LoadStoredProviderProfiles(stateDir)
 	if err != nil {
-		return OnboardingCandidate{}, false, err
-	}
-	if strings.TrimSpace(cfg.ProviderType) == "" {
-		return OnboardingCandidate{}, false, nil
+		return nil, "", err
 	}
 
-	profile, err := ResolveProfile(cfg)
-	if err != nil {
-		return OnboardingCandidate{}, false, err
+	candidates := make([]OnboardingCandidate, 0, len(profiles))
+	for _, profile := range profiles {
+		authSource := strings.TrimSpace(profile.APIKeyEnvVar)
+		if authSource == "" && profile.AuthMethod == AuthCodexLogin {
+			authSource = "codex login"
+		}
+		reason := "Previously saved Shuttle provider configuration."
+		if profile.Preset == selectedPreset {
+			reason = "Currently selected Shuttle provider configuration."
+		}
+		candidates = append(candidates, OnboardingCandidate{
+			Profile:    profile,
+			Reason:     reason,
+			AuthSource: authSource,
+		})
 	}
 
-	authSource := strings.TrimSpace(cfg.ProviderAPIKeyEnvVar)
-	if authSource == "" && profile.AuthMethod == AuthCodexLogin {
-		authSource = "codex login"
-	}
-
-	return OnboardingCandidate{
-		Profile:    profile,
-		Reason:     "Previously saved Shuttle provider configuration.",
-		AuthSource: authSource,
-	}, true, nil
+	return candidates, selectedPreset, nil
 }
 
 func manualOnboardingCandidates() []OnboardingCandidate {
@@ -305,9 +316,17 @@ func manualOnboardingCandidates() []OnboardingCandidate {
 			ProviderType:       string(PresetOpenRouter),
 			ProviderAuthMethod: "api_key",
 		}, responsesPresetDefaults(PresetOpenRouter)),
+		resolveResponsesProfile(config.Config{
+			ProviderType:       string(PresetOpenWebUI),
+			ProviderAuthMethod: "api_key",
+		}, responsesPresetDefaults(PresetOpenWebUI)),
 		resolveAnthropicProfile(config.Config{
 			ProviderType:       string(PresetAnthropic),
 			ProviderAuthMethod: "api_key",
+		}),
+		resolveCodexCLIProfile(config.Config{
+			ProviderType:       string(PresetCodexCLI),
+			ProviderAuthMethod: "codex_login",
 		}),
 	}
 
@@ -358,4 +377,16 @@ func onboardingCandidateKey(candidate OnboardingCandidate) string {
 		parts = append(parts, "manual")
 	}
 	return strings.Join(parts, "|")
+}
+
+func prioritizeStoredCandidates(candidates []OnboardingCandidate, selectedPreset ProviderPreset) []OnboardingCandidate {
+	sort.SliceStable(candidates, func(i int, j int) bool {
+		leftSelected := candidates[i].Profile.Preset == selectedPreset
+		rightSelected := candidates[j].Profile.Preset == selectedPreset
+		if leftSelected != rightSelected {
+			return leftSelected
+		}
+		return candidates[i].Profile.Name < candidates[j].Profile.Name
+	})
+	return candidates
 }
