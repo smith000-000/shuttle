@@ -479,9 +479,9 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 	result, err := c.runTrackedCommand(ctx, execution.ID, command)
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	if c.task.CurrentExecution == nil || c.task.CurrentExecution.ID != execution.ID {
+		c.mu.Unlock()
 		logging.Trace(
 			"controller.shell_command.stale_completion",
 			"execution_id", execution.ID,
@@ -495,6 +495,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			c.task.CurrentExecution = nil
+			c.mu.Unlock()
 			logging.Trace("controller.shell_command.canceled", "execution_id", execution.ID, "command", command, "origin", origin)
 			return []TranscriptEvent{startEvent}, err
 		}
@@ -538,6 +539,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 			c.task.CurrentExecution = nil
 			resultEvent := c.newEvent(EventCommandResult, summary)
 			c.appendEvents(resultEvent)
+			c.mu.Unlock()
 			logging.Trace(
 				"controller.shell_command.lost",
 				"execution_id", execution.ID,
@@ -546,7 +548,22 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 				"error", err.Error(),
 				"tail_preview", logging.Preview(lostExecution.LatestOutputTail, 1000),
 			)
-			return []TranscriptEvent{startEvent, resultEvent}, nil
+			events := []TranscriptEvent{startEvent, resultEvent}
+			if isAgentOwnedExecution(origin) {
+				recoveryEvents, recoveryErr := c.submitLostExecutionRecovery(ctx, lostExecution)
+				if recoveryErr != nil {
+					if errors.Is(recoveryErr, context.Canceled) {
+						return events, recoveryErr
+					}
+					errEvent := c.appendRecoveryError(recoveryErr)
+					if errEvent != nil {
+						events = append(events, *errEvent)
+					}
+					return events, nil
+				}
+				events = append(events, recoveryEvents...)
+			}
+			return events, nil
 		}
 		failedExecution := execution
 		failedExecution.State = CommandExecutionFailed
@@ -557,6 +574,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 		c.task.CurrentExecution = nil
 		errEvent := c.newEvent(EventError, TextPayload{Text: err.Error()})
 		c.appendEvents(errEvent)
+		c.mu.Unlock()
 		logging.Trace(
 			"controller.shell_command.error",
 			"execution_id", execution.ID,
@@ -602,6 +620,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 		c.task.CurrentExecution = nil
 		resultEvent := c.newEvent(EventCommandResult, summary)
 		c.appendEvents(resultEvent)
+		c.mu.Unlock()
 		logging.Trace(
 			"controller.shell_command.canceled_result",
 			"execution_id", execution.ID,
@@ -647,6 +666,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 	c.task.CurrentExecution = nil
 	resultEvent := c.newEvent(EventCommandResult, summary)
 	c.appendEvents(resultEvent)
+	c.mu.Unlock()
 	logging.Trace(
 		"controller.shell_command.complete",
 		"execution_id", execution.ID,
@@ -658,6 +678,87 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 		"prompt", result.ShellContext.PromptLine(),
 	)
 	return []TranscriptEvent{startEvent, resultEvent}, nil
+}
+
+func (c *LocalController) submitLostExecutionRecovery(ctx context.Context, execution CommandExecution) ([]TranscriptEvent, error) {
+	if c.agent == nil {
+		return nil, nil
+	}
+
+	c.mu.Lock()
+	session := c.session
+	task := c.task
+	c.mu.Unlock()
+
+	if strings.TrimSpace(execution.LatestOutputTail) != "" {
+		session.RecentShellOutput = execution.LatestOutputTail
+	}
+	task.CurrentExecution = &execution
+	task.RecoverySnapshot = c.captureRecoverySnapshot(ctx, c.session.TopPaneID, &execution)
+
+	input := AgentInput{
+		Session: session,
+		Task:    task,
+		Prompt:  lostTrackingCheckInPrompt,
+	}
+
+	response, err := c.agent.Respond(ctx, input)
+	if err != nil {
+		logging.TraceError(
+			"controller.lost_recovery.error",
+			err,
+			"execution_id", execution.ID,
+			"command", execution.Command,
+		)
+		return nil, err
+	}
+	response = normalizeAgentResponse(response)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	events := make([]TranscriptEvent, 0, 4)
+	if response.Message != "" {
+		events = append(events, c.newEvent(EventAgentMessage, TextPayload{Text: response.Message}))
+	}
+	if response.Plan != nil {
+		activePlan := buildActivePlan(*response.Plan)
+		c.task.ActivePlan = &activePlan
+		events = append(events, c.newEvent(EventPlan, activePlan))
+	}
+	if response.Proposal != nil {
+		events = append(events, c.newEvent(EventProposal, ProposalPayload{
+			Kind:        response.Proposal.Kind,
+			Command:     response.Proposal.Command,
+			Keys:        response.Proposal.Keys,
+			Patch:       response.Proposal.Patch,
+			Description: response.Proposal.Description,
+		}))
+	}
+	if response.Approval != nil {
+		approvalCopy := *response.Approval
+		c.task.PendingApproval = &approvalCopy
+		events = append(events, c.newEvent(EventApproval, approvalCopy))
+	}
+	c.appendEvents(events...)
+	logging.Trace(
+		"controller.lost_recovery.complete",
+		"execution_id", execution.ID,
+		"command", execution.Command,
+		"event_kinds", eventKinds(events),
+	)
+	return events, nil
+}
+
+func (c *LocalController) appendRecoveryError(err error) *TranscriptEvent {
+	if err == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	event := c.newEvent(EventError, TextPayload{Text: err.Error()})
+	c.appendEvents(event)
+	return &event
 }
 
 func (c *LocalController) runTrackedCommand(ctx context.Context, executionID string, command string) (shell.TrackedExecution, error) {

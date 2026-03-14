@@ -211,6 +211,49 @@ func TestLocalControllerSubmitShellCommandLostReturnsResultEvent(t *testing.T) {
 	}
 }
 
+func TestLocalControllerAgentOwnedLostTriggersRecoveryInference(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "Tracking is low-confidence. Use F2 to inspect the shell or review the recovery snapshot.",
+		},
+	}
+	controller := New(agent, &stubRunner{
+		result: shell.TrackedExecution{
+			CommandID:  "cmd-2",
+			Command:    "rg -n foo ~",
+			State:      shell.MonitorStateLost,
+			Cause:      shell.CompletionCauseUnknown,
+			Confidence: shell.ConfidenceLow,
+			Captured:   "partial output",
+		},
+		err: context.DeadlineExceeded,
+	}, &stubContextReader{
+		output: "recovery line 1\nrecovery line 2",
+	}, SessionContext{TopPaneID: "%0"})
+
+	events, err := controller.SubmitProposedShellCommand(context.Background(), "rg -n foo ~")
+	if err != nil {
+		t.Fatalf("SubmitProposedShellCommand() error = %v", err)
+	}
+
+	if len(events) != 3 {
+		t.Fatalf("expected 3 events, got %d", len(events))
+	}
+	if events[0].Kind != EventCommandStart || events[1].Kind != EventCommandResult || events[2].Kind != EventAgentMessage {
+		t.Fatalf("unexpected event kinds: %#v", events)
+	}
+
+	if agent.lastInput.Prompt != lostTrackingCheckInPrompt {
+		t.Fatalf("expected lost recovery prompt, got %q", agent.lastInput.Prompt)
+	}
+	if agent.lastInput.Task.CurrentExecution == nil || agent.lastInput.Task.CurrentExecution.State != CommandExecutionLost {
+		t.Fatalf("expected lost current execution in agent input, got %#v", agent.lastInput.Task.CurrentExecution)
+	}
+	if agent.lastInput.Task.RecoverySnapshot != "recovery line 1\nrecovery line 2" {
+		t.Fatalf("expected recovery snapshot, got %q", agent.lastInput.Task.RecoverySnapshot)
+	}
+}
+
 func TestLocalControllerSubmitProposedShellCommandTracksAgentOrigin(t *testing.T) {
 	controller := New(nil, &stubRunner{
 		result: shell.TrackedExecution{

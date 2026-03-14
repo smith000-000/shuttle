@@ -76,8 +76,15 @@ What is still not done:
 - fullscreen/interactive detection still needs stronger terminal-behavior signals beyond current tmux metadata heuristics
 - noisy transport/script echoes still need occasional cleanup in tails and recovery snapshots
 - the agent still needs tighter guardrails around when it should propose raw keys versus when it should simply tell the user to take control
+- semantic shell integration is not implemented yet; Shuttle does not currently consume `OSC 133` or `OSC 7` markers from the shell
 
 ## Recommended Direction
+
+Before adding any tiny local classifier, the next major architecture upgrade should be semantic shell integration:
+- `OSC 133` for prompt/command lifecycle
+- `OSC 7` for cwd tracking
+
+That would let Shuttle rely less on prompt scraping and tail heuristics for local shells. The current branch does **not** implement these signals yet.
 
 ### 1. Introduce First-Class Command Executions
 Every shell command should create a tracked execution record.

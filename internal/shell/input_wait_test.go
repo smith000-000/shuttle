@@ -23,6 +23,20 @@ func TestTailSuggestsAwaitingInputDetectsTruncatedQuotedPressPrompt(t *testing.T
 	}
 }
 
+func TestTailSuggestsAwaitingInputDetectsSelectPrompt(t *testing.T) {
+	tail := "=== TUI Applications ===\n[Q] Quit\nSelect:"
+	if !TailSuggestsAwaitingInput(tail) {
+		t.Fatal("expected select prompt to be detected")
+	}
+}
+
+func TestTailSuggestsAwaitingInputDetectsChoosePrompt(t *testing.T) {
+	tail := "Choose:"
+	if !TailSuggestsAwaitingInput(tail) {
+		t.Fatal("expected choose prompt to be detected")
+	}
+}
+
 func TestTailSuggestsAwaitingInputIgnoresNormalOutput(t *testing.T) {
 	tail := "1\n2\n3\n4"
 	if TailSuggestsAwaitingInput(tail) {

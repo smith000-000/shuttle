@@ -106,6 +106,18 @@ func TestClassifyActiveMonitorStateTreatsAlternateScreenAsInteractiveFullscreen(
 	}
 }
 
+func TestClassifyActiveMonitorStateTreatsFullscreenForegroundCommandAsInteractiveFullscreen(t *testing.T) {
+	if got := classifyActiveMonitorState("wrapped-alias", "", false, "nano"); got != MonitorStateInteractiveFullscreen {
+		t.Fatalf("classifyActiveMonitorState(foreground nano) = %s, want %s", got, MonitorStateInteractiveFullscreen)
+	}
+}
+
+func TestClassifyActiveMonitorStateTreatsAwaitingForegroundCommandAsAwaitingInput(t *testing.T) {
+	if got := classifyActiveMonitorState("wrapped-alias", "", false, "sudo"); got != MonitorStateAwaitingInput {
+		t.Fatalf("classifyActiveMonitorState(foreground sudo) = %s, want %s", got, MonitorStateAwaitingInput)
+	}
+}
+
 func TestAllowPromptReturnInferenceDisablesInteractiveCommands(t *testing.T) {
 	if allowPromptReturnInference("btop", false, "btop") {
 		t.Fatal("expected fullscreen interactive command to disable prompt-return inference")

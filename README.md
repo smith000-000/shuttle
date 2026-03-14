@@ -22,6 +22,7 @@ What is still in progress:
 - provider onboarding and saved profiles
 - patch application and file creation flow
 - more execution-monitor confidence hardening
+- semantic shell integration (`OSC 133` / `OSC 7`) for local shells
 - release packaging
 
 ## Requirements

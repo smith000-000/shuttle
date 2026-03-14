@@ -16,7 +16,7 @@ var awaitingInputPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\(yes/no(?:/\[[^\]]+\])?\)\??\s*$`),
 	regexp.MustCompile(`(?i)\[[yYnN]/[yYnN]\]\s*$`),
 	regexp.MustCompile(`(?i)enter [^:]{1,80}:\s*$`),
-	regexp.MustCompile(`(?i)(choice|selection):\s*$`),
+	regexp.MustCompile(`(?i)(choice|selection|select|choose|option):\s*$`),
 	regexp.MustCompile(`(?i)waiting for input`),
 }
 

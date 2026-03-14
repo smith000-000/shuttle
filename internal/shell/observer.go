@@ -322,6 +322,21 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 		}
 
 		if !started && time.Now().After(startDeadline) {
+			inferredState := classifyActiveMonitorState(command, tail, alternateOn, currentPaneCommand)
+			if inferredState == MonitorStateAwaitingInput || inferredState == MonitorStateInteractiveFullscreen {
+				started = true
+				monitor.setState(inferredState)
+				logging.Trace(
+					"shell.tracked.started_inferred_by_state",
+					"pane", paneID,
+					"command", command,
+					"command_id", markers.CommandID,
+					"state", inferredState,
+					"pane_command", currentPaneCommand,
+					"tail_preview", logging.Preview(tail, 1000),
+				)
+				continue
+			}
 			err := fmt.Errorf("timed out waiting for tracked command %s to start", markers.CommandID)
 			logging.Trace(
 				"shell.tracked.start_timeout",
@@ -362,7 +377,13 @@ func classifyActiveMonitorState(command string, tail string, alternateOn bool, c
 	if alternateOn {
 		return MonitorStateInteractiveFullscreen
 	}
+	if foregroundCommandSuggestsFullscreen(currentPaneCommand) {
+		return MonitorStateInteractiveFullscreen
+	}
 	if TailSuggestsAwaitingInput(tail) {
+		return MonitorStateAwaitingInput
+	}
+	if foregroundCommandSuggestsAwaitingInput(currentPaneCommand) {
 		return MonitorStateAwaitingInput
 	}
 	if IsInteractiveCommand(command) {
@@ -408,6 +429,24 @@ func paneCommandAllowsPromptInference(command string) bool {
 	}
 	switch trimmed {
 	case "ssh", "mosh-client", "mosh":
+		return true
+	default:
+		return false
+	}
+}
+
+func foregroundCommandSuggestsFullscreen(command string) bool {
+	switch strings.TrimSpace(strings.ToLower(command)) {
+	case "vi", "vim", "nvim", "nano", "emacs", "less", "more", "man", "top", "htop", "btop", "watch", "tmux", "screen":
+		return true
+	default:
+		return false
+	}
+}
+
+func foregroundCommandSuggestsAwaitingInput(command string) bool {
+	switch strings.TrimSpace(strings.ToLower(command)) {
+	case "sudo", "doas", "passwd", "su":
 		return true
 	default:
 		return false
