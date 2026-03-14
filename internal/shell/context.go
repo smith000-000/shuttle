@@ -19,6 +19,7 @@ type PromptContext struct {
 	Root         bool
 	Remote       bool
 	RawLine      string
+	LastExitCode *int
 }
 
 var gitBranchPattern = regexp.MustCompile(`\bgit:\(([^)]+)\)`)

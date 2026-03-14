@@ -165,6 +165,47 @@ func TestLocalControllerSubmitShellCommandCanceledReturnsResultEvent(t *testing.
 	}
 }
 
+func TestLocalControllerResumeAfterTakeControlReconcilesUserShellPromptReturn(t *testing.T) {
+	exitCode := shell.InterruptedExitCode
+	reader := &stubContextReader{
+		snapshot: "^C\njsmith@linuxdesktop ~/source/repos/aiterm %",
+		context: shell.PromptContext{
+			User:         "jsmith",
+			Host:         "linuxdesktop",
+			Directory:    "/home/jsmith/source/repos/aiterm",
+			PromptSymbol: "%",
+			RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+			LastExitCode: &exitCode,
+		},
+	}
+	controller := New(nil, nil, reader, SessionContext{TopPaneID: "%0"})
+	controller.task.CurrentExecution = &CommandExecution{
+		ID:        "cmd-1",
+		Command:   "bash -lc 'for i in {1..30}; do echo \"$i\"; sleep 1; done'",
+		Origin:    CommandOriginUserShell,
+		State:     CommandExecutionRunning,
+		StartedAt: time.Now().Add(-30 * time.Second),
+	}
+
+	events, err := controller.ResumeAfterTakeControl(context.Background())
+	if err != nil {
+		t.Fatalf("ResumeAfterTakeControl() error = %v", err)
+	}
+	if len(events) != 1 || events[0].Kind != EventCommandResult {
+		t.Fatalf("expected one command result event, got %#v", events)
+	}
+	result, ok := events[0].Payload.(CommandResultSummary)
+	if !ok {
+		t.Fatalf("expected command result payload, got %#v", events[0].Payload)
+	}
+	if result.State != CommandExecutionCanceled || result.ExitCode != shell.InterruptedExitCode {
+		t.Fatalf("unexpected reconcile result %#v", result)
+	}
+	if controller.ActiveExecution() != nil {
+		t.Fatal("expected active execution to clear after handoff reconcile")
+	}
+}
+
 func TestLocalControllerSubmitShellCommandLostReturnsResultEvent(t *testing.T) {
 	controller := New(nil, &stubRunner{
 		result: shell.TrackedExecution{
@@ -547,11 +588,11 @@ func TestLocalControllerMonitorUpdatesActiveExecutionTail(t *testing.T) {
 
 	runner.waitForStart(t)
 	monitor.publish(shell.MonitorSnapshot{
-		CommandID:        "cmd-monitor",
-		Command:          "sleep 60",
-		State:            shell.MonitorStateRunning,
-		StartedAt:        time.Now(),
-		LatestOutputTail: "still running",
+		CommandID:         "cmd-monitor",
+		Command:           "sleep 60",
+		State:             shell.MonitorStateRunning,
+		StartedAt:         time.Now(),
+		LatestOutputTail:  "still running",
 		ForegroundCommand: "sleep",
 	})
 
@@ -1155,6 +1196,7 @@ func TestLocalControllerContinueActivePlanUsesActivePlanContext(t *testing.T) {
 type stubContextReader struct {
 	output   string
 	snapshot string
+	context  shell.PromptContext
 	err      error
 }
 
@@ -1172,6 +1214,9 @@ func (s *stubContextReader) CaptureRecentOutput(context.Context, string, int) (s
 func (s *stubContextReader) CaptureShellContext(context.Context, string) (shell.PromptContext, error) {
 	if s.err != nil {
 		return shell.PromptContext{}, s.err
+	}
+	if s.context.PromptLine() != "" || s.context.LastExitCode != nil {
+		return s.context, nil
 	}
 
 	return shell.PromptContext{

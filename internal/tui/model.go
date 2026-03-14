@@ -294,7 +294,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.activeExecution != nil {
 			followUpCmds = append(followUpCmds, tickBusy())
 		}
-		if m.resumeAfterHandoff && m.ctrl != nil {
+		if m.activeExecution != nil && m.ctrl != nil {
 			m.resumeAfterHandoff = false
 			m.busy = true
 			m.busyStartedAt = time.Now()

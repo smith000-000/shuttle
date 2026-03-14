@@ -138,7 +138,110 @@ func (c *LocalController) ContinueAfterCommand(ctx context.Context) ([]Transcrip
 
 func (c *LocalController) ResumeAfterTakeControl(ctx context.Context) ([]TranscriptEvent, error) {
 	logging.Trace("controller.resume_after_take_control")
+	reconciledEvents, reconciledAgentOwned, reconciled, err := c.reconcileExecutionAfterTakeControl(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if reconciled {
+		if reconciledAgentOwned {
+			events, err := c.submitAgentTurn(ctx, "", resumeAfterTakeControlPrompt, nil, false)
+			if err != nil {
+				return reconciledEvents, err
+			}
+			return append(reconciledEvents, events...), nil
+		}
+		return reconciledEvents, nil
+	}
+
+	c.mu.Lock()
+	agentOwned := c.task.CurrentExecution != nil && isAgentOwnedExecution(c.task.CurrentExecution.Origin)
+	c.mu.Unlock()
+	if !agentOwned {
+		return nil, nil
+	}
 	return c.submitAgentTurn(ctx, "", resumeAfterTakeControlPrompt, nil, false)
+}
+
+func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context) ([]TranscriptEvent, bool, bool, error) {
+	if c.reader == nil || c.session.TopPaneID == "" {
+		return nil, false, false, nil
+	}
+
+	c.mu.Lock()
+	if c.task.CurrentExecution == nil {
+		c.mu.Unlock()
+		return nil, false, false, nil
+	}
+	execution := *c.task.CurrentExecution
+	c.mu.Unlock()
+
+	promptContext, err := c.reader.CaptureShellContext(ctx, c.session.TopPaneID)
+	if err != nil {
+		return nil, false, false, err
+	}
+	if promptContext.PromptLine() == "" || promptContext.LastExitCode == nil {
+		return nil, false, false, nil
+	}
+
+	recentOutput := ""
+	if captured, captureErr := c.reader.CaptureRecentOutput(ctx, c.session.TopPaneID, 120); captureErr == nil {
+		recentOutput = strings.TrimSpace(captured)
+	}
+	if recentOutput == "" {
+		recentOutput = strings.TrimSpace(execution.LatestOutputTail)
+	}
+	if promptContext.PromptLine() != "" {
+		recentOutput = shell.TrimTrailingPromptLine(recentOutput, promptContext)
+	}
+
+	exitCode := *promptContext.LastExitCode
+	state := CommandExecutionCompleted
+	switch exitCode {
+	case shell.InterruptedExitCode:
+		state = CommandExecutionCanceled
+	case 0:
+		state = CommandExecutionCompleted
+	default:
+		state = CommandExecutionFailed
+	}
+
+	summary := CommandResultSummary{
+		ExecutionID: execution.ID,
+		CommandID:   execution.ID,
+		Command:     execution.Command,
+		Origin:      execution.Origin,
+		State:       state,
+		Cause:       shell.CompletionCausePromptReturn,
+		Confidence:  shell.ConfidenceStrong,
+		ExitCode:    exitCode,
+		Summary:     recentOutput,
+	}
+	contextCopy := promptContext
+	summary.ShellContext = &contextCopy
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.task.CurrentExecution == nil || c.task.CurrentExecution.ID != execution.ID {
+		return nil, false, false, nil
+	}
+	c.session.CurrentShell = &contextCopy
+	if contextCopy.Directory != "" {
+		c.session.WorkingDirectory = contextCopy.Directory
+	}
+	c.session.RecentShellOutput = recentOutput
+	c.task.LastCommandResult = &summary
+	c.task.CurrentExecution = nil
+	resultEvent := c.newEvent(EventCommandResult, summary)
+	c.appendEvents(resultEvent)
+	logging.Trace(
+		"controller.resume_after_take_control.reconciled",
+		"execution_id", execution.ID,
+		"command", execution.Command,
+		"state", state,
+		"exit_code", exitCode,
+		"tail_preview", logging.Preview(recentOutput, 1000),
+	)
+	return []TranscriptEvent{resultEvent}, isAgentOwnedExecution(execution.Origin), true, nil
 }
 
 func (c *LocalController) CheckActiveExecution(ctx context.Context) ([]TranscriptEvent, error) {

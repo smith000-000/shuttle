@@ -97,6 +97,9 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 		observer := shell.NewObserver(client).WithStateDir(a.cfg.StateDir)
 		initialShellContext := initialPromptContext(ctx, observer, workspace.TopPane.ID, a.cfg.StartDir)
 		observer.WithPromptHint(initialShellContext)
+		if err := observer.EnsureLocalShellIntegration(ctx, workspace.TopPane.ID); err != nil {
+			logging.TraceError("app.shell_integration.error", err, "pane", workspace.TopPane.ID)
+		}
 		agent, profile, err := provider.NewFromConfig(a.cfg, provider.FactoryOptions{})
 		if err != nil {
 			logging.TraceError("app.provider.error", err, "provider", a.cfg.ProviderType)
@@ -141,6 +144,9 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 		}
 		initialShellContext := initialPromptContext(ctx, observer, workspace.TopPane.ID, a.cfg.StartDir)
 		observer.WithPromptHint(initialShellContext)
+		if err := observer.EnsureLocalShellIntegration(ctx, workspace.TopPane.ID); err != nil {
+			logging.TraceError("app.shell_integration.error", err, "pane", workspace.TopPane.ID)
+		}
 		agent, profile, err := provider.NewFromConfig(a.cfg, provider.FactoryOptions{})
 		if err != nil {
 			logging.TraceError("app.provider.error", err, "provider", a.cfg.ProviderType)
@@ -200,6 +206,9 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	if a.cfg.Track != "" {
 		observer := shell.NewObserver(client).WithStateDir(a.cfg.StateDir)
 		observer.WithPromptHint(shell.GuessLocalContext(a.cfg.StartDir))
+		if err := observer.EnsureLocalShellIntegration(ctx, workspace.TopPane.ID); err != nil {
+			logging.TraceError("app.shell_integration.error", err, "pane", workspace.TopPane.ID)
+		}
 		tracked, err := observer.RunTrackedCommand(ctx, workspace.TopPane.ID, a.cfg.Track, shell.CommandTimeout(a.cfg.Track))
 		if err != nil {
 			logging.TraceError("app.track.error", err, "pane", workspace.TopPane.ID, "command", a.cfg.Track)
