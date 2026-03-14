@@ -23,6 +23,7 @@ What is still in progress:
 - patch application and file creation flow
 - more execution-monitor confidence hardening
 - semantic shell integration (`OSC 133` / `OSC 7`) for local shells
+- any richer shell bootstrap/helper mode beyond those standards
 - release packaging
 
 ## Requirements

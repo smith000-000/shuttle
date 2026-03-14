@@ -80,11 +80,17 @@ What is still not done:
 
 ## Recommended Direction
 
-Before adding any tiny local classifier, the next major architecture upgrade should be semantic shell integration:
+Before adding any tiny local classifier, the next major architecture upgrade should be standards-based semantic shell integration:
 - `OSC 133` for prompt/command lifecycle
 - `OSC 7` for cwd tracking
 
 That would let Shuttle rely less on prompt scraping and tail heuristics for local shells. The current branch does **not** implement these signals yet.
+
+Keep this line explicit:
+- first, adopt portable shell markers that are already documented and shared across terminals
+- later, if needed, add an optional richer bootstrap/helper mode similar to Warp's subshell setup or Wave's shell bridge
+
+Shuttle should not jump straight to a proprietary bootstrap model before implementing the standards-based marker path.
 
 ### 1. Introduce First-Class Command Executions
 Every shell command should create a tracked execution record.

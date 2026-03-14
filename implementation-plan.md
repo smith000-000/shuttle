@@ -40,7 +40,8 @@ Milestone 5 still needs:
 - stronger monitor-side confidence so active-command classification such as `awaiting_input`, `interactive_fullscreen`, and `lost` is driven by better evidence and fewer fallback heuristics
 - pane-stream/fullscreen detection beyond tmux alternate-screen heuristics so aliases, wrappers, and remote fullscreen apps can be recognized from terminal behavior instead of command-name lists alone
 - richer state-aware agent recovery actions for ambiguous shell takeovers, including deciding when to propose raw terminal input versus simple recovery guidance
-- semantic shell integration for local shells using signals such as `OSC 133` and `OSC 7`; this is not implemented yet and remains a future execution-monitor slice
+- semantic shell integration for local shells using signals such as `OSC 133` and `OSC 7`; this is not implemented yet and remains the next standards-based execution-monitor slice
+- any richer bootstrap or injected helper mode should come later, after the standards-based marker path exists
 
 ## Guiding Decisions
 - Build `P0` only first. That means Epics 1 through 4 in [requirements-mvp.md](requirements-mvp.md).
