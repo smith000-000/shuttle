@@ -1,0 +1,164 @@
+package provider
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+
+	"aiterm/internal/controller"
+)
+
+var defaultCodexCLICommand = "codex"
+
+type CodexCLIAgent struct {
+	ResponsesAgent
+	command string
+}
+
+func NewCodexCLIAgent(profile Profile) (*CodexCLIAgent, error) {
+	if profile.BackendFamily != BackendCLIAgent {
+		return nil, fmt.Errorf("profile %q is not a CLI agent backend", profile.Preset)
+	}
+
+	command := strings.TrimSpace(profile.CLICommand)
+	if command == "" {
+		command = defaultCodexCLICommand
+	}
+	if _, err := exec.LookPath(command); err != nil {
+		return nil, fmt.Errorf("find codex CLI: %w", err)
+	}
+	if profile.AuthMethod == AuthCodexLogin {
+		status, err := codexLoginStatus(command)
+		if err != nil {
+			return nil, err
+		}
+		if !codexStatusIsLoggedIn(status) {
+			return nil, errors.New("codex CLI is not logged in; run `codex login` first")
+		}
+	}
+
+	return &CodexCLIAgent{
+		ResponsesAgent: ResponsesAgent{profile: profile},
+		command:        command,
+	}, nil
+}
+
+func (a *CodexCLIAgent) Respond(ctx context.Context, input controller.AgentInput) (controller.AgentResponse, error) {
+	tempDir, err := os.MkdirTemp("", "shuttle-codex-*")
+	if err != nil {
+		return controller.AgentResponse{}, fmt.Errorf("create codex temp dir: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	schemaPath := filepath.Join(tempDir, "schema.json")
+	outputPath := filepath.Join(tempDir, "last-message.json")
+	schema, err := json.MarshalIndent(shuttleAgentResponseSchema(), "", "  ")
+	if err != nil {
+		return controller.AgentResponse{}, fmt.Errorf("marshal shuttle schema: %w", err)
+	}
+	if err := os.WriteFile(schemaPath, schema, 0o600); err != nil {
+		return controller.AgentResponse{}, fmt.Errorf("write codex schema: %w", err)
+	}
+
+	args := []string{
+		"exec",
+		"--skip-git-repo-check",
+		"--ephemeral",
+		"--sandbox", "read-only",
+		"--output-schema", schemaPath,
+		"--output-last-message", outputPath,
+		"--color", "never",
+	}
+	if workdir := codexWorkingDir(input); workdir != "" {
+		args = append(args, "--cd", workdir)
+	}
+	if model := strings.TrimSpace(a.profile.Model); model != "" {
+		args = append(args, "--model", model)
+	}
+	args = append(args, buildCodexPrompt(input))
+
+	command := exec.CommandContext(ctx, a.command, args...)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			message = err.Error()
+		}
+		return controller.AgentResponse{}, fmt.Errorf("run codex CLI: %s", message)
+	}
+
+	lastMessage, err := os.ReadFile(outputPath)
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			message = err.Error()
+		}
+		return controller.AgentResponse{}, fmt.Errorf("read codex output: %s", message)
+	}
+
+	var structured shuttleStructuredResponse
+	if err := json.Unmarshal(lastMessage, &structured); err != nil {
+		return controller.AgentResponse{}, fmt.Errorf("decode codex structured output: %w", err)
+	}
+
+	response, err := a.toAgentResponse(structured)
+	if err != nil {
+		return controller.AgentResponse{}, err
+	}
+	response.ModelInfo = &controller.AgentModelInfo{
+		ProviderPreset: string(a.profile.Preset),
+		RequestedModel: strings.TrimSpace(a.profile.Model),
+		ResponseModel:  strings.TrimSpace(a.profile.Model),
+	}
+
+	return response, nil
+}
+
+func (a *CodexCLIAgent) CheckHealth(ctx context.Context) error {
+	if a.profile.AuthMethod == AuthCodexLogin {
+		status, err := codexLoginStatus(a.command)
+		if err != nil {
+			return err
+		}
+		if !codexStatusIsLoggedIn(status) {
+			return errors.New("codex CLI is not logged in")
+		}
+		return nil
+	}
+
+	_, err := a.Respond(ctx, controller.AgentInput{
+		Prompt: "Respond with a short confirmation that the provider path works.",
+	})
+	return err
+}
+
+func codexLoginStatus(command string) (string, error) {
+	output, err := exec.Command(command, "login", "status").CombinedOutput()
+	if err != nil {
+		message := strings.TrimSpace(string(output))
+		if message == "" {
+			message = err.Error()
+		}
+		return "", fmt.Errorf("check codex login status: %s", message)
+	}
+
+	return strings.TrimSpace(string(output)), nil
+}
+
+func codexStatusIsLoggedIn(status string) bool {
+	status = strings.ToLower(strings.TrimSpace(status))
+	return strings.HasPrefix(status, "logged in")
+}
+
+func buildCodexPrompt(input controller.AgentInput) string {
+	return shuttleSystemPrompt + "\n\nShuttle turn context:\n" + buildTurnContext(input)
+}
+
+func codexWorkingDir(input controller.AgentInput) string {
+	return strings.TrimSpace(input.Session.WorkingDirectory)
+}

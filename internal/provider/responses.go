@@ -22,10 +22,16 @@ type ResponsesAgent struct {
 	counter atomic.Uint64
 }
 
+const (
+	shuttleUserAgent = "Shuttle/0.1"
+)
+
 type responsesRequest struct {
-	Model string                  `json:"model"`
-	Input []responsesInputMessage `json:"input"`
-	Text  responsesTextConfig     `json:"text"`
+	Model           string                  `json:"model"`
+	Input           []responsesInputMessage `json:"input"`
+	Text            *responsesTextConfig    `json:"text,omitempty"`
+	MaxOutputTokens int                     `json:"max_output_tokens,omitempty"`
+	Reasoning       *responsesReasoning     `json:"reasoning,omitempty"`
 }
 
 type responsesInputMessage struct {
@@ -49,7 +55,14 @@ type responsesFormat struct {
 	Strict bool           `json:"strict"`
 }
 
+type responsesReasoning struct {
+	Effort    string `json:"effort,omitempty"`
+	MaxTokens int    `json:"max_tokens,omitempty"`
+	Exclude   bool   `json:"exclude,omitempty"`
+}
+
 type responsesAPIResponse struct {
+	Model      string                `json:"model"`
 	Output     []responsesOutputItem `json:"output"`
 	OutputText string                `json:"output_text"`
 	Error      *responsesError       `json:"error"`
@@ -115,30 +128,9 @@ func NewResponsesAgent(profile Profile, client *http.Client) (*ResponsesAgent, e
 }
 
 func (a *ResponsesAgent) Respond(ctx context.Context, input controller.AgentInput) (controller.AgentResponse, error) {
-	requestBody := responsesRequest{
-		Model: a.profile.Model,
-		Input: []responsesInputMessage{
-			{
-				Role: "system",
-				Content: []responsesInputContent{
-					{Type: "input_text", Text: shuttleSystemPrompt},
-				},
-			},
-			{
-				Role: "user",
-				Content: []responsesInputContent{
-					{Type: "input_text", Text: buildTurnContext(input)},
-				},
-			},
-		},
-		Text: responsesTextConfig{
-			Format: responsesFormat{
-				Type:   "json_schema",
-				Name:   "shuttle_agent_response",
-				Schema: shuttleAgentResponseSchema(),
-				Strict: true,
-			},
-		},
+	requestBody, err := newStructuredResponsesRequest(a.profile.Model, input)
+	if err != nil {
+		return controller.AgentResponse{}, err
 	}
 
 	payload, err := json.Marshal(requestBody)
@@ -158,9 +150,12 @@ func (a *ResponsesAgent) Respond(ctx context.Context, input controller.AgentInpu
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "Shuttle/0.1")
+	req.Header.Set("User-Agent", shuttleUserAgent)
 	if a.profile.AuthMethod == AuthAPIKey {
 		req.Header.Set("Authorization", "Bearer "+a.profile.APIKey)
+	}
+	for key, value := range providerRequestHeaders(a.profile) {
+		req.Header.Set(key, value)
 	}
 
 	resp, err := a.client.Do(req)
@@ -196,7 +191,19 @@ func (a *ResponsesAgent) Respond(ctx context.Context, input controller.AgentInpu
 		return controller.AgentResponse{}, fmt.Errorf("decode structured provider output: %w", err)
 	}
 
-	return a.toAgentResponse(structured)
+	response, err := a.toAgentResponse(structured)
+	if err != nil {
+		return controller.AgentResponse{}, err
+	}
+
+	response.ModelInfo = &controller.AgentModelInfo{
+		ProviderPreset:  string(a.profile.Preset),
+		RequestedModel:  a.profile.Model,
+		ResponseModel:   strings.TrimSpace(apiResp.Model),
+		ResponseBaseURL: a.profile.BaseURL,
+	}
+
+	return response, nil
 }
 
 func (a *ResponsesAgent) CheckHealth(ctx context.Context) error {
@@ -337,6 +344,18 @@ func responsesEndpoint(baseURL string) (string, error) {
 	return parsed.String(), nil
 }
 
+func providerRequestHeaders(profile Profile) map[string]string {
+	switch profile.BackendFamily {
+	case BackendOpenRouter:
+		return map[string]string{
+			"X-Title":            "Shuttle",
+			"X-OpenRouter-Title": "Shuttle",
+		}
+	default:
+		return nil
+	}
+}
+
 func parseProviderError(statusCode int, body []byte) error {
 	var apiErr struct {
 		Error *responsesError `json:"error"`
@@ -371,6 +390,64 @@ func extractResponseText(response responsesAPIResponse) (string, error) {
 	}
 
 	return strings.Join(fragments, "\n"), nil
+}
+
+func newStructuredResponsesRequest(model string, input controller.AgentInput) (responsesRequest, error) {
+	request := responsesRequest{
+		Model: model,
+		Input: []responsesInputMessage{
+			{
+				Role: "system",
+				Content: []responsesInputContent{
+					{Type: "input_text", Text: shuttleSystemPrompt},
+				},
+			},
+			{
+				Role: "user",
+				Content: []responsesInputContent{
+					{Type: "input_text", Text: buildTurnContext(input)},
+				},
+			},
+		},
+		Text: &responsesTextConfig{
+			Format: responsesFormat{
+				Type:   "json_schema",
+				Name:   "shuttle_agent_response",
+				Schema: shuttleAgentResponseSchema(),
+				Strict: true,
+			},
+		},
+	}
+
+	return request, nil
+}
+
+func newPromptOnlyResponsesRequest(model string, input controller.AgentInput) (responsesRequest, error) {
+	schemaJSON, err := json.Marshal(shuttleAgentResponseSchema())
+	if err != nil {
+		return responsesRequest{}, fmt.Errorf("marshal shuttle schema: %w", err)
+	}
+
+	systemPrompt := shuttleSystemPrompt + "\n\nReturn only a valid JSON object that matches this schema exactly:\n" + string(schemaJSON)
+	request := responsesRequest{
+		Model: model,
+		Input: []responsesInputMessage{
+			{
+				Role: "system",
+				Content: []responsesInputContent{
+					{Type: "input_text", Text: systemPrompt},
+				},
+			},
+			{
+				Role: "user",
+				Content: []responsesInputContent{
+					{Type: "input_text", Text: buildTurnContext(input)},
+				},
+			},
+		},
+	}
+
+	return request, nil
 }
 
 func buildTurnContext(input controller.AgentInput) string {
@@ -504,6 +581,13 @@ func summarizeTranscriptEvent(event controller.TranscriptEvent) string {
 	case controller.EventCommandResult:
 		payload, _ := event.Payload.(controller.CommandResultSummary)
 		return fmt.Sprintf("%s: exit=%d %s", event.Kind, payload.ExitCode, clipText(payload.Command, 180))
+	case controller.EventModelInfo:
+		payload, _ := event.Payload.(controller.AgentModelInfo)
+		model := payload.ResponseModel
+		if strings.TrimSpace(model) == "" {
+			model = payload.RequestedModel
+		}
+		return string(event.Kind) + ": " + clipText(model, 240)
 	default:
 		return string(event.Kind)
 	}

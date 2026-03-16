@@ -115,6 +115,22 @@ func formatAgentEvent(event controller.TranscriptEvent) string {
 			lines = append(lines, "patch:\n"+payload.Patch)
 		}
 		return fmt.Sprintf("[APPROVAL]\n%s", strings.Join(lines, "\n"))
+	case controller.EventModelInfo:
+		payload, _ := event.Payload.(controller.AgentModelInfo)
+		lines := []string{}
+		if payload.ProviderPreset != "" {
+			lines = append(lines, "provider: "+payload.ProviderPreset)
+		}
+		if payload.RequestedModel != "" {
+			lines = append(lines, "requested: "+payload.RequestedModel)
+		}
+		if payload.ResponseModel != "" {
+			lines = append(lines, "response: "+payload.ResponseModel)
+		}
+		if payload.ResponseBaseURL != "" {
+			lines = append(lines, "base_url: "+payload.ResponseBaseURL)
+		}
+		return fmt.Sprintf("[MODEL_INFO]\n%s", strings.Join(lines, "\n"))
 	default:
 		return fmt.Sprintf("[%s]", strings.ToUpper(string(event.Kind)))
 	}
