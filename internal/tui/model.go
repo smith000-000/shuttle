@@ -130,59 +130,62 @@ const (
 )
 
 type Model struct {
-	workspace           tmux.Workspace
-	ctrl                controller.Controller
-	mode                Mode
-	input               string
-	entries             []Entry
-	selectedEntry       int
-	width               int
-	height              int
-	busy                bool
-	busyStartedAt       time.Time
-	transcriptScroll    int
-	transcriptFollow    bool
-	detailOpen          bool
-	detailScroll        int
-	shellHistory        composerHistory
-	agentHistory        composerHistory
-	activePlan          *controller.ActivePlan
-	shellContext        shell.PromptContext
-	pendingApproval     *controller.ApprovalRequest
-	pendingProposal     *controller.ProposalPayload
-	refiningApproval    *controller.ApprovalRequest
-	approvalInFlight    bool
-	proposalRunPending  bool
-	directShellPending  bool
-	inFlightCancel      context.CancelFunc
-	suppressCancelErr   bool
-	resumeAfterHandoff  bool
-	takeControl         takeControlConfig
-	liveShellTail       string
-	showShellTail       bool
-	activeProvider      provider.Profile
-	onboardingOpen      bool
-	onboardingStep      onboardingStep
-	onboardingIndex     int
-	onboardingChoices   []provider.OnboardingCandidate
-	onboardingSelected  *provider.OnboardingCandidate
-	onboardingForm      *onboardingFormState
-	onboardingModels    []provider.ModelOption
-	onboardingModelIdx  int
-	loadOnboarding      func() ([]provider.OnboardingCandidate, error)
-	loadModels          func(provider.Profile) ([]provider.ModelOption, error)
-	switchProvider      func(provider.Profile, *shell.PromptContext) (controller.Controller, provider.Profile, error)
-	saveProvider        func(provider.Profile) error
-	settingsOpen        bool
-	settingsStep        settingsStep
-	settingsIndex       int
-	settingsProviders   []settingsProviderEntry
-	settingsProviderIdx int
-	settingsConfig      *onboardingFormState
-	settingsModels      []settingsModelChoice
-	settingsModelIdx    int
-	lastModelInfo       *controller.AgentModelInfo
-	styles              styles
+	workspace            tmux.Workspace
+	ctrl                 controller.Controller
+	mode                 Mode
+	input                string
+	entries              []Entry
+	selectedEntry        int
+	width                int
+	height               int
+	busy                 bool
+	busyStartedAt        time.Time
+	transcriptScroll     int
+	transcriptFollow     bool
+	detailOpen           bool
+	detailScroll         int
+	shellHistory         composerHistory
+	agentHistory         composerHistory
+	activePlan           *controller.ActivePlan
+	shellContext         shell.PromptContext
+	pendingApproval      *controller.ApprovalRequest
+	pendingProposal      *controller.ProposalPayload
+	refiningApproval     *controller.ApprovalRequest
+	approvalInFlight     bool
+	proposalRunPending   bool
+	directShellPending   bool
+	inFlightCancel       context.CancelFunc
+	suppressCancelErr    bool
+	resumeAfterHandoff   bool
+	takeControl          takeControlConfig
+	liveShellTail        string
+	showShellTail        bool
+	activeProvider       provider.Profile
+	onboardingOpen       bool
+	onboardingStep       onboardingStep
+	onboardingIndex      int
+	onboardingChoices    []provider.OnboardingCandidate
+	onboardingSelected   *provider.OnboardingCandidate
+	onboardingForm       *onboardingFormState
+	onboardingModels     []provider.ModelOption
+	onboardingModelIdx   int
+	loadOnboarding       func() ([]provider.OnboardingCandidate, error)
+	loadModels           func(provider.Profile) ([]provider.ModelOption, error)
+	switchProvider       func(provider.Profile, *shell.PromptContext) (controller.Controller, provider.Profile, error)
+	saveProvider         func(provider.Profile) error
+	settingsOpen         bool
+	settingsStep         settingsStep
+	settingsIndex        int
+	settingsProviders    []settingsProviderEntry
+	settingsProviderIdx  int
+	settingsConfig       *onboardingFormState
+	settingsModelCatalog []settingsModelChoice
+	settingsModels       []settingsModelChoice
+	settingsModelIdx     int
+	settingsModelFilter  string
+	settingsModelInfo    bool
+	lastModelInfo        *controller.AgentModelInfo
+	styles               styles
 }
 
 func NewModel(workspace tmux.Workspace, ctrl controller.Controller) Model {
@@ -384,8 +387,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.settingsProviders = nil
 		m.settingsProviderIdx = 0
 		m.settingsConfig = nil
+		m.settingsModelCatalog = nil
 		m.settingsModels = nil
 		m.settingsModelIdx = 0
+		m.settingsModelFilter = ""
+		m.settingsModelInfo = false
 		m.pendingApproval = nil
 		m.pendingProposal = nil
 		m.refiningApproval = nil
@@ -440,8 +446,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.settingsStep = settingsStepActiveModels
-		m.settingsModels = append([]settingsModelChoice(nil), msg.choices...)
-		m.settingsModelIdx = m.currentSettingsModelIndex()
+		m.settingsModelCatalog = append([]settingsModelChoice(nil), msg.choices...)
+		m.settingsModelFilter = ""
+		m.settingsModelInfo = false
+		m.applySettingsModelFilter()
 		return m, nil
 	case settingsProviderSavedMsg:
 		m.busy = false
@@ -462,6 +470,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.settingsStep = settingsStepProviders
 		m.settingsConfig = nil
+		m.settingsModelCatalog = nil
+		m.settingsModels = nil
+		m.settingsModelIdx = 0
+		m.settingsModelFilter = ""
+		m.settingsModelInfo = false
 		if msg.persistErr != nil {
 			m.entries = append(m.entries, Entry{
 				Title: "error",
@@ -871,8 +884,11 @@ func (m Model) openSettings() (tea.Model, tea.Cmd) {
 	m.settingsProviders = buildSettingsProviderEntries(choices)
 	m.settingsProviderIdx = m.currentSettingsProviderIndex()
 	m.settingsConfig = nil
+	m.settingsModelCatalog = nil
 	m.settingsModels = nil
 	m.settingsModelIdx = 0
+	m.settingsModelFilter = ""
+	m.settingsModelInfo = false
 	return m, nil
 }
 
@@ -1053,14 +1069,29 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.settingsOpen = false
 		m.settingsStep = settingsStepMenu
 		m.settingsConfig = nil
+		m.settingsModelCatalog = nil
 		m.settingsModels = nil
+		m.settingsModelFilter = ""
+		m.settingsModelInfo = false
 		return m, nil
 	case tea.KeyEsc:
 		switch m.settingsStep {
 		case settingsStepProviderForm:
 			m.settingsStep = settingsStepProviders
 			m.settingsConfig = nil
-		case settingsStepProviders, settingsStepActiveModels:
+		case settingsStepActiveModels:
+			if m.settingsModelFilter != "" {
+				m.settingsModelFilter = ""
+				m.settingsModelInfo = false
+				m.applySettingsModelFilter()
+				return m, nil
+			}
+			m.settingsStep = settingsStepMenu
+			m.settingsModelCatalog = nil
+			m.settingsModels = nil
+			m.settingsModelIdx = 0
+			m.settingsModelInfo = false
+		case settingsStepProviders:
 			m.settingsStep = settingsStepMenu
 		default:
 			m.settingsOpen = false
@@ -1079,6 +1110,7 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case settingsStepActiveModels:
 			if m.settingsModelIdx > 0 {
 				m.settingsModelIdx--
+				m.settingsModelInfo = false
 			}
 		case settingsStepProviderForm:
 			if m.settingsConfig != nil && m.settingsConfig.index > 0 {
@@ -1099,6 +1131,7 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case settingsStepActiveModels:
 			if m.settingsModelIdx < len(m.settingsModels)-1 {
 				m.settingsModelIdx++
+				m.settingsModelInfo = false
 			}
 		case settingsStepProviderForm:
 			if m.settingsConfig != nil && m.settingsConfig.index < len(m.settingsConfig.fields)-1 {
@@ -1117,6 +1150,7 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.settingsModelIdx < 0 {
 				m.settingsModelIdx = 0
 			}
+			m.settingsModelInfo = false
 		}
 		return m, nil
 	case tea.KeyPgDown:
@@ -1125,9 +1159,16 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.settingsModelIdx >= len(m.settingsModels) {
 				m.settingsModelIdx = max(0, len(m.settingsModels)-1)
 			}
+			m.settingsModelInfo = false
 		}
 		return m, nil
 	case tea.KeyBackspace, tea.KeyDelete:
+		if m.settingsStep == settingsStepActiveModels && m.settingsModelFilter != "" {
+			m.settingsModelFilter = trimLastRune(m.settingsModelFilter)
+			m.settingsModelInfo = false
+			m.applySettingsModelFilter()
+			return m, nil
+		}
 		if m.settingsStep == settingsStepProviderForm && m.settingsConfig != nil {
 			field := &m.settingsConfig.fields[m.settingsConfig.index]
 			if len(field.value) > 0 {
@@ -1136,6 +1177,12 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeySpace:
+		if m.settingsStep == settingsStepActiveModels {
+			m.settingsModelFilter += " "
+			m.settingsModelInfo = false
+			m.applySettingsModelFilter()
+			return m, nil
+		}
 		if m.settingsStep == settingsStepProviderForm && m.settingsConfig != nil {
 			m.settingsConfig.fields[m.settingsConfig.index].value += " "
 		}
@@ -1143,6 +1190,18 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEnter:
 		return m.applySettingsSelection()
 	default:
+		if m.settingsStep == settingsStepActiveModels && msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && msg.Runes[0] == 'I' {
+			if len(m.settingsModels) > 0 {
+				m.settingsModelInfo = !m.settingsModelInfo
+			}
+			return m, nil
+		}
+		if m.settingsStep == settingsStepActiveModels && !msg.Alt && msg.Type == tea.KeyRunes {
+			m.settingsModelFilter += string(msg.Runes)
+			m.settingsModelInfo = false
+			m.applySettingsModelFilter()
+			return m, nil
+		}
 		if m.settingsStep == settingsStepProviderForm && m.settingsConfig != nil && !msg.Alt && msg.Type == tea.KeyRunes {
 			m.settingsConfig.fields[m.settingsConfig.index].value += string(msg.Runes)
 			return m, nil
@@ -1250,6 +1309,11 @@ func (m Model) applySettingsSelection() (tea.Model, tea.Cmd) {
 		if m.settingsIndex == 0 {
 			m.settingsStep = settingsStepProviders
 			m.settingsProviderIdx = m.currentSettingsProviderIndex()
+			m.settingsModelCatalog = nil
+			m.settingsModels = nil
+			m.settingsModelIdx = 0
+			m.settingsModelFilter = ""
+			m.settingsModelInfo = false
 			return m, nil
 		}
 		return m.loadSettingsModels()
@@ -2197,23 +2261,26 @@ func (m Model) renderSettingsView() string {
 	lines := []string{
 		m.styles.detailTitle.Render("SETTINGS"),
 		m.styles.detailMeta.Render("Manage providers and choose the active model"),
-		"",
 	}
 
 	switch m.settingsStep {
 	case settingsStepProviders:
-		lines = append(lines, m.styles.detailBody.Render("Providers"), m.styles.detailMeta.Render("Edit provider settings and save them for future sessions."), "")
+		lines = append(lines, m.styles.detailBody.Render("Providers"))
+		lines = append(lines, m.styles.detailMeta.Render("Edit provider settings and save them for future sessions."))
 		lines = append(lines, m.renderSettingsProviders(contentWidth)...)
 	case settingsStepActiveModels:
-		lines = append(lines, m.styles.detailBody.Render("Active Model"), m.styles.detailMeta.Render("Choose the provider/model Shuttle should use right now."), "")
+		lines = append(lines, m.styles.detailBody.Render("Active Model"))
+		lines = append(lines, m.styles.detailMeta.Render("Choose the provider/model Shuttle should use right now."))
 		lines = append(lines, m.renderSettingsModels(contentWidth)...)
 	case settingsStepProviderForm:
 		if m.settingsConfig != nil {
-			lines = append(lines, m.styles.detailBody.Render(m.settingsConfig.title), m.styles.detailMeta.Render(m.settingsConfig.intro), "")
+			lines = append(lines, m.styles.detailBody.Render(m.settingsConfig.title))
+			lines = append(lines, m.styles.detailMeta.Render(m.settingsConfig.intro))
 			lines = append(lines, m.renderSettingsConfig(contentWidth)...)
 		}
 	default:
-		lines = append(lines, m.styles.detailBody.Render("Current"), m.styles.detailMeta.Render(providerSummaryLine(m.activeProvider)), "")
+		lines = append(lines, m.styles.detailBody.Render("Current"))
+		lines = append(lines, m.styles.detailMeta.Render(providerSummaryLine(m.activeProvider)))
 		lines = append(lines, m.renderSettingsMenu(contentWidth)...)
 	}
 
@@ -2222,83 +2289,77 @@ func (m Model) renderSettingsView() string {
 }
 
 func (m Model) renderSettingsMenu(contentWidth int) []string {
-	lines := make([]string, 0, len(settingsMenuEntries())*2)
+	lines := make([]string, 0, len(settingsMenuEntries())+2)
 	for index, entry := range settingsMenuEntries() {
-		prefix := "  "
-		if index == m.settingsIndex {
-			prefix = "› "
-		}
-		lines = append(lines, m.styles.detailBody.Render(prefix+entry.label))
+		lines = append(lines, m.renderSettingsRow(entry.label, index == m.settingsIndex, false, false))
 	}
 	if contentWidth > 0 {
-		lines = append(lines, "", m.styles.detailMeta.Render("Current model: "+currentProviderModelLabel(m.activeProvider)))
+		lines = append(lines, m.styles.detailMeta.Render("Current model: "+currentProviderModelLabel(m.activeProvider)))
 	}
 	return lines
 }
 
 func (m Model) renderSettingsProviders(contentWidth int) []string {
-	lines := make([]string, 0, len(m.settingsProviders)*4)
+	lines := make([]string, 0, len(m.settingsProviders)*3)
 	for index, entry := range m.settingsProviders {
-		prefix := "  "
-		if index == m.settingsProviderIdx {
-			prefix = "› "
-		}
-
 		label := entry.label
 		if entry.disabled {
 			label += " (coming soon)"
 		}
-		if entry.candidate != nil && entry.candidate.Profile.Preset == m.activeProvider.Preset {
-			label += " (active)"
-		}
-		lines = append(lines, m.styles.detailBody.Render(prefix+label))
+		current := entry.candidate != nil && entry.candidate.Profile.Preset == m.activeProvider.Preset
+		lines = append(lines, m.renderSettingsRow(label, index == m.settingsProviderIdx, current, entry.disabled))
 		if entry.detail != "" {
-			for _, line := range wrapParagraphs(entry.detail, max(10, contentWidth-3)) {
-				lines = append(lines, m.styles.detailMeta.Render("   "+line))
+			for _, line := range wrapParagraphs(entry.detail, max(10, contentWidth-2)) {
+				lines = append(lines, m.renderSettingsMetaLine(line, index == m.settingsProviderIdx, current, entry.disabled))
 			}
 		}
 		if entry.candidate != nil {
-			lines = append(lines, m.styles.detailMeta.Render("   "+providerSummaryLine(entry.candidate.Profile)))
+			lines = append(lines, m.renderSettingsMetaLine(providerSummaryLine(entry.candidate.Profile), index == m.settingsProviderIdx, current, entry.disabled))
 		}
-		lines = append(lines, "")
 	}
 	return lines
 }
 
 func (m Model) renderSettingsModels(contentWidth int) []string {
-	lines := []string{
-		m.styles.detailMeta.Render("Current: " + currentProviderModelLabel(m.activeProvider)),
-		"",
+	lines := []string{m.renderSettingsCurrentLine("Current: " + currentProviderModelLabel(m.activeProvider))}
+	filterLine := "Filter: type to search models"
+	if strings.TrimSpace(m.settingsModelFilter) != "" {
+		filterLine = fmt.Sprintf("Filter: %s  (%d matches)", m.settingsModelFilter, len(m.settingsModels))
 	}
+	lines = append(lines, m.styles.detailMeta.Render(filterLine))
+	lines = append(lines, m.styles.detailMeta.Render("Shift+I shows extra model details for the highlighted row."))
 	if len(m.settingsModels) == 0 {
+		if strings.TrimSpace(m.settingsModelFilter) != "" && len(m.settingsModelCatalog) > 0 {
+			lines = append(lines, m.styles.detailBody.Render("No models match the current filter."))
+			return lines
+		}
 		lines = append(lines, m.styles.detailBody.Render("No configured provider models are available yet."))
 		return lines
 	}
 
-	start, end := onboardingModelWindow(len(m.settingsModels), m.settingsModelIdx, 10)
+	start, end := onboardingModelWindow(len(m.settingsModels), m.settingsModelIdx, 12)
 	lastProvider := ""
 	for index := start; index < end; index++ {
 		choice := m.settingsModels[index]
 		if choice.profile.Name != lastProvider {
-			lines = append(lines, m.styles.detailBody.Render(choice.profile.Name))
+			lines = append(lines, m.styles.detailMeta.Render(choice.profile.Name))
 			lastProvider = choice.profile.Name
 		}
-		prefix := "  "
-		if index == m.settingsModelIdx {
-			prefix = "› "
-		}
-		label := fmt.Sprintf("%s%s", prefix, choice.model.ID)
-		if choice.profile.Preset == m.activeProvider.Preset && choice.model.ID == m.activeProvider.Model {
-			label += " (current)"
-		}
-		lines = append(lines, m.styles.detailBody.Render(label))
-		detail := modelDetailLine(choice.model)
+		current := choice.profile.Preset == m.activeProvider.Preset && choice.model.ID == m.activeProvider.Model
+		lines = append(lines, m.renderSettingsRow(choice.model.ID, index == m.settingsModelIdx, current, false))
+		detail := modelSummaryLine(choice.model)
 		if detail != "" {
-			for _, line := range wrapParagraphs(detail, max(10, contentWidth-3)) {
-				lines = append(lines, m.styles.detailMeta.Render("   "+line))
+			for _, line := range wrapParagraphs(detail, max(10, contentWidth-2)) {
+				lines = append(lines, m.renderSettingsMetaLine(line, index == m.settingsModelIdx, current, false))
 			}
 		}
-		lines = append(lines, "")
+		if index == m.settingsModelIdx && m.settingsModelInfo {
+			for _, extra := range modelExtraDetailLines(choice.model) {
+				for _, line := range wrapParagraphs(extra, max(10, contentWidth-2)) {
+					lines = append(lines, m.renderSettingsMetaLine(line, true, current, false))
+				}
+			}
+		}
 	}
 
 	return lines
@@ -2309,13 +2370,8 @@ func (m Model) renderSettingsConfig(contentWidth int) []string {
 		return nil
 	}
 
-	lines := []string{m.styles.detailMeta.Render(providerSummaryLine(m.settingsConfig.profile)), ""}
+	lines := []string{m.styles.detailMeta.Render(providerSummaryLine(m.settingsConfig.profile))}
 	for index, field := range m.settingsConfig.fields {
-		prefix := "  "
-		if index == m.settingsConfig.index {
-			prefix = "› "
-		}
-
 		value := field.value
 		switch {
 		case field.secret && strings.TrimSpace(value) != "":
@@ -2326,9 +2382,9 @@ func (m Model) renderSettingsConfig(contentWidth int) []string {
 			value = "<empty>"
 		}
 
-		lines = append(lines, m.styles.detailBody.Render(fmt.Sprintf("%s%s: %s", prefix, field.label, value)))
+		lines = append(lines, m.renderSettingsRow(fmt.Sprintf("%s: %s", field.label, value), index == m.settingsConfig.index, false, false))
 	}
-	lines = append(lines, "", m.styles.detailMeta.Render("API keys entered here are stored in the OS keyring."))
+	lines = append(lines, m.styles.detailMeta.Render("API keys entered here are stored in the OS keyring."))
 	return lines
 }
 
@@ -2430,7 +2486,7 @@ func (m Model) renderOnboardingModels(contentWidth int) []string {
 			label += " (current)"
 		}
 		lines = append(lines, m.styles.detailBody.Render(label))
-		detail := modelDetailLine(model)
+		detail := modelSummaryLine(model)
 		if detail != "" {
 			for _, line := range wrapParagraphs(detail, max(10, contentWidth-3)) {
 				lines = append(lines, m.styles.detailMeta.Render("   "+line))
@@ -3187,6 +3243,72 @@ func (m Model) settingsConfiguredProfiles() []provider.Profile {
 	return profiles
 }
 
+func (m *Model) applySettingsModelFilter() {
+	selectedKey := ""
+	if len(m.settingsModels) > 0 && m.settingsModelIdx >= 0 && m.settingsModelIdx < len(m.settingsModels) {
+		selectedKey = settingsModelChoiceKey(m.settingsModels[m.settingsModelIdx])
+	}
+
+	m.settingsModelInfo = false
+	m.settingsModels = filterSettingsModels(m.settingsModelCatalog, m.settingsModelFilter)
+	switch {
+	case len(m.settingsModels) == 0:
+		m.settingsModelIdx = 0
+	case selectedKey != "":
+		if index := findSettingsModelIndex(m.settingsModels, selectedKey); index >= 0 {
+			m.settingsModelIdx = index
+			return
+		}
+		fallthrough
+	default:
+		m.settingsModelIdx = m.currentSettingsModelIndex()
+	}
+}
+
+func (m Model) renderSettingsRow(label string, selected bool, current bool, disabled bool) string {
+	prefix := "  "
+	if selected {
+		prefix = "› "
+	}
+
+	style := m.settingsRowStyle(selected, current, disabled)
+	return style.Render(prefix + label)
+}
+
+func (m Model) renderSettingsMetaLine(line string, selected bool, current bool, disabled bool) string {
+	style := m.styles.detailMeta
+	switch {
+	case disabled:
+		style = m.styles.detailDisabled
+	case current && selected:
+		style = m.styles.detailSelectedCurrent
+	case current:
+		style = m.styles.detailCurrent
+	case selected:
+		style = m.styles.detailSelected
+	}
+	return style.Render("  " + line)
+}
+
+func (m Model) renderSettingsCurrentLine(line string) string {
+	return m.styles.detailCurrent.Render(line)
+}
+
+func (m Model) settingsRowStyle(selected bool, current bool, disabled bool) lipgloss.Style {
+	switch {
+	case disabled:
+		return m.styles.detailDisabled
+	case current && selected:
+		return m.styles.detailSelectedCurrent
+	case current:
+		return m.styles.detailCurrent
+	case selected:
+		return m.styles.detailSelected
+	default:
+		return m.styles.detailBody
+	}
+}
+
 func providerSummaryLine(profile provider.Profile) string {
 	if profile.Preset == "" {
 		return "provider not configured"
@@ -3325,6 +3447,83 @@ func settingsProfileKey(profile provider.Profile) string {
 	return fmt.Sprintf("%s|%s|%s", profile.Preset, profile.BaseURL, profile.CLICommand)
 }
 
+func settingsModelChoiceKey(choice settingsModelChoice) string {
+	return fmt.Sprintf("%s|%s|%s", choice.profile.Preset, choice.profile.BaseURL, choice.model.ID)
+}
+
+func findSettingsModelIndex(choices []settingsModelChoice, key string) int {
+	for index, choice := range choices {
+		if settingsModelChoiceKey(choice) == key {
+			return index
+		}
+	}
+	return -1
+}
+
+func filterSettingsModels(choices []settingsModelChoice, filter string) []settingsModelChoice {
+	filter = strings.TrimSpace(strings.ToLower(filter))
+	if filter == "" {
+		return append([]settingsModelChoice(nil), choices...)
+	}
+
+	filtered := make([]settingsModelChoice, 0, len(choices))
+	for _, choice := range choices {
+		if settingsModelMatches(choice, filter) {
+			filtered = append(filtered, choice)
+		}
+	}
+
+	return filtered
+}
+
+func settingsModelMatches(choice settingsModelChoice, filter string) bool {
+	tokens := strings.Fields(filter)
+	if len(tokens) == 0 {
+		tokens = []string{filter}
+	}
+
+	fields := []string{
+		strings.ToLower(choice.model.ID),
+		strings.ToLower(choice.model.Name),
+		strings.ToLower(choice.profile.Name),
+		strings.ToLower(string(choice.profile.Preset)),
+	}
+
+	for _, token := range tokens {
+		matched := false
+		for _, field := range fields {
+			if strings.Contains(field, token) || fuzzySubsequenceMatch(field, token) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+
+	return true
+}
+
+func fuzzySubsequenceMatch(field string, filter string) bool {
+	filterRunes := []rune(filter)
+	if len(filterRunes) == 0 {
+		return true
+	}
+
+	index := 0
+	for _, r := range field {
+		if index < len(filterRunes) && r == filterRunes[index] {
+			index++
+			if index == len(filterRunes) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 func containsModelOption(models []provider.ModelOption, target string) bool {
 	for _, model := range models {
 		if model.ID == target {
@@ -3355,13 +3554,21 @@ func onboardingFooter(width int, step onboardingStep) string {
 	return "Enter inspect models  Esc close  Up/Down move  F2 shell"
 }
 
+func trimLastRune(value string) string {
+	runes := []rune(value)
+	if len(runes) == 0 {
+		return ""
+	}
+	return string(runes[:len(runes)-1])
+}
+
 func settingsFooter(width int, step settingsStep) string {
 	if width < 72 {
 		switch step {
 		case settingsStepProviders:
 			return "Enter edit  Esc back  Up/Down move  F2 shell  F10 close"
 		case settingsStepActiveModels:
-			return "Enter activate  Esc back  Up/Down move  Pg page  F2 shell  F10 close"
+			return "Type filter  Shift+I info  Enter activate  Esc clear/back  Pg page  F2 shell  F10 close"
 		case settingsStepProviderForm:
 			return "Type edit  Tab next  Enter save  Esc back  F2 shell  F10 close"
 		default:
@@ -3373,7 +3580,7 @@ func settingsFooter(width int, step settingsStep) string {
 	case settingsStepProviders:
 		return "Enter edit provider settings  Esc back  Up/Down move  F2 shell  F10 close"
 	case settingsStepActiveModels:
-		return "Enter switch active model  Esc back  Up/Down move  PgUp/PgDn page  F2 shell  F10 close"
+		return "Type to filter models  Shift+I toggle info  Enter switch active model  Esc clear filter/back  Up/Down move  PgUp/PgDn page  F2 shell  F10 close"
 	case settingsStepProviderForm:
 		return "Type to edit fields  Tab/Up/Down move  Enter save settings  Esc back  F2 shell  F10 close"
 	default:
@@ -3399,8 +3606,8 @@ func onboardingModelWindow(total int, index int, size int) (int, int) {
 	return start, end
 }
 
-func modelDetailLine(model provider.ModelOption) string {
-	parts := make([]string, 0, 7)
+func modelSummaryLine(model provider.ModelOption) string {
+	parts := make([]string, 0, 6)
 	if model.Name != "" && model.Name != model.ID {
 		parts = append(parts, model.Name)
 	}
@@ -3417,14 +3624,19 @@ func modelDetailLine(model provider.ModelOption) string {
 	if model.Architecture.Modality != "" {
 		parts = append(parts, "mode "+model.Architecture.Modality)
 	}
-	if len(model.SupportedParameters) > 0 {
-		parts = append(parts, "params "+strings.Join(model.SupportedParameters[:min(3, len(model.SupportedParameters))], ","))
-	}
-	if model.Description != "" {
-		parts = append(parts, model.Description)
-	}
 
 	return strings.Join(parts, "  ")
+}
+
+func modelExtraDetailLines(model provider.ModelOption) []string {
+	lines := make([]string, 0, 2)
+	if len(model.SupportedParameters) > 0 {
+		lines = append(lines, "params "+strings.Join(model.SupportedParameters, ","))
+	}
+	if model.Description != "" {
+		lines = append(lines, model.Description)
+	}
+	return lines
 }
 
 type composerHistory struct {

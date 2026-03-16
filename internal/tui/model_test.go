@@ -478,6 +478,203 @@ func TestSettingsActiveModelSelectionSwitchesProvider(t *testing.T) {
 	}
 }
 
+func TestSettingsActiveModelFilterNarrowsChoices(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
+		func() ([]provider.OnboardingCandidate, error) {
+			return []provider.OnboardingCandidate{
+				{
+					Profile: provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
+				},
+				{
+					Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openai/gpt-5", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"},
+				},
+			}, nil
+		},
+		func(profile provider.Profile) ([]provider.ModelOption, error) {
+			switch profile.Preset {
+			case provider.PresetOpenRouter:
+				return []provider.ModelOption{
+					{ID: "openrouter/auto"},
+					{ID: "qwen/qwen3.5-9b"},
+					{ID: "qwen/qwen3.5-32b"},
+				}, nil
+			default:
+				return []provider.ModelOption{{ID: profile.Model}}, nil
+			}
+		},
+		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+			return &fakeController{}, profile, nil
+		},
+		func(provider.Profile) error { return nil },
+	)
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF10})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(Model)
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(Model)
+	loaded := cmd().(settingsModelsLoadedMsg)
+	updated, _ = model.Update(loaded)
+	model = updated.(Model)
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q35")})
+	model = updated.(Model)
+
+	if model.settingsModelFilter != "q35" {
+		t.Fatalf("expected filter to update, got %q", model.settingsModelFilter)
+	}
+	if len(model.settingsModelCatalog) != 5 {
+		t.Fatalf("expected full model catalog to remain intact, got %d", len(model.settingsModelCatalog))
+	}
+	if len(model.settingsModels) != 2 {
+		t.Fatalf("expected filtered models, got %d", len(model.settingsModels))
+	}
+	if model.settingsModels[0].model.ID != "qwen/qwen3.5-9b" {
+		t.Fatalf("expected first filtered model to be qwen/qwen3.5-9b, got %q", model.settingsModels[0].model.ID)
+	}
+
+	view := model.View()
+	if !strings.Contains(view, "Filter: q35  (2 matches)") {
+		t.Fatalf("expected filter summary in view, got %q", view)
+	}
+	if strings.Contains(view, "openrouter/auto") {
+		t.Fatalf("expected filtered view to hide openrouter/auto, got %q", view)
+	}
+}
+
+func TestSettingsActiveModelEscClearsFilterBeforeClosing(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
+		func() ([]provider.OnboardingCandidate, error) {
+			return []provider.OnboardingCandidate{
+				{
+					Profile: provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
+				},
+			}, nil
+		},
+		func(profile provider.Profile) ([]provider.ModelOption, error) {
+			return []provider.ModelOption{{ID: profile.Model}}, nil
+		},
+		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+			return &fakeController{}, profile, nil
+		},
+		func(provider.Profile) error { return nil },
+	)
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF10})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(Model)
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(Model)
+	loaded := cmd().(settingsModelsLoadedMsg)
+	updated, _ = model.Update(loaded)
+	model = updated.(Model)
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("nano")})
+	model = updated.(Model)
+	if model.settingsModelFilter == "" {
+		t.Fatal("expected filter to be set")
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(Model)
+	if model.settingsStep != settingsStepActiveModels {
+		t.Fatalf("expected first esc to stay in active models, got %s", model.settingsStep)
+	}
+	if model.settingsModelFilter != "" {
+		t.Fatalf("expected first esc to clear filter, got %q", model.settingsModelFilter)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(Model)
+	if model.settingsStep != settingsStepMenu {
+		t.Fatalf("expected second esc to return to menu, got %s", model.settingsStep)
+	}
+}
+
+func TestSettingsActiveModelInfoToggleShowsSelectedDetailsOnly(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "allenai/olmo-3-7b-think", BaseURL: "https://openrouter.ai/api/v1"},
+		func() ([]provider.OnboardingCandidate, error) {
+			return []provider.OnboardingCandidate{
+				{
+					Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "allenai/olmo-3-7b-think", BaseURL: "https://openrouter.ai/api/v1"},
+				},
+			}, nil
+		},
+		func(profile provider.Profile) ([]provider.ModelOption, error) {
+			return []provider.ModelOption{
+				{
+					ID:                  "allenai/olmo-3-7b-think",
+					Name:                "AllenAI: Olmo 3 7B Think",
+					ContextWindow:       65536,
+					MaxCompletionTokens: 65536,
+					PromptPrice:         "0.00000012",
+					CompletionPrice:     "0.0000002",
+					SupportedParameters: []string{"reasoning", "structured_outputs"},
+					Architecture:        provider.ModelArchitecture{Modality: "text->text"},
+					Description:         "Long form provider description that should only appear when info is toggled.",
+				},
+				{ID: "qwen/qwen3.5-9b"},
+			}, nil
+		},
+		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+			return &fakeController{}, profile, nil
+		},
+		func(provider.Profile) error { return nil },
+	)
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF10})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(Model)
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(Model)
+	loaded := cmd().(settingsModelsLoadedMsg)
+	updated, _ = model.Update(loaded)
+	model = updated.(Model)
+
+	view := model.View()
+	if !strings.Contains(view, "AllenAI: Olmo 3 7B Think  context 65536  max out 65536  pricing p=0.00000012 c=0.0000002") {
+		t.Fatalf("expected condensed summary prefix, got %q", view)
+	}
+	if !strings.Contains(view, "mode text->text") {
+		t.Fatalf("expected condensed model summary, got %q", view)
+	}
+	if strings.Contains(view, "Long form provider description") {
+		t.Fatalf("expected full description to stay hidden by default, got %q", view)
+	}
+	if strings.Contains(view, "params reasoning,structured_outputs") {
+		t.Fatalf("expected params to stay hidden by default, got %q", view)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("I")})
+	model = updated.(Model)
+	if !model.settingsModelInfo {
+		t.Fatal("expected info toggle to enable")
+	}
+	view = model.View()
+	if !strings.Contains(view, "Long form provider description") {
+		t.Fatalf("expected description after info toggle, got %q", view)
+	}
+	if !strings.Contains(view, "params reasoning,structured_outputs") {
+		t.Fatalf("expected params after info toggle, got %q", view)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(Model)
+	if model.settingsModelInfo {
+		t.Fatal("expected moving selection to clear expanded info")
+	}
+	view = model.View()
+	if strings.Contains(view, "Long form provider description") {
+		t.Fatalf("expected description to disappear after moving away, got %q", view)
+	}
+}
+
 func TestCanceledControllerEventSuppressedAfterTakeControl(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.suppressCancelErr = true
