@@ -37,10 +37,18 @@ type TaskContext struct {
 }
 
 type AgentResponse struct {
-	Message  string
-	Plan     *Plan
-	Proposal *Proposal
-	Approval *ApprovalRequest
+	Message   string
+	Plan      *Plan
+	Proposal  *Proposal
+	Approval  *ApprovalRequest
+	ModelInfo *AgentModelInfo
+}
+
+type AgentModelInfo struct {
+	ProviderPreset  string
+	RequestedModel  string
+	ResponseModel   string
+	ResponseBaseURL string
 }
 
 type Plan struct {
@@ -134,6 +142,7 @@ const (
 	EventApproval      TranscriptEventKind = "approval"
 	EventCommandStart  TranscriptEventKind = "command_start"
 	EventCommandResult TranscriptEventKind = "command_result"
+	EventModelInfo     TranscriptEventKind = "model_info"
 	EventSystemNotice  TranscriptEventKind = "system_notice"
 	EventError         TranscriptEventKind = "error"
 )

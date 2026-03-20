@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -23,6 +24,10 @@ func TestResponsesAgentRespondMapsStructuredOutput(t *testing.T) {
 
 		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
 			t.Fatalf("expected bearer auth, got %q", got)
+		}
+
+		if got := r.Header.Get("X-Title"); got != "" {
+			t.Fatalf("expected no OpenRouter title header, got %q", got)
 		}
 
 		body, err := io.ReadAll(r.Body)
@@ -48,9 +53,17 @@ func TestResponsesAgentRespondMapsStructuredOutput(t *testing.T) {
 			t.Fatalf("expected json_schema format, got %#v", text["format"])
 		}
 
+		if _, ok := payload["max_output_tokens"]; ok {
+			t.Fatalf("expected no OpenAI max_output_tokens override, got %#v", payload["max_output_tokens"])
+		}
+		if _, ok := payload["reasoning"]; ok {
+			t.Fatalf("expected no OpenAI reasoning override, got %#v", payload["reasoning"])
+		}
+
 		return jsonResponse(http.StatusOK, `{
 			"id":"resp_123",
 			"object":"response",
+			"model":"gpt-5-nano-2025-08-07",
 			"output":[
 				{
 					"type":"message",
@@ -100,6 +113,49 @@ func TestResponsesAgentRespondMapsStructuredOutput(t *testing.T) {
 	}
 	if response.Proposal.Command != "ls -lah" {
 		t.Fatalf("expected ls -lah, got %q", response.Proposal.Command)
+	}
+
+	if response.ModelInfo == nil {
+		t.Fatal("expected model info metadata")
+	}
+
+	if response.ModelInfo.ResponseModel != "gpt-5-nano-2025-08-07" {
+		t.Fatalf("expected response model metadata, got %#v", response.ModelInfo)
+	}
+}
+
+func TestResponsesAgentCustomBaseURLSmoke(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/custom/v1/responses" {
+			t.Fatalf("expected /custom/v1/responses, got %s", r.URL.Path)
+		}
+
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Fatalf("expected no auth header, got %q", got)
+		}
+
+		io.WriteString(w, `{"output_text":"{\"message\":\"Custom endpoint works.\"}"}`)
+	}))
+	defer server.Close()
+
+	agent, err := NewResponsesAgent(Profile{
+		BackendFamily: BackendResponsesHTTP,
+		Preset:        PresetCustom,
+		AuthMethod:    AuthNone,
+		BaseURL:       server.URL + "/custom/v1/",
+		Model:         "custom-model",
+	}, server.Client())
+	if err != nil {
+		t.Fatalf("NewResponsesAgent() error = %v", err)
+	}
+
+	response, err := agent.Respond(context.Background(), controller.AgentInput{Prompt: "hello"})
+	if err != nil {
+		t.Fatalf("Respond() error = %v", err)
+	}
+
+	if response.Message != "Custom endpoint works." {
+		t.Fatalf("expected custom endpoint response message, got %q", response.Message)
 	}
 }
 

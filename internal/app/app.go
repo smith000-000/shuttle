@@ -50,6 +50,10 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 		"track", a.cfg.Track,
 		"agent_prompt", a.cfg.AgentPrompt != "",
 	)
+	runtimeCfg, err := provider.ApplyStoredProviderConfig(a.cfg)
+	if err != nil {
+		return Result{}, fmt.Errorf("load stored provider config: %w", err)
+	}
 
 	client, err := tmux.NewClient(a.cfg.TmuxSocket)
 	if err != nil {
@@ -94,13 +98,13 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	}
 
 	if a.cfg.AgentPrompt != "" {
-			observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir)
-		initialShellContext := initialPromptContext(ctx, observer, workspace.TopPane.ID, a.cfg.StartDir)
+		observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir)
+		initialShellContext := initialPromptContext(ctx, observer, workspace.TopPane.ID, runtimeCfg.StartDir)
 		observer.WithPromptHint(initialShellContext)
 		if err := observer.EnsureLocalShellIntegration(ctx, workspace.TopPane.ID); err != nil {
 			logging.TraceError("app.shell_integration.error", err, "pane", workspace.TopPane.ID)
 		}
-		agent, profile, err := provider.NewFromConfig(a.cfg, provider.FactoryOptions{})
+		agent, profile, err := provider.NewFromConfig(runtimeCfg, provider.FactoryOptions{})
 		if err != nil {
 			logging.TraceError("app.provider.error", err, "provider", a.cfg.ProviderType)
 			return Result{}, fmt.Errorf("configure provider: %w", err)
@@ -118,7 +122,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			SessionName:      workspace.SessionName,
 			TopPaneID:        workspace.TopPane.ID,
 			BottomPaneID:     workspace.BottomPane.ID,
-			WorkingDirectory: a.cfg.StartDir,
+			WorkingDirectory: runtimeCfg.StartDir,
 			CurrentShell:     initialShellContextPtr(initialShellContext),
 		})
 		agentCtx, cancel := context.WithTimeout(ctx, agentPromptTimeout)
@@ -137,17 +141,17 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	}
 
 	if a.cfg.TUI {
-			observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir)
+		observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir)
 		if err := client.BindNoPrefixKey(ctx, tui.TakeControlKey, "detach-client"); err != nil {
 			logging.TraceError("app.bind_take_control.error", err, "key", tui.TakeControlKey)
 			return Result{}, fmt.Errorf("configure take-control key: %w", err)
 		}
-		initialShellContext := initialPromptContext(ctx, observer, workspace.TopPane.ID, a.cfg.StartDir)
+		initialShellContext := initialPromptContext(ctx, observer, workspace.TopPane.ID, runtimeCfg.StartDir)
 		observer.WithPromptHint(initialShellContext)
 		if err := observer.EnsureLocalShellIntegration(ctx, workspace.TopPane.ID); err != nil {
 			logging.TraceError("app.shell_integration.error", err, "pane", workspace.TopPane.ID)
 		}
-		agent, profile, err := provider.NewFromConfig(a.cfg, provider.FactoryOptions{})
+		agent, profile, err := provider.NewFromConfig(runtimeCfg, provider.FactoryOptions{})
 		if err != nil {
 			logging.TraceError("app.provider.error", err, "provider", a.cfg.ProviderType)
 			return Result{}, fmt.Errorf("configure provider: %w", err)
@@ -165,12 +169,33 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			SessionName:      workspace.SessionName,
 			TopPaneID:        workspace.TopPane.ID,
 			BottomPaneID:     workspace.BottomPane.ID,
-			WorkingDirectory: a.cfg.StartDir,
+			WorkingDirectory: runtimeCfg.StartDir,
 			CurrentShell:     initialShellContextPtr(initialShellContext),
 		})
+		switchProvider := func(profile provider.Profile, shellContext *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+			agent, err := provider.NewFromProfile(profile, provider.FactoryOptions{})
+			if err != nil {
+				return nil, provider.Profile{}, err
+			}
+
+			return controller.New(agent, observer, observer, controller.SessionContext{
+				SessionName:      workspace.SessionName,
+				TopPaneID:        workspace.TopPane.ID,
+				BottomPaneID:     workspace.BottomPane.ID,
+				WorkingDirectory: runtimeCfg.StartDir,
+				CurrentShell:     shellContext,
+			}), profile, nil
+		}
 		model := tui.NewModel(workspace, ctrl).
 			WithShellContext(initialShellContext).
-			WithTakeControl(a.cfg.TmuxSocket, workspace.SessionName, workspace.TopPane.ID, tui.TakeControlKey)
+			WithTakeControl(a.cfg.TmuxSocket, workspace.SessionName, workspace.TopPane.ID, tui.TakeControlKey).
+			WithProviderOnboarding(profile, func() ([]provider.OnboardingCandidate, error) {
+				return provider.BuildOnboardingCandidates(runtimeCfg.StateDir)
+			}, func(profile provider.Profile) ([]provider.ModelOption, error) {
+				return provider.ListModels(profile, nil)
+			}, switchProvider, func(profile provider.Profile) error {
+				return provider.SaveStoredProviderConfig(runtimeCfg.StateDir, profile)
+			})
 		program := tea.NewProgram(model, tea.WithAltScreen())
 		_, runErr := program.Run()
 		cleanupErr := cleanupTUISession(created, client, workspace.SessionName)

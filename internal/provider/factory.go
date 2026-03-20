@@ -39,6 +39,14 @@ func NewFromProfile(profile Profile, options FactoryOptions) (controller.Agent, 
 		}
 
 		return NewMockAgent(), nil
+	case BackendCLIAgent:
+		return NewCodexCLIAgent(profile)
+	case BackendAnthropic:
+		return NewAnthropicAgent(profile, options.HTTPClient)
+	case BackendOllama:
+		return NewOllamaAgent(profile, options.HTTPClient)
+	case BackendOpenRouter:
+		return NewOpenRouterAgent(profile, options.HTTPClient)
 	case BackendResponsesHTTP:
 		return NewResponsesAgent(profile, options.HTTPClient)
 	default:

@@ -421,6 +421,11 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 		newEvents = append(newEvents, c.newEvent(EventAgentMessage, TextPayload{Text: response.Message}))
 	}
 
+	if response.ModelInfo != nil {
+		modelInfo := *response.ModelInfo
+		newEvents = append(newEvents, c.newEvent(EventModelInfo, modelInfo))
+	}
+
 	if response.Plan != nil {
 		activePlan := buildActivePlan(*response.Plan)
 		c.task.ActivePlan = &activePlan
