@@ -32,6 +32,8 @@ type TaskContext struct {
 	PendingApproval   *ApprovalRequest
 	LastCommandResult *CommandResultSummary
 	ActivePlan        *ActivePlan
+	CurrentExecution  *CommandExecution
+	RecoverySnapshot  string
 }
 
 type AgentResponse struct {
@@ -67,6 +69,7 @@ type ActivePlan struct {
 type Proposal struct {
 	Kind        ProposalKind
 	Command     string
+	Keys        string
 	Patch       string
 	Description string
 }
@@ -76,6 +79,7 @@ type ProposalKind string
 const (
 	ProposalAnswer  ProposalKind = "answer"
 	ProposalCommand ProposalKind = "command"
+	ProposalKeys    ProposalKind = "keys"
 	ProposalPatch   ProposalKind = "patch"
 )
 
@@ -134,22 +138,75 @@ const (
 	EventError         TranscriptEventKind = "error"
 )
 
+type CommandOrigin string
+
+const (
+	CommandOriginUserShell     CommandOrigin = "user_shell"
+	CommandOriginAgentProposal CommandOrigin = "agent_proposal"
+	CommandOriginAgentApproval CommandOrigin = "agent_approval"
+	CommandOriginAgentPlan     CommandOrigin = "agent_plan"
+)
+
+type CommandExecutionState string
+
+const (
+	CommandExecutionQueued                CommandExecutionState = "queued"
+	CommandExecutionRunning               CommandExecutionState = "running"
+	CommandExecutionAwaitingInput         CommandExecutionState = "awaiting_input"
+	CommandExecutionInteractiveFullscreen CommandExecutionState = "interactive_fullscreen"
+	CommandExecutionHandoffActive         CommandExecutionState = "handoff_active"
+	CommandExecutionBackgroundMonitor     CommandExecutionState = "background_monitoring"
+	CommandExecutionCompleted             CommandExecutionState = "completed"
+	CommandExecutionFailed                CommandExecutionState = "failed"
+	CommandExecutionCanceled              CommandExecutionState = "canceled"
+	CommandExecutionLost                  CommandExecutionState = "lost"
+)
+
+type CommandExecution struct {
+	ID                 string
+	Command            string
+	Origin             CommandOrigin
+	State              CommandExecutionState
+	StartedAt          time.Time
+	CompletedAt        *time.Time
+	ExitCode           *int
+	LatestOutputTail   string
+	ForegroundCommand  string
+	SemanticShell      bool
+	SemanticSource     string
+	Error              string
+	ShellContextBefore *shell.PromptContext
+	ShellContextAfter  *shell.PromptContext
+}
+
 type CommandResultSummary struct {
-	CommandID    string
-	Command      string
-	ExitCode     int
-	Summary      string
-	ShellContext *shell.PromptContext
+	ExecutionID    string
+	CommandID      string
+	Command        string
+	Origin         CommandOrigin
+	State          CommandExecutionState
+	Cause          shell.CompletionCause
+	Confidence     shell.SignalConfidence
+	SemanticShell  bool
+	SemanticSource string
+	ExitCode       int
+	Summary        string
+	ShellContext   *shell.PromptContext
 }
 
 type Controller interface {
 	SubmitAgentPrompt(ctx context.Context, prompt string) ([]TranscriptEvent, error)
 	SubmitRefinement(ctx context.Context, approval ApprovalRequest, note string) ([]TranscriptEvent, error)
+	SubmitProposalRefinement(ctx context.Context, proposal ProposalPayload, note string) ([]TranscriptEvent, error)
 	ContinueActivePlan(ctx context.Context) ([]TranscriptEvent, error)
 	ContinueAfterCommand(ctx context.Context) ([]TranscriptEvent, error)
+	CheckActiveExecution(ctx context.Context) ([]TranscriptEvent, error)
 	ResumeAfterTakeControl(ctx context.Context) ([]TranscriptEvent, error)
 	SubmitShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error)
+	SubmitProposedShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error)
 	DecideApproval(ctx context.Context, approvalID string, decision ApprovalDecision, refineText string) ([]TranscriptEvent, error)
 	RefreshShellContext(ctx context.Context) (*shell.PromptContext, error)
 	PeekShellTail(ctx context.Context, lines int) (string, error)
+	ActiveExecution() *CommandExecution
+	AbandonActiveExecution(reason string) *CommandExecution
 }

@@ -159,6 +159,8 @@ Rules:
 - not every field should be populated on every response
 - the controller decides how the response is rendered into transcript events
 - the controller decides whether a proposal must become an approval card before execution
+- a `ProposalPatch` is not applied workspace state by itself; it is only a proposed change until Shuttle runs an explicit patch-application flow
+- the runtime must not describe patch-created files as present or runnable until the controller confirms the patch was applied successfully
 
 ---
 

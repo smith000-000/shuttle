@@ -61,7 +61,86 @@ The real problem is not just timeout values.
 
 The real problem is that Shuttle currently models shell execution as a blocking function call, when it should model it as a job with state transitions.
 
+## Current Branch Status
+On `command-execution-redesign`, Shuttle now has a usable first pass of the redesigned execution stack:
+- first-class monitored executions for tracked shell commands
+- local managed transport using sourced temp scripts instead of giant inline wrappers where possible
+- active execution states including `awaiting_input`, `interactive_fullscreen`, `background_monitoring`, `canceled`, and `lost`
+- `F2` take-control handoff and reconciliation back into Shuttle
+- raw `KEYS>` input for active prompts and fullscreen apps
+- agent-side recovery guidance informed by a larger recovery snapshot
+- first-class agent `keys` proposals so the model can ask Shuttle to send small raw key sequences instead of only narrating them
+
+What is still not done:
+- monitor-side confidence is still too heuristic in some quiet or ambiguous takeovers
+- fullscreen/interactive detection still needs stronger terminal-behavior signals beyond current tmux metadata heuristics
+- noisy transport/script echoes still need occasional cleanup in tails and recovery snapshots
+- the agent still needs tighter guardrails around when it should propose raw keys versus when it should simply tell the user to take control
+- semantic shell integration is only partially implemented; local shells now have a first-pass semantic shim, but Shuttle still needs broader raw-marker consumption and subshell/bootstrap support
+
 ## Recommended Direction
+
+Before adding any tiny local classifier, the next major architecture upgrade should be standards-based semantic shell integration:
+- `OSC 133` for prompt/command lifecycle
+- `OSC 7` for cwd tracking
+
+That would let Shuttle rely less on prompt scraping and tail heuristics for local shells. The current branch does **not** implement these signals yet.
+
+Keep this line explicit:
+- first, adopt portable shell markers that are already documented and shared across terminals
+- later, if needed, add an optional richer bootstrap/helper mode similar to Warp's subshell setup or Wave's shell bridge
+
+Shuttle should not jump straight to a proprietary bootstrap model before implementing the standards-based marker path.
+
+### Subshell Bootstrap
+
+After the standards-based local shell path is stable, Shuttle should add a separate subshell bootstrap layer for transitions such as:
+- `ssh`
+- `docker exec -it`
+- `kubectl exec -it`
+- nested `bash` / `zsh`
+- `sudo -i` / `sudo -s`
+
+This is distinct from basic `OSC 133` / `OSC 7` support:
+- semantic shell integration:
+  - local shell emits portable markers
+  - Shuttle consumes them
+- subshell bootstrap:
+  - Shuttle detects a context transition
+  - waits for the new shell prompt to settle
+  - then injects an idempotent integration snippet into that new shell if it is safe to do so
+
+Rules for subshell bootstrap:
+- conservative by default
+- only after prompt return, not mid-transition
+- idempotent per shell session
+- best-effort, never required for correctness
+- silent fallback to heuristic monitoring if bootstrap fails
+- do not assume Linux, tmux, or extra helper binaries on the remote target
+
+This should be treated as a later capability layer, not as part of the first local semantic-shell milestone.
+
+### Subshell Regression Checklist
+
+Before changing subshell/bootstrap behavior, manually verify:
+- `ssh host`
+  - prompt returns cleanly
+  - remote shell context is still detected
+  - long-running remote command still reconciles after `F2 -> Ctrl+C -> F2`
+- remote awaiting-input command over `ssh`
+  - `awaiting_input` still works
+  - `KEYS>` still works
+  - agent `keys` proposal still works
+- remote fullscreen app over `ssh`
+  - `interactive_fullscreen` still works
+  - `KEYS>` still works
+  - no bogus local interrupt behavior returns
+- `docker exec -it ... sh`
+  - context transition still settles
+  - prompt detection does not regress into `lost`
+- nested local subshell such as `bash`
+  - local prompt still stabilizes
+  - tracked commands still complete normally
 
 ### 1. Introduce First-Class Command Executions
 Every shell command should create a tracked execution record.
@@ -243,6 +322,112 @@ But heuristics should only help with:
 They should not be required for correctness.
 The live shell tail and explicit `F2` flow are the correctness path.
 
+### 8.1 Immediate Next Slice
+The next practical slice after prompt-return reconciliation is:
+- classify `awaiting_input` conservatively from live shell tail evidence
+- keep `running` for commands that are clearly progressing
+- reserve `lost` for cases where Shuttle truly cannot reconcile the command confidently, rather than treating quiet commands as lost by default
+
+This should improve:
+- password and confirmation prompts
+- `read` / `input()` / "press any key" flows
+- agent check-ins that currently say "still running" when the shell is actually waiting for input
+
+### 8.2 Current In-Progress Hardening
+The next execution-monitor hardening pass should focus on:
+- improving confidence around quiet-but-still-valid long-running commands so they do not drift toward `lost`
+- distinguishing "shell returned to prompt" from "prompt-like output happened inside an app or script"
+- reducing duplicate or stale recovery messaging when the agent is already operating against a live ambiguous execution
+- refining when active ambiguous states should trigger a `keys` proposal versus plain recovery guidance
+
+### 9. Model Shell Connectivity as Capability Tiers
+Shuttle should not assume every shell has the same observability.
+
+This is especially important once the user is inside:
+- an interactive remote SSH session
+- a shell with a heavily customized multi-line prompt
+- a non-Linux remote system
+- a shell where we cannot install hooks or helpers
+
+Instead of pretending one strategy is universal, Shuttle should classify the current shell session by capability.
+
+Recommended capability tiers:
+
+#### Tier A. `local_managed`
+Shuttle owns the local tmux pane and injects commands directly into the local shell.
+
+Available signals:
+- sentinel begin/end markers
+- tmux pane metadata
+- live shell tail
+- prompt/context refresh
+- explicit local interrupt/handoff events
+
+This is the strongest mode and should provide the best execution guarantees.
+
+#### Tier B. `stream_observed`
+Shuttle can observe the live pane output stream closely enough to detect terminal behavior, not just visible text.
+
+Available signals:
+- alternate-screen transitions
+- fullscreen redraw behavior
+- mouse-mode or cursor-mode changes
+- shell-tail changes
+
+Why this matters:
+- it catches aliases, functions, and wrappers that eventually launch fullscreen apps
+- it works for remote shells because the remote program still emits terminal control behavior into the local pane
+- it is a better source of truth for fullscreen-app detection than a command-name list
+
+Important constraint:
+- this requires tmux-side pane stream observation, not just periodic capture of cooked pane text
+
+#### Tier C. `text_observed`
+Shuttle can see terminal output and prompt-like returns, but cannot rely on shell hooks, pane-stream parsing, or remote helpers.
+
+Available signals:
+- terminal stream text
+- best-effort prompt recognition
+- explicit user handoff
+- shell-tail changes
+
+Unavailable or untrusted signals:
+- remote tmux or remote process metadata
+- shell hooks
+- platform-specific assumptions about Linux tools
+
+This tier should remain usable, but Shuttle must treat completion and interruption as lower-confidence inferences.
+
+#### Tier D. `hook_integrated`
+Shuttle has shell-aware hooks inside the current shell session, for example prompt or command lifecycle hooks.
+
+Available signals:
+- explicit preexec/precmd-style command lifecycle events
+- prompt/context changes
+- terminal stream text
+
+This is likely the best long-term answer for local shells, but it requires shell-specific integration.
+
+#### Tier E. `remote_enhanced`
+Shuttle successfully bootstrapped a temporary remote helper or session integration for the current remote shell.
+
+Important constraints:
+- it must not require remote tmux
+- it must not assume Linux-only tooling
+- it must degrade safely if the remote host does not support it
+
+Available signals may include:
+- explicit remote command lifecycle markers
+- session-aware pwd/user/host reporting
+- stronger remote execution reconciliation
+
+This tier should be optional enhancement, not a requirement for basic SSH support.
+
+Design implication:
+- when Shuttle launches a command, it should use the strongest mechanism available for the current capability tier
+- when the user drops into an opaque interactive remote shell, Shuttle should downgrade gracefully to `text_observed`
+- prompt parsing should remain fallback logic, not the core execution contract
+
 ## Proposed Implementation Sequence
 
 ### Phase 1. Execution State Machine
@@ -272,10 +457,141 @@ The live shell tail and explicit `F2` flow are the correctness path.
 - rate-limited progress turns
 - allow the agent to wait, summarize, revise, or request user input
 
+### Phase 5a. Input-Wait Classification
+- add conservative `awaiting_input` classification from shell-tail evidence
+- surface that state in the active command card
+- feed that state into agent check-ins so the agent can say "waiting for shell input" instead of "still running"
+- do not classify a quiet long-running command as `lost` just because it is silent
+
+### Phase 5b. Fullscreen and Alternate-Screen Detection
+- add a pane-stream observer for active executions in `local_managed` mode
+- detect fullscreen terminal apps from terminal behavior rather than command names
+- introduce a stronger interactive/fullscreen state so commands like `btop`, `vim`, and wrapped aliases do not get reconciled from weak prompt heuristics
+- keep command-name classification only as a hint, not as the correctness path
+- use this state to decide when Shuttle should recommend or eventually auto-enter take-control mode
+
+This should improve:
+- fullscreen TUIs launched directly or through aliases/functions
+- remote fullscreen apps inside SSH sessions
+- correctness when there is little or no line-oriented shell output
+
+### Phase 5c. Agent Recovery Snapshot
+- when control flow goes ambiguous because the shell or a fullscreen app unexpectedly takes over, capture a richer recovery snapshot instead of relying on a tiny live tail
+- snapshot inputs should include:
+  - a larger terminal page dump, for example the last 100 to 200 visible lines
+  - current execution state and confidence
+  - shell context, if available
+  - fullscreen and alternate-screen indicators
+  - local-vs-remote capability hints
+- use that recovery snapshot as an explicit agent check-in path for ambiguous states, not as the default on every command
+- let the agent use it to answer:
+  - is the shell waiting for input
+  - is a fullscreen app active
+  - did control likely return to a prompt
+  - is tracking confidence low enough that Shuttle should mark the execution `lost`
+
+Status:
+- implemented in first form
+- ambiguous execution states now feed a dedicated recovery snapshot into agent context
+- agent check-ins are state-aware for `awaiting_input`, `interactive_fullscreen`, and `lost`
+- remaining work is to make monitor-side classification more confident so fewer cases fall back to low-confidence recovery
+
 ### Phase 6. Runtime Durability
 - align with the runtime-management design
 - keep tracked executions recoverable across Shuttle restarts
 - treat remote SSH sessions as resumable state where possible
+
+## Manual Regression Checklist
+Use this checklist after meaningful execution-monitor changes. It reflects the real bug history on this branch and should be kept current.
+
+### 1. Local Long-Running Command
+Run:
+
+```bash
+bash -lc 'for i in {1..10}; do echo "$i"; sleep 1; done'
+```
+
+Expect:
+- active command card shows normal running state
+- no false cancel
+- command completes with visible output
+
+### 2. Local Awaiting Input
+Run:
+
+```bash
+bash -lc 'sleep 3; read -n 1 -s -r -p "Press any key to continue..." _; echo ready'
+```
+
+Expect:
+- state changes from running to `awaiting_input`
+- `F2` works
+- `S` / `KEYS>` works
+- after input, command completes cleanly
+
+### 3. Local Fullscreen App
+Run:
+
+```bash
+nano ui-scratchpad.md
+```
+
+Expect:
+- state becomes `interactive_fullscreen`
+- no live tail rendering while fullscreen is active
+- `S` / `KEYS>` works
+- `F2` handoff works
+
+### 4. Remote Awaiting Input
+SSH to a remote host and run:
+
+```bash
+bash -lc 'sleep 3; read -n 1 -s -r -p "Press any key to continue..." _; echo ready'
+```
+
+Expect:
+- remote prompt remains marked remote
+- `awaiting_input` is detected
+- `S` / `KEYS>` works without needing an `F2/F2` round trip
+- no bogus local interrupt path appears
+
+### 5. Remote Fullscreen App
+SSH to a remote host and run:
+
+```bash
+nano test.txt
+```
+
+or
+
+```bash
+less prd.md
+```
+
+Expect:
+- `interactive_fullscreen`
+- no local kill affordance
+- `S` / `KEYS>` works
+- `F2` handoff works
+- no false cancel while the app still owns the pane
+
+### 6. Handoff Cancel / Reconcile
+Local or remote, start a long-running command:
+
+```bash
+bash -lc 'for i in {1..30}; do echo "$i"; sleep 1; done'
+```
+
+Then:
+- `F2`
+- interrupt or exit from the shell side
+- `F2`
+
+Expect:
+- active command clears
+- no stale `handoff active`
+- no duplicate “not confirmed local” spam
+- no ghost “still running” message after the shell prompt returns
 
 ## Recommendation
 Do not keep tuning the current synchronous command-wait loop.
@@ -285,12 +601,14 @@ The next meaningful work should be:
 2. timeout redesign
 3. active command UI
 4. agent check-ins
+5. pane-stream/fullscreen detection as the next execution-monitor slice
 
 That will reduce the current whack-a-mole around:
 - `context canceled`
 - long command timeouts
 - interactive prompts
 - shell tail confusion
+- fullscreen TUI false completions
 
 ## References
 - Warp Full Terminal Use: https://docs.warp.dev/agent-platform/capabilities/full-terminal-use

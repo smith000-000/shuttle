@@ -8,11 +8,14 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
+
+	"aiterm/internal/logging"
 )
 
 var ErrNotInstalled = errors.New("tmux not found in PATH")
 
-const paneFormat = "#{pane_id}\t#{pane_title}\t#{pane_active}\t#{pane_current_command}\t#{pane_pid}\t#{session_name}\t#{window_id}\t#{pane_top}\t#{pane_left}\t#{pane_height}\t#{pane_width}"
+const paneFormat = "#{pane_id}\t#{pane_title}\t#{pane_active}\t#{pane_current_command}\t#{pane_pid}\t#{session_name}\t#{window_id}\t#{pane_top}\t#{pane_left}\t#{pane_height}\t#{pane_width}\t#{alternate_on}\t#{pane_tty}"
 
 type Pane struct {
 	ID             string
@@ -26,6 +29,8 @@ type Pane struct {
 	Left           int
 	Height         int
 	Width          int
+	AlternateOn    bool
+	TTY            string
 }
 
 type Client struct {
@@ -81,6 +86,17 @@ func (c *Client) ListPanes(ctx context.Context, target string) ([]Pane, error) {
 	return parsePanesOutput(output)
 }
 
+func (c *Client) PaneInfo(ctx context.Context, target string) (Pane, error) {
+	panes, err := c.ListPanes(ctx, target)
+	if err != nil {
+		return Pane{}, err
+	}
+	if len(panes) == 0 {
+		return Pane{}, fmt.Errorf("no tmux pane found for target %q", target)
+	}
+	return panes[0], nil
+}
+
 func (c *Client) SendKeys(ctx context.Context, target string, text string, enter bool) error {
 	args := []string{"send-keys", "-t", target, text}
 	if enter {
@@ -91,7 +107,36 @@ func (c *Client) SendKeys(ctx context.Context, target string, text string, enter
 	return err
 }
 
+func (c *Client) SendLiteralKeys(ctx context.Context, target string, text string) error {
+	args := []string{"send-keys", "-l", "-t", target, text}
+	_, err := c.run(ctx, args...)
+	return err
+}
+
+func (c *Client) InterruptForegroundProcess(ctx context.Context, target string) error {
+	pane, err := c.PaneInfo(ctx, target)
+	if err != nil {
+		return err
+	}
+	pgid, err := foregroundProcessGroup(ctx, pane.PID)
+	if err != nil {
+		return err
+	}
+	if pgid <= 0 {
+		return fmt.Errorf("invalid foreground process group %d", pgid)
+	}
+	return signalProcessGroup(ctx, pgid)
+}
+
 func (c *Client) CapturePane(ctx context.Context, target string, startLine int) (string, error) {
+	return c.capturePane(ctx, target, startLine, false)
+}
+
+func (c *Client) CapturePaneEscaped(ctx context.Context, target string, startLine int) (string, error) {
+	return c.capturePane(ctx, target, startLine, true)
+}
+
+func (c *Client) capturePane(ctx context.Context, target string, startLine int, escaped bool) (string, error) {
 	if len(target) == 0 || target[0] != '%' {
 		return "", fmt.Errorf("invalid pane target %q", target)
 	}
@@ -100,7 +145,11 @@ func (c *Client) CapturePane(ctx context.Context, target string, startLine int) 
 		return "", fmt.Errorf("invalid pane target %q", target)
 	}
 
-	output, err := c.run(ctx, "capture-pane", "-p", "-t", target, "-S", strconv.Itoa(startLine))
+	args := []string{"capture-pane", "-p", "-t", target, "-S", strconv.Itoa(startLine)}
+	if escaped {
+		args = append(args, "-e")
+	}
+	output, err := c.run(ctx, args...)
 	if err != nil {
 		return "", err
 	}
@@ -120,23 +169,53 @@ func (c *Client) BindNoPrefixKey(ctx context.Context, key string, command ...str
 	return err
 }
 
+func (c *Client) SetGlobalOption(ctx context.Context, name string, value string) error {
+	_, err := c.run(ctx, "set-option", "-g", name, value)
+	return err
+}
+
 func (c *Client) run(ctx context.Context, args ...string) (string, error) {
+	startedAt := time.Now()
 	commandArgs := make([]string, 0, len(args)+2)
 	if c.socketName != "" {
 		commandArgs = append(commandArgs, "-L", c.socketName)
 	}
 	commandArgs = append(commandArgs, args...)
 
+	logging.Trace(
+		"tmux.run.start",
+		"socket", c.socketName,
+		"args", strings.Join(args, " "),
+	)
+
 	command := exec.CommandContext(ctx, c.binary, commandArgs...)
 	output, err := command.CombinedOutput()
 	trimmed := strings.TrimSpace(string(output))
 	if err != nil {
+		logging.TraceError(
+			"tmux.run.error",
+			err,
+			"socket", c.socketName,
+			"args", strings.Join(args, " "),
+			"duration_ms", time.Since(startedAt).Milliseconds(),
+			"output_preview", logging.Preview(trimmed, 600),
+			"output_len", len(trimmed),
+		)
 		if trimmed == "" {
 			return "", fmt.Errorf("tmux %s: %w", strings.Join(args, " "), err)
 		}
 
 		return "", fmt.Errorf("tmux %s: %w: %s", strings.Join(args, " "), err, trimmed)
 	}
+
+	logging.Trace(
+		"tmux.run.complete",
+		"socket", c.socketName,
+		"args", strings.Join(args, " "),
+		"duration_ms", time.Since(startedAt).Milliseconds(),
+		"output_preview", logging.Preview(trimmed, 600),
+		"output_len", len(trimmed),
+	)
 
 	return trimmed, nil
 }
@@ -151,7 +230,7 @@ func parsePanesOutput(output string) ([]Pane, error) {
 
 	for _, line := range lines {
 		fields := strings.Split(line, "\t")
-		if len(fields) != 11 {
+		if len(fields) != 13 {
 			return nil, fmt.Errorf("unexpected pane field count %d in %q", len(fields), line)
 		}
 
@@ -204,7 +283,42 @@ func parsePaneFields(fields []string) (Pane, error) {
 		Left:           left,
 		Height:         height,
 		Width:          width,
+		AlternateOn:    fields[11] == "1",
+		TTY:            fields[12],
 	}, nil
+}
+
+func foregroundProcessGroup(ctx context.Context, pid int) (int, error) {
+	if pid <= 0 {
+		return 0, fmt.Errorf("invalid pane pid %d", pid)
+	}
+	command := exec.CommandContext(ctx, "ps", "-o", "tpgid=", "-p", strconv.Itoa(pid))
+	output, err := command.CombinedOutput()
+	trimmed := strings.TrimSpace(string(output))
+	if err != nil {
+		if trimmed == "" {
+			return 0, fmt.Errorf("ps tpgid for pid %d: %w", pid, err)
+		}
+		return 0, fmt.Errorf("ps tpgid for pid %d: %w: %s", pid, err, trimmed)
+	}
+	pgid, err := strconv.Atoi(trimmed)
+	if err != nil {
+		return 0, fmt.Errorf("parse foreground process group %q: %w", trimmed, err)
+	}
+	return pgid, nil
+}
+
+func signalProcessGroup(ctx context.Context, pgid int) error {
+	command := exec.CommandContext(ctx, "kill", "-INT", fmt.Sprintf("-%d", pgid))
+	output, err := command.CombinedOutput()
+	trimmed := strings.TrimSpace(string(output))
+	if err != nil {
+		if trimmed == "" {
+			return fmt.Errorf("kill process group %d: %w", pgid, err)
+		}
+		return fmt.Errorf("kill process group %d: %w: %s", pgid, err, trimmed)
+	}
+	return nil
 }
 
 func environmentArgs(env map[string]string) []string {

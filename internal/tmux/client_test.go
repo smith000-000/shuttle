@@ -7,8 +7,8 @@ import (
 
 func TestParsePanesOutput(t *testing.T) {
 	output := strings.Join([]string{
-		"%0\ttop-shell\t1\tzsh\t123\tshuttle\t@1\t0\t0\t30\t200",
-		"%1\tbottom-app\t0\tshuttle\t456\tshuttle\t@1\t31\t0\t12\t200",
+		"%0\ttop-shell\t1\tzsh\t123\tshuttle\t@1\t0\t0\t30\t200\t0\t/dev/pts/1",
+		"%1\tbottom-app\t0\tshuttle\t456\tshuttle\t@1\t31\t0\t12\t200\t1\t/dev/pts/2",
 	}, "\n")
 
 	panes, err := parsePanesOutput(output)
@@ -26,6 +26,12 @@ func TestParsePanesOutput(t *testing.T) {
 
 	if panes[1].Top != 31 || panes[1].PID != 456 {
 		t.Fatalf("unexpected bottom pane: %#v", panes[1])
+	}
+	if !panes[1].AlternateOn {
+		t.Fatalf("expected bottom pane alternate screen to be parsed, got %#v", panes[1])
+	}
+	if panes[1].TTY != "/dev/pts/2" {
+		t.Fatalf("expected pane tty to be parsed, got %#v", panes[1])
 	}
 }
 

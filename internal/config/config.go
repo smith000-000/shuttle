@@ -3,15 +3,25 @@ package config
 import (
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
 const (
 	defaultSessionName = "shuttle"
-	defaultStateDir    = ".shuttle"
 	defaultLogName     = "shuttle.log"
+	defaultTraceName   = "trace.log"
+)
+
+type TraceMode string
+
+const (
+	TraceModeOff       TraceMode = "off"
+	TraceModeSafe      TraceMode = "safe"
+	TraceModeSensitive TraceMode = "sensitive"
 )
 
 type Config struct {
@@ -19,7 +29,12 @@ type Config struct {
 	StartDir             string
 	TmuxSocket           string
 	StateDir             string
+	RuntimeDir           string
 	LogPath              string
+	Trace                bool
+	TraceMode            TraceMode
+	TraceConsent         bool
+	TracePath            string
 	AgentPrompt          string
 	Inject               string
 	Track                string
@@ -39,13 +54,32 @@ func Parse(args []string) (Config, error) {
 		return Config{}, err
 	}
 
-	stateDir := envOrDefault("SHUTTLE_STATE_DIR", filepath.Join(workingDir, defaultStateDir))
+	stateDir, err := defaultStateDir()
+	if err != nil {
+		return Config{}, err
+	}
+	if override := os.Getenv("SHUTTLE_STATE_DIR"); override != "" {
+		stateDir = override
+	}
+	runtimeDir, err := defaultRuntimeDir()
+	if err != nil {
+		return Config{}, err
+	}
+	if override := os.Getenv("SHUTTLE_RUNTIME_DIR"); override != "" {
+		runtimeDir = override
+	}
 	sessionName := envOrDefault("SHUTTLE_SESSION", defaultSessionName)
 	socketName := os.Getenv("SHUTTLE_TMUX_SOCKET")
 	providerType := envOrDefault("SHUTTLE_PROVIDER", "mock")
 	providerAuthMethod := envOrDefault("SHUTTLE_AUTH", "auto")
 	providerModel := os.Getenv("SHUTTLE_MODEL")
 	providerBaseURL := os.Getenv("SHUTTLE_BASE_URL")
+	traceMode, err := resolveTraceMode(os.Getenv("SHUTTLE_TRACE"), os.Getenv("SHUTTLE_TRACE_MODE"))
+	if err != nil {
+		return Config{}, err
+	}
+	tracePath := os.Getenv("SHUTTLE_TRACE_PATH")
+	traceConsent := envBool("SHUTTLE_TRACE_CONSENT")
 
 	fs := flag.NewFlagSet("shuttle", flag.ContinueOnError)
 
@@ -54,6 +88,11 @@ func Parse(args []string) (Config, error) {
 	fs.StringVar(&cfg.StartDir, "dir", workingDir, "working directory for new panes")
 	fs.StringVar(&cfg.TmuxSocket, "socket", socketName, "tmux socket name for an isolated server")
 	fs.StringVar(&cfg.StateDir, "state-dir", stateDir, "state directory for logs and future local state")
+	fs.StringVar(&cfg.RuntimeDir, "runtime-dir", runtimeDir, "runtime directory for staged shell scripts and semantic shell state")
+	fs.BoolVar(&cfg.Trace, "trace", traceMode != TraceModeOff, "enable safe execution tracing")
+	fs.StringVar((*string)(&cfg.TraceMode), "trace-mode", string(traceMode), "trace mode: off, safe, or sensitive")
+	fs.BoolVar(&cfg.TraceConsent, "trace-consent", traceConsent, "acknowledge that sensitive trace may capture secrets")
+	fs.StringVar(&cfg.TracePath, "trace-path", tracePath, "path for verbose trace output")
 	fs.StringVar(&cfg.AgentPrompt, "agent", "", "submit a single agent prompt and print the structured response")
 	fs.StringVar(&cfg.Inject, "inject", "", "inject a shell command into the top pane after bootstrap")
 	fs.StringVar(&cfg.Track, "track", "", "inject a tracked shell command into the top pane and wait for its result")
@@ -83,7 +122,34 @@ func Parse(args []string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.StateDir = stateDirAbs
+	runtimeDirAbs, err := filepath.Abs(cfg.RuntimeDir)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.RuntimeDir = runtimeDirAbs
 	cfg.LogPath = filepath.Join(cfg.StateDir, defaultLogName)
+	if strings.TrimSpace(cfg.TracePath) == "" {
+		cfg.TracePath = filepath.Join(cfg.StateDir, defaultTraceName)
+	} else {
+		tracePathAbs, err := filepath.Abs(cfg.TracePath)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.TracePath = tracePathAbs
+	}
+	if cfg.TraceMode != TraceModeOff {
+		cfg.Trace = true
+	}
+	if cfg.Trace {
+		if strings.TrimSpace(string(cfg.TraceMode)) == "" || cfg.TraceMode == TraceModeOff {
+			cfg.TraceMode = TraceModeSafe
+		}
+	} else {
+		cfg.TraceMode = TraceModeOff
+	}
+	if !isValidTraceMode(cfg.TraceMode) {
+		return Config{}, errors.New("trace mode must be one of: off, safe, sensitive")
+	}
 	cfg.ProviderType = normalizeProviderType(cfg.ProviderType)
 	authMethod, err := normalizeProviderAuthMethod(cfg.ProviderAuthMethod)
 	if err != nil {
@@ -103,6 +169,42 @@ func envOrDefault(key string, fallback string) string {
 	return fallback
 }
 
+func envBool(key string) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return false
+	}
+
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false
+	}
+
+	return parsed
+}
+
+func defaultStateDir() (string, error) {
+	if value := strings.TrimSpace(os.Getenv("XDG_STATE_HOME")); value != "" {
+		return filepath.Join(value, "shuttle"), nil
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(homeDir, ".local", "state", "shuttle"), nil
+}
+
+func defaultRuntimeDir() (string, error) {
+	if value := strings.TrimSpace(os.Getenv("XDG_RUNTIME_DIR")); value != "" {
+		return filepath.Join(value, "shuttle"), nil
+	}
+	stateDir, err := defaultStateDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(stateDir, "runtime"), nil
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
 		if value != "" {
@@ -111,6 +213,37 @@ func firstNonEmpty(values ...string) string {
 	}
 
 	return ""
+}
+
+func resolveTraceMode(traceValue string, traceModeValue string) (TraceMode, error) {
+	if mode := strings.TrimSpace(traceModeValue); mode != "" {
+		resolved := TraceMode(strings.ToLower(mode))
+		if !isValidTraceMode(resolved) {
+			return TraceModeOff, fmt.Errorf("trace mode must be one of: off, safe, sensitive")
+		}
+		return resolved, nil
+	}
+
+	value := strings.TrimSpace(strings.ToLower(traceValue))
+	switch value {
+	case "", "0", "false", "off", "none":
+		return TraceModeOff, nil
+	case "1", "true", "safe":
+		return TraceModeSafe, nil
+	case "sensitive":
+		return TraceModeSensitive, nil
+	default:
+		return TraceModeOff, fmt.Errorf("SHUTTLE_TRACE must be boolean, off, safe, or sensitive")
+	}
+}
+
+func isValidTraceMode(mode TraceMode) bool {
+	switch mode {
+	case TraceModeOff, TraceModeSafe, TraceModeSensitive:
+		return true
+	default:
+		return false
+	}
 }
 
 func normalizeProviderType(value string) string {

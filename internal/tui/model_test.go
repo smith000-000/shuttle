@@ -61,12 +61,32 @@ func TestAgentModeSubmissionAddsPlaceholderResponse(t *testing.T) {
 func TestSpaceKeyAddsSpaceToComposer(t *testing.T) {
 	model := NewModel(fakeWorkspace(), nil)
 	model.input = "ls"
+	model.cursor = len([]rune(model.input))
 
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeySpace})
 	next := updated.(Model)
 
 	if next.input != "ls " {
 		t.Fatalf("expected input %q, got %q", "ls ", next.input)
+	}
+}
+
+func TestLeftRightMovesComposerCursor(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.setInput("abcd")
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'X'}})
+	model = updated.(Model)
+
+	if model.input != "abXcd" {
+		t.Fatalf("expected insertion at cursor, got %q", model.input)
+	}
+	if model.cursor != 3 {
+		t.Fatalf("expected cursor after inserted rune, got %d", model.cursor)
 	}
 }
 
@@ -79,6 +99,241 @@ func TestEscapeClearsComposer(t *testing.T) {
 
 	if next.input != "" {
 		t.Fatalf("expected cleared input, got %q", next.input)
+	}
+}
+
+func TestEscapeCancelsBusyAgentTurn(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	canceled := false
+	model.busy = true
+	model.inFlightCancel = func() {
+		canceled = true
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	next := updated.(Model)
+
+	if !canceled {
+		t.Fatal("expected escape to cancel in-flight work")
+	}
+	if next.busy {
+		t.Fatal("expected busy state to clear after escape interrupt")
+	}
+}
+
+func TestUppercaseEEntersProposalCommandEditMode(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.pendingProposal = &controller.ProposalPayload{
+		Kind:        controller.ProposalCommand,
+		Command:     "grep -R foo .",
+		Description: "Search current tree.",
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
+	next := updated.(Model)
+
+	if next.editingProposal == nil {
+		t.Fatal("expected uppercase E to enter proposal edit mode")
+	}
+	if next.input != "grep -R foo ." {
+		t.Fatalf("expected proposal command in composer, got %q", next.input)
+	}
+}
+
+func TestLowercaseKDuringActiveExecutionDoesNotInterrupt(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.mode = AgentMode
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 30",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+	}
+	interrupted := false
+	model.inFlightCancel = func() {
+		interrupted = true
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	next := updated.(Model)
+
+	if interrupted {
+		t.Fatal("expected lowercase k to remain normal input")
+	}
+	if next.input != "k" {
+		t.Fatalf("expected input %q, got %q", "k", next.input)
+	}
+}
+
+func TestUppercaseNRejectsProposal(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.pendingProposal = &controller.ProposalPayload{
+		Kind:        controller.ProposalCommand,
+		Command:     "sleep 5",
+		Description: "Run a short sleep.",
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'N'}})
+	next := updated.(Model)
+
+	if next.pendingProposal != nil {
+		t.Fatalf("expected proposal to be dismissed, got %#v", next.pendingProposal)
+	}
+}
+
+func TestLowercaseYRunsPendingProposal(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.pendingProposal = &controller.ProposalPayload{
+		Kind:        controller.ProposalCommand,
+		Command:     "ls -lah",
+		Description: "Inspect files.",
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	next := updated.(Model)
+
+	if cmd == nil {
+		t.Fatal("expected proposal action command for lowercase y")
+	}
+	if !next.busy {
+		t.Fatal("expected model to enter busy state after lowercase y")
+	}
+}
+
+func TestComposerIsLockedWhileProposalCardIsActive(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.pendingProposal = &controller.ProposalPayload{
+		Kind:        controller.ProposalCommand,
+		Command:     "ls -lah",
+		Description: "Inspect files.",
+	}
+	model.setInput("draft")
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	next := updated.(Model)
+
+	if next.input != "draft" {
+		t.Fatalf("expected composer input to remain locked, got %q", next.input)
+	}
+}
+
+func TestAwaitingInputAllowsSendKeysMode(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   `bash -lc 'read -n 1 -s -r -p "Press any key" _'`,
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now(),
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	next := updated.(Model)
+
+	if !next.sendingFullscreenKeys {
+		t.Fatal("expected send-keys mode to activate for awaiting_input")
+	}
+}
+
+func TestSendKeysModeBypassesComposerLockOnEnter(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.sendingFullscreenKeys = true
+	model.pendingApproval = &controller.ApprovalRequest{
+		ID:      "approval-1",
+		Kind:    controller.ApprovalCommand,
+		Title:   "Approve",
+		Summary: "Run interactive command",
+		Command: "read",
+	}
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "read",
+		Origin:    controller.CommandOriginAgentApproval,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now(),
+	}
+	model.setInput("hello")
+	model.takeControl = takeControlConfig{SocketName: "sock", SessionName: "sess", TopPaneID: "%0", DetachKey: TakeControlKey}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(Model)
+
+	if cmd == nil {
+		t.Fatal("expected send-keys command even while composer is otherwise locked")
+	}
+	if next.sendingFullscreenKeys {
+		t.Fatal("expected send-keys mode to submit and exit")
+	}
+}
+
+func TestAgentSubmitAllowedDuringActiveExecution(t *testing.T) {
+	ctrl := &fakeController{
+		agentEvents: []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventAgentMessage,
+				Payload: controller.TextPayload{Text: "Press F2 or use KEYS>."},
+			},
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.mode = AgentMode
+	model.busy = true
+	model.showShellTail = true
+	model.liveShellTail = "Press any key"
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "read",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now(),
+	}
+	model.setInput("what should I do now?")
+
+	updated, cmd := model.submit()
+	next := updated.(Model)
+
+	if cmd == nil {
+		t.Fatal("expected agent submit command during active execution")
+	}
+	if next.activeExecution == nil || next.activeExecution.ID != "cmd-1" {
+		t.Fatalf("expected active execution to remain visible, got %#v", next.activeExecution)
+	}
+	if !next.showShellTail {
+		t.Fatal("expected shell tail visibility to be preserved during recovery prompt")
+	}
+}
+
+func TestRemoteManualInterruptNoticeIsNotDuplicated(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("sock", "sess", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-remote",
+		Command:   "sleep 60",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+		ShellContextAfter: &shell.PromptContext{
+			User:         "openclaw",
+			Host:         "openclaw",
+			Directory:    "~",
+			PromptSymbol: "$",
+			Remote:       true,
+		},
+	}
+
+	initial := len(model.entries)
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(Model)
+	afterFirst := len(model.entries)
+	if afterFirst != initial+1 {
+		t.Fatalf("expected one interrupt notice, entries=%d -> %d", initial, afterFirst)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(Model)
+	if len(model.entries) != afterFirst {
+		t.Fatalf("expected duplicate interrupt notice to be suppressed, got %d entries", len(model.entries))
 	}
 }
 
@@ -108,6 +363,363 @@ func TestF2CancelsInFlightWorkAndStartsTakeControl(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("expected take-control command")
+	}
+}
+
+func TestF2DoesNotCancelActiveShellExecution(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	canceled := false
+	model.busy = true
+	model.directShellPending = true
+	model.showShellTail = true
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 15",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+	}
+	model.inFlightCancel = func() {
+		canceled = true
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF2})
+	next := updated.(Model)
+
+	if canceled {
+		t.Fatal("expected active shell execution to keep running during handoff")
+	}
+	if next.activeExecution == nil || next.activeExecution.State != controller.CommandExecutionHandoffActive {
+		t.Fatalf("expected handoff-active execution, got %#v", next.activeExecution)
+	}
+	if !next.directShellPending {
+		t.Fatal("expected direct shell pending to remain set")
+	}
+}
+
+func TestShellInterruptClearsControllerActiveExecution(t *testing.T) {
+	ctrl := &fakeController{
+		activeExecution: &controller.CommandExecution{
+			ID:        "cmd-1",
+			Command:   "sleep 60",
+			Origin:    controller.CommandOriginUserShell,
+			State:     controller.CommandExecutionRunning,
+			StartedAt: time.Now(),
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.activeExecution = ctrl.activeExecution
+
+	updated, _ := model.Update(shellInterruptMsg{})
+	next := updated.(Model)
+
+	if ctrl.activeExecution != nil {
+		t.Fatal("expected controller active execution to clear")
+	}
+	if next.activeExecution != nil {
+		t.Fatal("expected model active execution to clear")
+	}
+	if next.showShellTail {
+		t.Fatal("expected shell tail to hide after interrupt")
+	}
+	last := next.entries[len(next.entries)-1]
+	if last.Title != "result" || !strings.Contains(last.Body, "status=canceled") {
+		t.Fatalf("expected canceled result entry, got %#v", last)
+	}
+}
+
+func TestInterruptInFlightRefusesRemoteExecution(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:      "cmd-1",
+		Command: "ssh host 'btop'",
+		Origin:  controller.CommandOriginUserShell,
+		State:   controller.CommandExecutionInteractiveFullscreen,
+		ShellContextBefore: &shell.PromptContext{
+			User:         "root",
+			Host:         "remote",
+			Directory:    "/root",
+			PromptSymbol: "#",
+			Remote:       true,
+			RawLine:      "root@remote:~#",
+		},
+		StartedAt: time.Now(),
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	next := updated.(Model)
+
+	if cmd != nil {
+		t.Fatal("expected no interrupt command for remote execution")
+	}
+	last := next.entries[len(next.entries)-1]
+	if last.Title != "system" || !strings.Contains(last.Body, "Fullscreen app is still active") {
+		t.Fatalf("expected manual interrupt notice, got %#v", last)
+	}
+}
+
+func TestRenderShellTailHiddenForInteractiveFullscreen(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.showShellTail = true
+	model.liveShellTail = "hidden tail"
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "btop",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionInteractiveFullscreen,
+		StartedAt: time.Now(),
+	}
+
+	if got := model.renderShellTail(80); got != "" {
+		t.Fatalf("expected fullscreen execution to hide tail, got %q", got)
+	}
+}
+
+func TestCanAttemptLocalInterruptPrefersCurrentRemoteShellContext(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.shellContext = shell.PromptContext{
+		User:         "openclaw",
+		Host:         "openclaw",
+		Directory:    "~",
+		PromptSymbol: "$",
+		Remote:       true,
+		RawLine:      "openclaw@openclaw ~ $",
+	}
+	model.activeExecution = &controller.CommandExecution{
+		ID:      "cmd-1",
+		Command: "nano SYSTEM_TWEAKS.md",
+		Origin:  controller.CommandOriginUserShell,
+		State:   controller.CommandExecutionInteractiveFullscreen,
+		ShellContextBefore: &shell.PromptContext{
+			User:         "jsmith",
+			Host:         "linuxdesktop",
+			Directory:    "/home/jsmith/source/repos/aiterm",
+			PromptSymbol: "%",
+			RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+		},
+	}
+
+	if model.canAttemptLocalInterrupt() {
+		t.Fatal("expected remote current shell context to suppress local interrupt")
+	}
+}
+
+func TestCanAttemptLocalInterruptRemoteEvidenceWinsOverStaleLocalContext(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.activeExecution = &controller.CommandExecution{
+		ID:      "cmd-1",
+		Command: "nano SYSTEM_TWEAKS.md",
+		Origin:  controller.CommandOriginUserShell,
+		State:   controller.CommandExecutionInteractiveFullscreen,
+		ShellContextBefore: &shell.PromptContext{
+			User:         "jsmith",
+			Host:         "linuxdesktop",
+			Directory:    "/home/jsmith/source/repos/aiterm",
+			PromptSymbol: "%",
+			RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+		},
+		ShellContextAfter: &shell.PromptContext{
+			User:         "openclaw",
+			Host:         "openclaw",
+			Directory:    "~",
+			PromptSymbol: "$",
+			Remote:       true,
+			RawLine:      "openclaw@openclaw ~ $",
+		},
+	}
+
+	if model.canAttemptLocalInterrupt() {
+		t.Fatal("expected remote execution context to suppress local interrupt")
+	}
+}
+
+func TestActiveExecutionCardShowsFullscreenKeyHintsWithoutKill(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.shellContext = shell.PromptContext{
+		User:         "jsmith",
+		Host:         "linuxdesktop",
+		Directory:    "/home/jsmith/source/repos/aiterm",
+		PromptSymbol: "%",
+		RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+	}
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "wrapped-btop",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionInteractiveFullscreen,
+		StartedAt: time.Now(),
+	}
+
+	card := model.renderActiveExecutionCard(100)
+	if !strings.Contains(card, "Fullscreen terminal app detected.") {
+		t.Fatalf("expected fullscreen notice, got %q", card)
+	}
+	if !strings.Contains(card, "F2 take control  S send keys") {
+		t.Fatalf("expected fullscreen key hints, got %q", card)
+	}
+	if strings.Contains(card, "K attempt local interrupt") {
+		t.Fatalf("expected fullscreen card to suppress dangerous kill hint, got %q", card)
+	}
+}
+
+func TestSubmitShellCommandWhileFullscreenPromptsForConfirmation(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.mode = ShellMode
+	model.input = "ls"
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "nano file.txt",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionInteractiveFullscreen,
+		StartedAt: time.Now(),
+	}
+
+	updated, cmd := model.submit()
+	next := updated.(Model)
+
+	if cmd != nil {
+		t.Fatal("expected fullscreen submit to stop for confirmation")
+	}
+	if next.pendingFullscreen == nil || next.pendingFullscreen.Command != "ls" {
+		t.Fatalf("expected pending fullscreen confirmation, got %#v", next.pendingFullscreen)
+	}
+	if len(ctrl.shellCommands) != 0 {
+		t.Fatalf("expected no shell command dispatch before confirmation, got %#v", ctrl.shellCommands)
+	}
+}
+
+func TestFullscreenConfirmationYRunsShellCommand(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.pendingFullscreen = &fullscreenAction{
+		Kind:    fullscreenActionShellSubmit,
+		Command: "ls",
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	next := updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected confirmation to run shell command")
+	}
+
+	_ = controllerEventsFromCmd(t, cmd)
+	if len(ctrl.shellCommands) != 1 || ctrl.shellCommands[0] != "ls" {
+		t.Fatalf("expected confirmed shell command to run, got %#v", ctrl.shellCommands)
+	}
+	if next.pendingFullscreen != nil {
+		t.Fatalf("expected fullscreen confirmation to clear, got %#v", next.pendingFullscreen)
+	}
+}
+
+func TestSStartsFullscreenKeyMode(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "btop",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionInteractiveFullscreen,
+		StartedAt: time.Now(),
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	next := updated.(Model)
+
+	if !next.sendingFullscreenKeys {
+		t.Fatal("expected fullscreen key mode to start")
+	}
+}
+
+func TestSubmitFullscreenKeysBypassesShellCommandPath(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.sendingFullscreenKeys = true
+	model.input = "q"
+
+	updated, cmd := model.submit()
+	next := updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected fullscreen key send command")
+	}
+	if next.sendingFullscreenKeys {
+		t.Fatal("expected fullscreen key mode to clear after submit")
+	}
+	if len(ctrl.shellCommands) != 0 {
+		t.Fatalf("expected fullscreen keys to bypass shell submit, got %#v", ctrl.shellCommands)
+	}
+}
+
+func TestCarriageReturnRuneSubmitsFullscreenKeys(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.sendingFullscreenKeys = true
+	model.input = "hello"
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'\r'}})
+	next := updated.(Model)
+
+	if cmd == nil {
+		t.Fatal("expected carriage return rune to submit fullscreen keys")
+	}
+	if next.sendingFullscreenKeys {
+		t.Fatal("expected fullscreen key mode to clear after carriage return submit")
+	}
+}
+
+func TestEnterSubmitsFullscreenKeysWhileBusy(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.busy = true
+	model.sendingFullscreenKeys = true
+	model.input = "hello"
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(Model)
+
+	if cmd == nil {
+		t.Fatal("expected Enter to submit fullscreen keys while busy")
+	}
+	if next.sendingFullscreenKeys {
+		t.Fatal("expected fullscreen key mode to clear after busy Enter submit")
+	}
+}
+
+func TestFullscreenKeysSentMessageUpdatesActiveCardFeedback(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "nano foo.txt",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionInteractiveFullscreen,
+		StartedAt: time.Now(),
+	}
+
+	updated, _ := model.Update(fullscreenKeysSentMsg{keys: "hello"})
+	next := updated.(Model)
+
+	if next.lastFullscreenKeys != "hello" {
+		t.Fatalf("expected last fullscreen keys to be recorded, got %q", next.lastFullscreenKeys)
+	}
+	card := next.renderActiveExecutionCard(100)
+	if !strings.Contains(card, "last keys: hello") {
+		t.Fatalf("expected active execution card to show last keys, got %q", card)
+	}
+}
+
+func TestSyncActiveExecutionClearsFullscreenKeysWhenExecutionEnds(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.lastFullscreenKeys = "hello"
+	model.lastFullscreenKeysAt = time.Now()
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "nano foo.txt",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionInteractiveFullscreen,
+		StartedAt: time.Now(),
+	}
+
+	model.syncActiveExecution(nil)
+
+	if model.lastFullscreenKeys != "" {
+		t.Fatalf("expected fullscreen key preview to clear, got %q", model.lastFullscreenKeys)
 	}
 }
 
@@ -147,6 +759,139 @@ func TestControllerErrorIncludesShellTail(t *testing.T) {
 	}
 }
 
+func TestTakeControlFinishedRestartsTickingForActiveExecution(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{
+		activeExecution: &controller.CommandExecution{
+			ID:        "cmd-1",
+			Command:   "sleep 15",
+			Origin:    controller.CommandOriginUserShell,
+			State:     controller.CommandExecutionRunning,
+			StartedAt: time.Now(),
+		},
+	})
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 15",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionHandoffActive,
+		StartedAt: time.Now(),
+	}
+	model.handoffVisible = true
+	model.handoffPriorState = controller.CommandExecutionRunning
+
+	updated, cmd := model.Update(takeControlFinishedMsg{})
+	next := updated.(Model)
+
+	if next.activeExecution == nil {
+		t.Fatal("expected active execution to remain after detach")
+	}
+	if next.activeExecution.State != controller.CommandExecutionRunning {
+		t.Fatalf("expected handoff state to restore to running, got %#v", next.activeExecution)
+	}
+	if next.handoffVisible {
+		t.Fatal("expected handoff display state to clear after detach")
+	}
+	if cmd == nil {
+		t.Fatal("expected follow-up commands after detach")
+	}
+}
+
+func TestMaybeExecutionCheckInCmdChecksInForAgentOwnedExecution(t *testing.T) {
+	ctrl := &fakeController{
+		checkInEvents: []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventAgentMessage,
+				Payload: controller.TextPayload{Text: "Still running."},
+			},
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-agent",
+		Command:   "sleep 60",
+		Origin:    controller.CommandOriginAgentProposal,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now().Add(-15 * time.Second),
+	}
+
+	cmd := model.maybeExecutionCheckInCmd(time.Now())
+	if cmd == nil {
+		t.Fatal("expected check-in command for long-running agent execution")
+	}
+	if !model.checkInInFlight {
+		t.Fatal("expected check-in to be marked in flight")
+	}
+
+	raw := cmd()
+	msg, ok := raw.(activeExecutionCheckInMsg)
+	if !ok {
+		t.Fatalf("expected activeExecutionCheckInMsg, got %T", raw)
+	}
+	if msg.executionID != "cmd-agent" {
+		t.Fatalf("expected execution id cmd-agent, got %q", msg.executionID)
+	}
+	if ctrl.checkInCalls != 1 {
+		t.Fatalf("expected 1 check-in call, got %d", ctrl.checkInCalls)
+	}
+}
+
+func TestMaybeExecutionCheckInCmdSkipsUserShellExecution(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-user",
+		Command:   "sleep 60",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now().Add(-15 * time.Second),
+	}
+
+	cmd := model.maybeExecutionCheckInCmd(time.Now())
+	if cmd != nil {
+		t.Fatal("expected no check-in command for user-shell execution")
+	}
+	if ctrl.checkInCalls != 0 {
+		t.Fatalf("expected no check-in calls, got %d", ctrl.checkInCalls)
+	}
+}
+
+func TestActiveExecutionCheckInMsgAppendsTranscriptWithoutClearingExecution(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-agent",
+		Command:   "sleep 60",
+		Origin:    controller.CommandOriginAgentProposal,
+		State:     controller.CommandExecutionBackgroundMonitor,
+		StartedAt: time.Now().Add(-20 * time.Second),
+	}
+	model.checkInInFlight = true
+	initialEntries := len(model.entries)
+
+	updated, _ := model.Update(activeExecutionCheckInMsg{
+		executionID: "cmd-agent",
+		events: []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventAgentMessage,
+				Payload: controller.TextPayload{Text: "Still running."},
+			},
+		},
+	})
+	next := updated.(Model)
+
+	if next.activeExecution == nil {
+		t.Fatal("expected active execution to remain visible after check-in")
+	}
+	if next.checkInInFlight {
+		t.Fatal("expected check-in in-flight flag to clear")
+	}
+	if len(next.entries) != initialEntries+1 {
+		t.Fatalf("expected one new transcript entry, got %d", len(next.entries)-initialEntries)
+	}
+	if next.entries[len(next.entries)-1].Title != "agent" {
+		t.Fatalf("expected agent entry, got %q", next.entries[len(next.entries)-1].Title)
+	}
+}
+
 func TestAgentSubmitClearsShellTailPreview(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.mode = AgentMode
@@ -174,6 +919,24 @@ func TestShellSubmitEnablesShellTailPreview(t *testing.T) {
 
 	if !next.showShellTail {
 		t.Fatal("expected shell submit to enable shell tail")
+	}
+}
+
+func TestShellSubmitCreatesActiveExecution(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.input = "sleep 5"
+
+	updated, _ := model.submit()
+	next := updated.(Model)
+
+	if next.activeExecution == nil {
+		t.Fatal("expected active execution for shell submit")
+	}
+	if next.activeExecution.Command != "sleep 5" {
+		t.Fatalf("expected active command sleep 5, got %#v", next.activeExecution)
+	}
+	if next.activeExecution.Origin != controller.CommandOriginUserShell {
+		t.Fatalf("expected user-shell origin, got %#v", next.activeExecution)
 	}
 }
 
@@ -772,6 +1535,246 @@ func TestAgentProposalCanRunThroughController(t *testing.T) {
 	}
 }
 
+func TestProposalCanBeRejected(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.pendingProposal = &controller.ProposalPayload{
+		Kind:        controller.ProposalCommand,
+		Command:     "sleep 5",
+		Description: "Run a short sleep.",
+	}
+	initialEntries := len(model.entries)
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlN})
+	next := updated.(Model)
+
+	if next.pendingProposal != nil {
+		t.Fatalf("expected pending proposal to clear, got %#v", next.pendingProposal)
+	}
+	if len(next.entries) != initialEntries+1 {
+		t.Fatalf("expected a system entry after rejection, got %d entries", len(next.entries))
+	}
+	if next.entries[len(next.entries)-1].Body != "Proposal dismissed." {
+		t.Fatalf("unexpected dismissal entry: %#v", next.entries[len(next.entries)-1])
+	}
+}
+
+func TestAgentModeKeysProposalBecomesPendingProposal(t *testing.T) {
+	ctrl := &fakeController{
+		agentEvents: []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventUserMessage,
+				Payload: controller.TextPayload{Text: "go ahead and press enter"},
+			},
+			{
+				Kind:    controller.EventAgentMessage,
+				Payload: controller.TextPayload{Text: "Sending Enter to the active prompt to continue."},
+			},
+			{
+				Kind: controller.EventProposal,
+				Payload: controller.ProposalPayload{
+					Kind:        controller.ProposalKeys,
+					Keys:        "\n",
+					Description: "Send Enter to the active terminal.",
+				},
+			},
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.mode = AgentMode
+	model.input = "go ahead and press enter"
+
+	updated, cmd := model.submit()
+	next := updated.(Model)
+	msg := controllerEventsFromCmd(t, cmd)
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+
+	if next.pendingProposal == nil {
+		t.Fatal("expected pending keys proposal")
+	}
+	if next.pendingProposal.Kind != controller.ProposalKeys {
+		t.Fatalf("expected keys proposal kind, got %#v", next.pendingProposal)
+	}
+	if next.pendingProposal.Keys != "\n" {
+		t.Fatalf("expected enter key payload, got %#v", next.pendingProposal.Keys)
+	}
+}
+
+func TestPrimaryActionRunsEnterOnlyKeysProposal(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.takeControl = takeControlConfig{
+		SocketName:  "shuttle-test",
+		SessionName: "shuttle-test",
+		TopPaneID:   "%0",
+		DetachKey:   TakeControlKey,
+	}
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   `bash -lc 'read -n 1 -s -r -p "Press any key" _'`,
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now(),
+	}
+	model.pendingProposal = &controller.ProposalPayload{
+		Kind:        controller.ProposalKeys,
+		Keys:        "\n",
+		Description: "Send Enter to the active terminal.",
+	}
+
+	updated, cmd := model.primaryAction()
+	next := updated.(Model)
+
+	if cmd == nil {
+		t.Fatal("expected keys proposal primary action to return a send command")
+	}
+	if next.pendingProposal != nil {
+		t.Fatalf("expected pending proposal to clear after sending keys, got %#v", next.pendingProposal)
+	}
+}
+
+func TestProposalCanBeRefined(t *testing.T) {
+	ctrl := &fakeController{
+		agentEvents: []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventAgentMessage,
+				Payload: controller.TextPayload{Text: "Revised proposal ready."},
+			},
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.pendingProposal = &controller.ProposalPayload{
+		Kind:        controller.ProposalCommand,
+		Command:     "sleep 5",
+		Description: "Run a short sleep.",
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	next := updated.(Model)
+	if next.refiningProposal == nil {
+		t.Fatal("expected refining proposal state")
+	}
+	if next.mode != AgentMode {
+		t.Fatalf("expected agent mode during proposal refinement, got %s", next.mode)
+	}
+
+	next.input = "Make it just one second."
+	updated, cmd := next.submit()
+	next = updated.(Model)
+	msg := controllerEventsFromCmd(t, cmd)
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+
+	if len(ctrl.refinements) != 1 {
+		t.Fatalf("expected one proposal refinement call, got %d", len(ctrl.refinements))
+	}
+	if ctrl.refinements[0].proposal.Command != "sleep 5" {
+		t.Fatalf("expected original proposal command to be preserved, got %#v", ctrl.refinements[0].proposal)
+	}
+	if ctrl.refinements[0].note != "Make it just one second." {
+		t.Fatalf("unexpected refinement note %q", ctrl.refinements[0].note)
+	}
+}
+
+func TestProposalCommandCanBeTweakedLocally(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.pendingProposal = &controller.ProposalPayload{
+		Kind:        controller.ProposalCommand,
+		Command:     "grep -R foo .",
+		Description: "Search the current directory tree.",
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
+	next := updated.(Model)
+
+	if next.editingProposal == nil {
+		t.Fatal("expected editing proposal state")
+	}
+	if next.input != "grep -R foo ." {
+		t.Fatalf("expected original command in composer, got %q", next.input)
+	}
+	if next.pendingProposal != nil {
+		t.Fatalf("expected pending proposal to clear while editing, got %#v", next.pendingProposal)
+	}
+
+	next.input = "grep -R foo ~/ "
+	updated, _ = next.submit()
+	next = updated.(Model)
+
+	if next.editingProposal != nil {
+		t.Fatal("expected editing state to clear after save")
+	}
+	if next.pendingProposal == nil || next.pendingProposal.Command != "grep -R foo ~/" {
+		t.Fatalf("expected updated proposal command, got %#v", next.pendingProposal)
+	}
+	if next.entries[len(next.entries)-1].Title != "proposal" {
+		t.Fatalf("expected updated proposal entry, got %#v", next.entries[len(next.entries)-1])
+	}
+}
+
+func TestEscapeRestoresProposalWhileEditingCommand(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.editingProposal = &controller.ProposalPayload{
+		Kind:        controller.ProposalCommand,
+		Command:     "grep -R foo .",
+		Description: "Search the current directory tree.",
+	}
+	model.input = "grep -R foo ~/"
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	next := updated.(Model)
+
+	if next.editingProposal != nil {
+		t.Fatal("expected editing proposal state to clear")
+	}
+	if next.pendingProposal == nil || next.pendingProposal.Command != "grep -R foo ." {
+		t.Fatalf("expected original proposal to be restored, got %#v", next.pendingProposal)
+	}
+}
+
+func TestShellInterruptMsgClearsActiveExecutionState(t *testing.T) {
+	ctrl := &fakeController{
+		activeExecution: &controller.CommandExecution{
+			ID:        "cmd-1",
+			Command:   "sleep 60",
+			Origin:    controller.CommandOriginAgentProposal,
+			State:     controller.CommandExecutionRunning,
+			StartedAt: time.Now(),
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	canceled := false
+	model.busy = true
+	model.proposalRunPending = true
+	model.activeExecution = ctrl.activeExecution
+	model.inFlightCancel = func() {
+		canceled = true
+	}
+	initialEntries := len(model.entries)
+
+	updated, _ := model.Update(shellInterruptMsg{})
+	next := updated.(Model)
+
+	if !canceled {
+		t.Fatal("expected interrupt to cancel in-flight command wait")
+	}
+	if next.activeExecution != nil {
+		t.Fatalf("expected active execution to clear, got %#v", next.activeExecution)
+	}
+	if next.proposalRunPending {
+		t.Fatal("expected proposal run pending to clear")
+	}
+	if next.busy {
+		t.Fatal("expected busy state to clear")
+	}
+	if len(next.entries) != initialEntries+1 {
+		t.Fatalf("expected one interrupt entry, got %d", len(next.entries)-initialEntries)
+	}
+	last := next.entries[len(next.entries)-1]
+	if last.Title != "result" || !strings.Contains(last.Body, "status=canceled") {
+		t.Fatalf("expected canceled result entry, got %#v", last)
+	}
+}
+
 func TestDirectShellSubmissionShowsExpandedResultInTranscript(t *testing.T) {
 	ctrl := &fakeController{
 		shellEvents: []controller.TranscriptEvent{
@@ -1227,6 +2230,96 @@ func TestApprovalApproveUsesControllerDecision(t *testing.T) {
 	}
 }
 
+func TestApprovalHidesSameTurnProposalCard(t *testing.T) {
+	ctrl := &fakeController{
+		agentEvents: []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventUserMessage,
+				Payload: controller.TextPayload{Text: "search for foo"},
+			},
+			{
+				Kind:    controller.EventAgentMessage,
+				Payload: controller.TextPayload{Text: "This needs approval."},
+			},
+			{
+				Kind: controller.EventProposal,
+				Payload: controller.ProposalPayload{
+					Kind:        controller.ProposalCommand,
+					Description: "Search the home directory for foo.",
+					Command:     "rg -l foo ~",
+				},
+			},
+			{
+				Kind: controller.EventApproval,
+				Payload: controller.ApprovalRequest{
+					ID:      "approval-1",
+					Kind:    controller.ApprovalCommand,
+					Title:   "Approve ripgrep search",
+					Command: "rg -l foo ~",
+					Risk:    controller.RiskLow,
+				},
+			},
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.mode = AgentMode
+	model.input = "search for foo"
+
+	updated, cmd := model.submit()
+	next := updated.(Model)
+	msg := controllerEventsFromCmd(t, cmd)
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+
+	if next.pendingApproval == nil || next.pendingApproval.ID != "approval-1" {
+		t.Fatalf("expected pending approval, got %#v", next.pendingApproval)
+	}
+	if next.pendingProposal != nil {
+		t.Fatalf("expected same-turn proposal to stay hidden behind approval, got %#v", next.pendingProposal)
+	}
+}
+
+func TestApprovalApproveClearsStaleProposalState(t *testing.T) {
+	ctrl := &fakeController{
+		decisionEvents: []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventCommandStart,
+				Payload: controller.CommandStartPayload{Command: "rg -l foo ~"},
+			},
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.pendingApproval = &controller.ApprovalRequest{
+		ID:      "approval-1",
+		Kind:    controller.ApprovalCommand,
+		Title:   "Approve ripgrep search",
+		Command: "rg -l foo ~",
+		Risk:    controller.RiskLow,
+	}
+	model.pendingProposal = &controller.ProposalPayload{
+		Kind:        controller.ProposalCommand,
+		Description: "Search the home directory for foo.",
+		Command:     "rg -l foo ~",
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	next := updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected approval command")
+	}
+	if next.pendingProposal != nil {
+		t.Fatalf("expected stale proposal to clear on approval, got %#v", next.pendingProposal)
+	}
+
+	msg := controllerEventsFromCmd(t, cmd)
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+
+	if next.pendingProposal != nil {
+		t.Fatalf("expected stale proposal to stay cleared after approval events, got %#v", next.pendingProposal)
+	}
+}
+
 func TestApprovalApproveAutomaticallyContinuesAgentLoop(t *testing.T) {
 	ctrl := &fakeController{
 		agentEvents: []controller.TranscriptEvent{
@@ -1413,14 +2506,19 @@ func makeMultilineBody(count int) string {
 }
 
 type fakeController struct {
-	agentEvents    []controller.TranscriptEvent
-	continueEvents []controller.TranscriptEvent
-	shellEvents    []controller.TranscriptEvent
-	shellCommands  []string
-	decisionEvents []controller.TranscriptEvent
-	decisions      []approvalDecisionCall
-	refinements    []refinementCall
-	continueCalls  int
+	agentEvents     []controller.TranscriptEvent
+	continueEvents  []controller.TranscriptEvent
+	checkInEvents   []controller.TranscriptEvent
+	shellEvents     []controller.TranscriptEvent
+	shellCommands   []string
+	decisionEvents  []controller.TranscriptEvent
+	decisions       []approvalDecisionCall
+	refinements     []refinementCall
+	continueCalls   int
+	checkInCalls    int
+	activeExecution *controller.CommandExecution
+	abandonReason   string
+	peekShellTail   string
 }
 
 func (f *fakeController) SubmitAgentPrompt(_ context.Context, _ string) ([]controller.TranscriptEvent, error) {
@@ -1430,6 +2528,14 @@ func (f *fakeController) SubmitAgentPrompt(_ context.Context, _ string) ([]contr
 func (f *fakeController) SubmitRefinement(_ context.Context, approval controller.ApprovalRequest, note string) ([]controller.TranscriptEvent, error) {
 	f.refinements = append(f.refinements, refinementCall{
 		approval: approval,
+		note:     note,
+	})
+	return append([]controller.TranscriptEvent(nil), f.agentEvents...), nil
+}
+
+func (f *fakeController) SubmitProposalRefinement(_ context.Context, proposal controller.ProposalPayload, note string) ([]controller.TranscriptEvent, error) {
+	f.refinements = append(f.refinements, refinementCall{
+		proposal: proposal,
 		note:     note,
 	})
 	return append([]controller.TranscriptEvent(nil), f.agentEvents...), nil
@@ -1474,25 +2580,53 @@ func (f *fakeController) ContinueActivePlan(_ context.Context) ([]controller.Tra
 	return append([]controller.TranscriptEvent(nil), f.continueEvents...), nil
 }
 
+func (f *fakeController) CheckActiveExecution(_ context.Context) ([]controller.TranscriptEvent, error) {
+	f.checkInCalls++
+	if len(f.checkInEvents) == 0 {
+		return []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventAgentMessage,
+				Payload: controller.TextPayload{Text: "Still monitoring the active command."},
+			},
+		}, nil
+	}
+	return append([]controller.TranscriptEvent(nil), f.checkInEvents...), nil
+}
+
 func (f *fakeController) SubmitShellCommand(_ context.Context, command string) ([]controller.TranscriptEvent, error) {
 	f.shellCommands = append(f.shellCommands, command)
 	if len(f.shellEvents) == 0 {
 		return []controller.TranscriptEvent{
 			{
-				Kind:    controller.EventCommandStart,
-				Payload: controller.CommandStartPayload{Command: command},
+				Kind: controller.EventCommandStart,
+				Payload: controller.CommandStartPayload{
+					Command: command,
+					Execution: controller.CommandExecution{
+						ID:        "cmd-1",
+						Command:   command,
+						Origin:    controller.CommandOriginUserShell,
+						State:     controller.CommandExecutionRunning,
+						StartedAt: time.Now(),
+					},
+				},
 			},
 			{
 				Kind: controller.EventCommandResult,
 				Payload: controller.CommandResultSummary{
-					Command:  command,
-					ExitCode: 0,
-					Summary:  command,
+					ExecutionID: "cmd-1",
+					Command:     command,
+					Origin:      controller.CommandOriginUserShell,
+					ExitCode:    0,
+					Summary:     command,
 				},
 			},
 		}, nil
 	}
 	return append([]controller.TranscriptEvent(nil), f.shellEvents...), nil
+}
+
+func (f *fakeController) SubmitProposedShellCommand(_ context.Context, command string) ([]controller.TranscriptEvent, error) {
+	return f.SubmitShellCommand(context.Background(), command)
 }
 
 func (f *fakeController) DecideApproval(_ context.Context, approvalID string, decision controller.ApprovalDecision, refineText string) ([]controller.TranscriptEvent, error) {
@@ -1521,7 +2655,28 @@ func (f *fakeController) RefreshShellContext(_ context.Context) (*shell.PromptCo
 }
 
 func (f *fakeController) PeekShellTail(_ context.Context, _ int) (string, error) {
+	if f.peekShellTail != "" {
+		return f.peekShellTail, nil
+	}
 	return "waiting for input", nil
+}
+
+func (f *fakeController) ActiveExecution() *controller.CommandExecution {
+	if f.activeExecution == nil {
+		return nil
+	}
+	execution := *f.activeExecution
+	return &execution
+}
+
+func (f *fakeController) AbandonActiveExecution(reason string) *controller.CommandExecution {
+	f.abandonReason = reason
+	if f.activeExecution == nil {
+		return nil
+	}
+	execution := *f.activeExecution
+	f.activeExecution = nil
+	return &execution
 }
 
 type approvalDecisionCall struct {
@@ -1532,6 +2687,7 @@ type approvalDecisionCall struct {
 
 type refinementCall struct {
 	approval controller.ApprovalRequest
+	proposal controller.ProposalPayload
 	note     string
 }
 

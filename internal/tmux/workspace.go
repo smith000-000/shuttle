@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
+
+	"aiterm/internal/securefs"
 )
+
+const shuttleHistoryLimit = 50000
 
 type BootstrapOptions struct {
 	SessionName       string
@@ -72,6 +75,10 @@ func BootstrapWorkspace(ctx context.Context, client *Client, options BootstrapOp
 		created = true
 	}
 
+	if err := client.SetGlobalOption(ctx, "history-limit", fmt.Sprintf("%d", shuttleHistoryLimit)); err != nil {
+		return Workspace{}, false, fmt.Errorf("set tmux history limit: %w", err)
+	}
+
 	panes, err := client.ListPanes(ctx, options.SessionName)
 	if err != nil {
 		return Workspace{}, false, fmt.Errorf("list panes for workspace: %w", err)
@@ -130,14 +137,12 @@ func ensureSessionFiles(env map[string]string) error {
 		return nil
 	}
 
-	if err := os.MkdirAll(filepath.Dir(historyFile), 0o755); err != nil {
+	if err := securefs.EnsurePrivateDir(filepath.Dir(historyFile)); err != nil {
 		return fmt.Errorf("create shell history directory: %w", err)
 	}
 
-	file, err := os.OpenFile(historyFile, os.O_CREATE, 0o644)
-	if err != nil {
+	if err := securefs.EnsureFilePrivate(historyFile, 0o600); err != nil {
 		return fmt.Errorf("create shell history file: %w", err)
 	}
-
-	return file.Close()
+	return nil
 }

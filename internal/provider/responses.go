@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"aiterm/internal/controller"
+	"aiterm/internal/logging"
 )
 
 type ResponsesAgent struct {
@@ -77,6 +78,7 @@ type shuttleStructuredResponse struct {
 	PlanSteps           []string `json:"plan_steps"`
 	ProposalKind        string   `json:"proposal_kind"`
 	ProposalCommand     string   `json:"proposal_command"`
+	ProposalKeys        string   `json:"proposal_keys"`
 	ProposalPatch       string   `json:"proposal_patch"`
 	ProposalDescription string   `json:"proposal_description"`
 	ApprovalKind        string   `json:"approval_kind"`
@@ -115,6 +117,7 @@ func NewResponsesAgent(profile Profile, client *http.Client) (*ResponsesAgent, e
 }
 
 func (a *ResponsesAgent) Respond(ctx context.Context, input controller.AgentInput) (controller.AgentResponse, error) {
+	requestID := fmt.Sprintf("req-%d", a.counter.Add(1))
 	requestBody := responsesRequest{
 		Model: a.profile.Model,
 		Input: []responsesInputMessage{
@@ -151,6 +154,18 @@ func (a *ResponsesAgent) Respond(ctx context.Context, input controller.AgentInpu
 		return controller.AgentResponse{}, err
 	}
 
+	logging.Trace(
+		"provider.responses.request",
+		"request_id", requestID,
+		"preset", a.profile.Preset,
+		"model", a.profile.Model,
+		"base_url", a.profile.BaseURL,
+		"endpoint", endpoint,
+		"auth_method", a.profile.AuthMethod,
+		"api_key_env", a.profile.APIKeyEnvVar,
+		"body", string(payload),
+	)
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return controller.AgentResponse{}, fmt.Errorf("build provider request: %w", err)
@@ -163,16 +178,41 @@ func (a *ResponsesAgent) Respond(ctx context.Context, input controller.AgentInpu
 		req.Header.Set("Authorization", "Bearer "+a.profile.APIKey)
 	}
 
+	startedAt := time.Now()
 	resp, err := a.client.Do(req)
 	if err != nil {
+		logging.TraceError(
+			"provider.responses.request_error",
+			err,
+			"request_id", requestID,
+			"endpoint", endpoint,
+			"duration_ms", time.Since(startedAt).Milliseconds(),
+		)
 		return controller.AgentResponse{}, fmt.Errorf("request provider: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		logging.TraceError(
+			"provider.responses.read_error",
+			err,
+			"request_id", requestID,
+			"endpoint", endpoint,
+			"status_code", resp.StatusCode,
+			"duration_ms", time.Since(startedAt).Milliseconds(),
+		)
 		return controller.AgentResponse{}, fmt.Errorf("read provider response: %w", err)
 	}
+
+	logging.Trace(
+		"provider.responses.response",
+		"request_id", requestID,
+		"endpoint", endpoint,
+		"status_code", resp.StatusCode,
+		"duration_ms", time.Since(startedAt).Milliseconds(),
+		"body", string(body),
+	)
 
 	if resp.StatusCode >= http.StatusBadRequest {
 		return controller.AgentResponse{}, parseProviderError(resp.StatusCode, body)
@@ -244,6 +284,7 @@ func (a *ResponsesAgent) toAgentResponse(input shuttleStructuredResponse) (contr
 func parseProposal(input shuttleStructuredResponse) (*controller.Proposal, error) {
 	if strings.TrimSpace(input.ProposalKind) == "" &&
 		strings.TrimSpace(input.ProposalCommand) == "" &&
+		strings.TrimSpace(input.ProposalKeys) == "" &&
 		strings.TrimSpace(input.ProposalPatch) == "" &&
 		strings.TrimSpace(input.ProposalDescription) == "" {
 		return nil, nil
@@ -255,12 +296,14 @@ func parseProposal(input shuttleStructuredResponse) (*controller.Proposal, error
 		switch {
 		case strings.TrimSpace(input.ProposalCommand) != "":
 			kind = controller.ProposalCommand
+		case strings.TrimSpace(input.ProposalKeys) != "":
+			kind = controller.ProposalKeys
 		case strings.TrimSpace(input.ProposalPatch) != "":
 			kind = controller.ProposalPatch
 		default:
 			kind = controller.ProposalAnswer
 		}
-	case controller.ProposalAnswer, controller.ProposalCommand, controller.ProposalPatch:
+	case controller.ProposalAnswer, controller.ProposalCommand, controller.ProposalKeys, controller.ProposalPatch:
 	default:
 		return nil, fmt.Errorf("unsupported proposal kind %q", input.ProposalKind)
 	}
@@ -268,6 +311,7 @@ func parseProposal(input shuttleStructuredResponse) (*controller.Proposal, error
 	return &controller.Proposal{
 		Kind:        kind,
 		Command:     strings.TrimSpace(input.ProposalCommand),
+		Keys:        input.ProposalKeys,
 		Patch:       strings.TrimSpace(input.ProposalPatch),
 		Description: strings.TrimSpace(input.ProposalDescription),
 	}, nil
@@ -376,6 +420,7 @@ func extractResponseText(response responsesAPIResponse) (string, error) {
 func buildTurnContext(input controller.AgentInput) string {
 	sections := make([]string, 0, 5)
 	sections = append(sections, "User prompt:\n"+strings.TrimSpace(input.Prompt))
+	seenSnippets := make(map[string]struct{})
 
 	sessionLines := []string{}
 	if input.Session.CurrentShell != nil && strings.TrimSpace(input.Session.CurrentShell.PromptLine()) != "" {
@@ -400,18 +445,70 @@ func buildTurnContext(input controller.AgentInput) string {
 		sections = append(sections, "Session:\n"+strings.Join(sessionLines, "\n"))
 	}
 
-	if trimmed := strings.TrimSpace(input.Session.RecentShellOutput); trimmed != "" {
-		sections = append(sections, "Recent shell output:\n"+clipText(trimmed, 2000))
+	recentOutput := compactShellOutput(input.Session.RecentShellOutput, 8, 4, 1200)
+	if shouldIncludeContextSnippet(seenSnippets, recentOutput) {
+		sections = append(sections, "Recent shell output:\n"+recentOutput)
 	}
 
 	if input.Task.LastCommandResult != nil {
 		last := input.Task.LastCommandResult
-		sections = append(sections, fmt.Sprintf(
-			"Last command result:\ncommand=%s\nexit_code=%d\nsummary=%s",
-			last.Command,
-			last.ExitCode,
-			clipText(last.Summary, 800),
-		))
+		lines := []string{
+			"command=" + last.Command,
+			"state=" + string(last.State),
+			fmt.Sprintf("exit_code=%d", last.ExitCode),
+		}
+		if last.Cause != "" {
+			lines = append(lines, "cause="+string(last.Cause))
+		}
+		if last.Confidence != "" {
+			lines = append(lines, "confidence="+string(last.Confidence))
+		}
+		if last.SemanticShell {
+			lines = append(lines, "semantic_shell=true")
+		}
+		if strings.TrimSpace(last.SemanticSource) != "" {
+			lines = append(lines, "semantic_source="+last.SemanticSource)
+		}
+		if summary := compactShellOutput(last.Summary, 8, 4, 800); shouldIncludeContextSnippet(seenSnippets, summary) {
+			lines = append(lines, "summary="+summary)
+		}
+		sections = append(sections, "Last command result:\n"+strings.Join(lines, "\n"))
+	}
+
+	if input.Task.CurrentExecution != nil {
+		current := input.Task.CurrentExecution
+		lines := []string{
+			"id=" + current.ID,
+			"command=" + current.Command,
+			"origin=" + string(current.Origin),
+			"state=" + string(current.State),
+		}
+		if strings.TrimSpace(current.ForegroundCommand) != "" {
+			lines = append(lines, "foreground_command="+current.ForegroundCommand)
+		}
+		if current.SemanticShell {
+			lines = append(lines, "semantic_shell=true")
+		}
+		if strings.TrimSpace(current.SemanticSource) != "" {
+			lines = append(lines, "semantic_source="+current.SemanticSource)
+		}
+		if !current.StartedAt.IsZero() {
+			lines = append(lines, fmt.Sprintf("elapsed_seconds=%d", int(time.Since(current.StartedAt).Seconds())))
+		}
+		if current.ShellContextBefore != nil && strings.TrimSpace(current.ShellContextBefore.PromptLine()) != "" {
+			lines = append(lines, "prompt_before="+current.ShellContextBefore.PromptLine())
+		}
+		if current.ShellContextAfter != nil && strings.TrimSpace(current.ShellContextAfter.PromptLine()) != "" {
+			lines = append(lines, "prompt_after="+current.ShellContextAfter.PromptLine())
+		}
+		if tail := compactShellOutput(current.LatestOutputTail, 6, 3, 600); shouldIncludeContextSnippet(seenSnippets, tail) {
+			lines = append(lines, "latest_output="+tail)
+		}
+		sections = append(sections, "Current active command:\n"+strings.Join(lines, "\n"))
+	}
+
+	if snapshot := compactShellOutput(input.Task.RecoverySnapshot, 20, 20, 4000); shouldIncludeContextSnippet(seenSnippets, snapshot) {
+		sections = append(sections, "Recovery terminal snapshot:\n"+snapshot)
 	}
 
 	if input.Task.ActivePlan != nil {
@@ -503,6 +600,9 @@ func summarizeTranscriptEvent(event controller.TranscriptEvent) string {
 		return string(event.Kind) + ": " + clipText(payload.Command, 240)
 	case controller.EventCommandResult:
 		payload, _ := event.Payload.(controller.CommandResultSummary)
+		if payload.State == controller.CommandExecutionCanceled {
+			return fmt.Sprintf("%s: canceled %s", event.Kind, clipText(payload.Command, 180))
+		}
 		return fmt.Sprintf("%s: exit=%d %s", event.Kind, payload.ExitCode, clipText(payload.Command, 180))
 	default:
 		return string(event.Kind)
@@ -549,6 +649,7 @@ func shuttleAgentResponseSchema() map[string]any {
 			"plan_steps",
 			"proposal_kind",
 			"proposal_command",
+			"proposal_keys",
 			"proposal_patch",
 			"proposal_description",
 			"approval_kind",
@@ -573,9 +674,12 @@ func shuttleAgentResponseSchema() map[string]any {
 			},
 			"proposal_kind": map[string]any{
 				"type": "string",
-				"enum": []string{"", "answer", "command", "patch"},
+				"enum": []string{"", "answer", "command", "keys", "patch"},
 			},
 			"proposal_command": map[string]any{
+				"type": "string",
+			},
+			"proposal_keys": map[string]any{
 				"type": "string",
 			},
 			"proposal_patch": map[string]any{
@@ -620,10 +724,21 @@ Rules:
 - For requests to inspect the current directory, repository, files, environment, or system state, prefer a "proposal_command" over answering from stale context.
 - Only answer directly from shell state when the current turn already includes the necessary command result, or when the user is explicitly asking for a summary of a result that is already in context.
 - Never imply that you executed a shell command unless Shuttle has actual command/result context for it.
+- Never imply that a proposed patch or diff has already been applied.
+- Do not claim that files created by a proposed patch already exist, are executable, or can be referenced by later commands until Shuttle explicitly confirms the patch was applied.
 - If you propose a shell action, set "proposal_kind" to "command" and fill "proposal_command".
+- If you propose sending a small raw key sequence to an already-active prompt or fullscreen app, set "proposal_kind" to "keys" and fill "proposal_keys". Use a literal newline in "proposal_keys" when Enter should be sent.
 - If you propose a patch, set "proposal_kind" to "patch" and fill "proposal_patch".
 - If no proposal is needed, leave proposal fields empty.
 - If an action is destructive, risky, or should be user-confirmed, leave proposal fields empty and fill the approval fields instead.
 - For approvals, set "approval_kind" to "command", "patch", or "plan" and set "approval_risk" to "low", "medium", or "high".
 - If the task is a refinement of a pending approval, preserve the original command or patch unless the context clearly requires changing it.
+- If the current turn says an active command is still running, use "message" for a brief status update. Do not emit a plan, proposal, or approval unless the shell is clearly waiting for user intervention.
+- If the current active command state is "awaiting_input", explain what input is likely needed from the shell output or recovery snapshot and tell the user to press F2 to take control. If a small raw keystroke sequence would likely help, you may propose it with "proposal_kind":"keys" and "proposal_keys".
+- If the current active command state is "interactive_fullscreen", explain that a fullscreen terminal app currently owns the pane and tell the user to press F2 to take control. Do not suggest unrelated shell commands while that app is active.
+- If the current active command state is "lost", explain that tracking confidence is low, use the recovery snapshot to infer what likely happened, and avoid claiming completion unless the context clearly proves it.
+- If a recovery terminal snapshot is present, use it to reason about the current terminal state. Prefer actionable recovery guidance over abstract commentary.
+- If a current active command is in "awaiting_input", "interactive_fullscreen", or "lost" and the user asks a general question such as what to do next, what happened, help, or how to continue, prioritize recovery guidance over new proposals or plans.
+- If a current active command is in "awaiting_input" or "interactive_fullscreen" and the user explicitly asks you to send the needed input on their behalf, prefer a "keys" proposal over prose.
+- After a proposed or approved command completes, if there is no active plan, default to summarizing the result and waiting for the user. Only chain into another command when the user's request clearly requires more shell work.
 - Leave unused fields as empty strings, and leave unused arrays empty.`

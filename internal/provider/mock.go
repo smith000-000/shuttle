@@ -26,11 +26,26 @@ func (m *MockAgent) Respond(_ context.Context, input controller.AgentInput) (con
 	}
 
 	lower := strings.ToLower(prompt)
+	if proposal := maybeKeyProposal(input.Task.CurrentExecution, lower); proposal != nil {
+		return controller.AgentResponse{
+			Message:  "I can send that keystroke to the active terminal.",
+			Proposal: proposal,
+		}, nil
+	}
+	if shouldPrioritizeRecovery(input.Task.CurrentExecution, lower) {
+		return controller.AgentResponse{
+			Message: summarizeActiveExecution(input),
+		}, nil
+	}
 
 	switch {
 	case containsAny(lower, "what happened", "summarize result", "what changed"):
 		return controller.AgentResponse{
 			Message: summarizeRecentContext(input),
+		}, nil
+	case containsAny(lower, "agent-started shell command is still running", "give a brief status update based on the latest shell output"):
+		return controller.AgentResponse{
+			Message: summarizeActiveExecution(input),
 		}, nil
 	case containsAny(lower, "previously approved or proposed command has completed", "continue the task using the latest shell output"):
 		return continueActivePlanResponse(input), nil
@@ -82,6 +97,33 @@ func (m *MockAgent) Respond(_ context.Context, input controller.AgentInput) (con
 	}
 }
 
+func shouldPrioritizeRecovery(execution *controller.CommandExecution, prompt string) bool {
+	if execution == nil {
+		return false
+	}
+
+	switch execution.State {
+	case controller.CommandExecutionAwaitingInput, controller.CommandExecutionInteractiveFullscreen, controller.CommandExecutionLost:
+	default:
+		return false
+	}
+
+	return containsAny(
+		prompt,
+		"what should i do",
+		"what now",
+		"what next",
+		"what happened",
+		"what's going on",
+		"whats going on",
+		"how do i recover",
+		"how do i continue",
+		"help",
+		"recover",
+		"continue",
+	)
+}
+
 func refineApprovalResponse(m *MockAgent, note string, approval controller.ApprovalRequest) controller.AgentResponse {
 	message := "Refinement noted. This action still requires approval before execution."
 	if trimmed := strings.TrimSpace(note); trimmed != "" {
@@ -116,19 +158,32 @@ func summarizeRecentContext(input controller.AgentInput) string {
 	parts := make([]string, 0, 2)
 
 	if input.Task.LastCommandResult != nil {
-		parts = append(parts, fmt.Sprintf(
-			"Last command `%s` exited with code %d.",
-			input.Task.LastCommandResult.Command,
-			input.Task.LastCommandResult.ExitCode,
-		))
+		if input.Task.LastCommandResult.State == controller.CommandExecutionCanceled {
+			parts = append(parts, fmt.Sprintf(
+				"Last command `%s` was canceled.",
+				input.Task.LastCommandResult.Command,
+			))
+		} else {
+			parts = append(parts, fmt.Sprintf(
+				"Last command `%s` exited with code %d.",
+				input.Task.LastCommandResult.Command,
+				input.Task.LastCommandResult.ExitCode,
+			))
+		}
+		if input.Task.LastCommandResult.Cause != "" || input.Task.LastCommandResult.Confidence != "" {
+			meta := []string{}
+			if input.Task.LastCommandResult.Cause != "" {
+				meta = append(meta, "cause="+string(input.Task.LastCommandResult.Cause))
+			}
+			if input.Task.LastCommandResult.Confidence != "" {
+				meta = append(meta, "confidence="+string(input.Task.LastCommandResult.Confidence))
+			}
+			parts = append(parts, "Result metadata: "+strings.Join(meta, ", "))
+		}
 	}
 
 	if trimmed := strings.TrimSpace(input.Session.RecentShellOutput); trimmed != "" {
-		lines := strings.Split(trimmed, "\n")
-		if len(lines) > 4 {
-			lines = lines[len(lines)-4:]
-		}
-		parts = append(parts, "Recent shell output:\n"+strings.Join(lines, "\n"))
+		parts = append(parts, "Recent shell output:\n"+compactShellOutput(trimmed, 2, 2, 400))
 	}
 
 	if len(parts) == 0 {
@@ -136,6 +191,89 @@ func summarizeRecentContext(input controller.AgentInput) string {
 	}
 
 	return strings.Join(parts, "\n\n")
+}
+
+func summarizeActiveExecution(input controller.AgentInput) string {
+	current := input.Task.CurrentExecution
+	if current == nil {
+		return "I no longer see an active command."
+	}
+
+	var lines []string
+	switch current.State {
+	case controller.CommandExecutionAwaitingInput:
+		lines = []string{
+			fmt.Sprintf("Active command `%s` is waiting for shell input.", current.Command),
+			"The user should press F2 to take control. If only a small raw key sequence is needed, KEYS> may help.",
+		}
+	case controller.CommandExecutionInteractiveFullscreen:
+		lines = []string{
+			fmt.Sprintf("Active command `%s` is occupying a fullscreen terminal app.", current.Command),
+			"The user should press F2 to take control. KEYS> may help for simple raw key sequences.",
+		}
+	case controller.CommandExecutionLost:
+		lines = []string{
+			fmt.Sprintf("Tracking confidence for active command `%s` is low.", current.Command),
+			"The user should inspect the shell with F2 to recover ground truth.",
+		}
+	default:
+		lines = []string{
+			fmt.Sprintf("Active command `%s` is in state `%s`.", current.Command, current.State),
+		}
+	}
+
+	if trimmed := strings.TrimSpace(current.LatestOutputTail); trimmed != "" {
+		lines = append(lines, "Latest shell output:\n"+compactShellOutput(trimmed, 2, 2, 400))
+	}
+	if trimmed := strings.TrimSpace(input.Task.RecoverySnapshot); trimmed != "" {
+		lines = append(lines, "Recovery snapshot:\n"+compactShellOutput(trimmed, 3, 3, 800))
+	}
+
+	return strings.Join(lines, "\n\n")
+}
+
+func maybeKeyProposal(execution *controller.CommandExecution, prompt string) *controller.Proposal {
+	if execution == nil {
+		return nil
+	}
+	switch execution.State {
+	case controller.CommandExecutionAwaitingInput, controller.CommandExecutionInteractiveFullscreen:
+	default:
+		return nil
+	}
+
+	if !containsAny(prompt, "send", "press", "type", "do it", "go ahead") {
+		return nil
+	}
+
+	switch {
+	case containsAny(prompt, "enter", "return", "newline"):
+		return &controller.Proposal{
+			Kind:        controller.ProposalKeys,
+			Keys:        "\n",
+			Description: "Send Enter to the active terminal.",
+		}
+	case containsAny(prompt, "space"):
+		return &controller.Proposal{
+			Kind:        controller.ProposalKeys,
+			Keys:        " ",
+			Description: "Send Space to the active terminal.",
+		}
+	case containsAny(prompt, "escape", "esc"):
+		return &controller.Proposal{
+			Kind:        controller.ProposalKeys,
+			Keys:        "\x1b",
+			Description: "Send Escape to the active terminal.",
+		}
+	case containsAny(prompt, "send y", "press y", "type y", "send the y key", "press the y key"):
+		return &controller.Proposal{
+			Kind:        controller.ProposalKeys,
+			Keys:        "y",
+			Description: "Send 'y' to the active terminal.",
+		}
+	}
+
+	return nil
 }
 
 func continueActivePlanResponse(input controller.AgentInput) controller.AgentResponse {

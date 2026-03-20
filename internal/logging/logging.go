@@ -4,15 +4,12 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
+
+	"aiterm/internal/securefs"
 )
 
 func New(logPath string) (*slog.Logger, func() error, error) {
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
-		return nil, nil, err
-	}
-
-	file, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	file, err := securefs.OpenAppendPrivate(logPath, 0o600)
 	if err != nil {
 		return nil, nil, err
 	}

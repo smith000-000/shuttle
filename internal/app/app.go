@@ -9,6 +9,7 @@ import (
 
 	"aiterm/internal/config"
 	"aiterm/internal/controller"
+	"aiterm/internal/logging"
 	"aiterm/internal/provider"
 	"aiterm/internal/shell"
 	"aiterm/internal/tmux"
@@ -40,8 +41,19 @@ func New(cfg config.Config, logger *slog.Logger) *App {
 }
 
 func (a *App) Run(ctx context.Context) (Result, error) {
+	logging.Trace(
+		"app.run.begin",
+		"session", a.cfg.SessionName,
+		"socket", a.cfg.TmuxSocket,
+		"tui", a.cfg.TUI,
+		"inject", a.cfg.Inject,
+		"track", a.cfg.Track,
+		"agent_prompt", a.cfg.AgentPrompt != "",
+	)
+
 	client, err := tmux.NewClient(a.cfg.TmuxSocket)
 	if err != nil {
+		logging.TraceError("app.tmux_client.error", err, "socket", a.cfg.TmuxSocket)
 		return Result{}, err
 	}
 
@@ -56,8 +68,17 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 		},
 	)
 	if err != nil {
+		logging.TraceError("app.bootstrap.error", err, "session", a.cfg.SessionName)
 		return Result{}, err
 	}
+
+	logging.Trace(
+		"app.bootstrap.complete",
+		"session", workspace.SessionName,
+		"created", created,
+		"top_pane", workspace.TopPane.ID,
+		"bottom_pane", workspace.BottomPane.ID,
+	)
 
 	a.logger.Info(
 		"workspace ready",
@@ -73,10 +94,15 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	}
 
 	if a.cfg.AgentPrompt != "" {
-		observer := shell.NewObserver(client)
+			observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir)
 		initialShellContext := initialPromptContext(ctx, observer, workspace.TopPane.ID, a.cfg.StartDir)
+		observer.WithPromptHint(initialShellContext)
+		if err := observer.EnsureLocalShellIntegration(ctx, workspace.TopPane.ID); err != nil {
+			logging.TraceError("app.shell_integration.error", err, "pane", workspace.TopPane.ID)
+		}
 		agent, profile, err := provider.NewFromConfig(a.cfg, provider.FactoryOptions{})
 		if err != nil {
+			logging.TraceError("app.provider.error", err, "provider", a.cfg.ProviderType)
 			return Result{}, fmt.Errorf("configure provider: %w", err)
 		}
 		a.logger.Info(
@@ -100,21 +126,30 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 
 		events, err := ctrl.SubmitAgentPrompt(agentCtx, a.cfg.AgentPrompt)
 		if err != nil {
+			logging.TraceError("app.agent_prompt.error", err, "provider", profile.Preset)
 			return Result{}, fmt.Errorf("submit agent prompt: %w", err)
 		}
+
+		logging.Trace("app.agent_prompt.complete", "event_count", len(events))
 
 		result.AgentEvents = events
 		return result, nil
 	}
 
 	if a.cfg.TUI {
-		observer := shell.NewObserver(client)
+			observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir)
 		if err := client.BindNoPrefixKey(ctx, tui.TakeControlKey, "detach-client"); err != nil {
+			logging.TraceError("app.bind_take_control.error", err, "key", tui.TakeControlKey)
 			return Result{}, fmt.Errorf("configure take-control key: %w", err)
 		}
 		initialShellContext := initialPromptContext(ctx, observer, workspace.TopPane.ID, a.cfg.StartDir)
+		observer.WithPromptHint(initialShellContext)
+		if err := observer.EnsureLocalShellIntegration(ctx, workspace.TopPane.ID); err != nil {
+			logging.TraceError("app.shell_integration.error", err, "pane", workspace.TopPane.ID)
+		}
 		agent, profile, err := provider.NewFromConfig(a.cfg, provider.FactoryOptions{})
 		if err != nil {
+			logging.TraceError("app.provider.error", err, "provider", a.cfg.ProviderType)
 			return Result{}, fmt.Errorf("configure provider: %w", err)
 		}
 		a.logger.Info(
@@ -140,6 +175,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 		_, runErr := program.Run()
 		cleanupErr := cleanupTUISession(created, client, workspace.SessionName)
 		if runErr != nil {
+			logging.TraceError("app.tui.error", runErr, "session", workspace.SessionName)
 			if cleanupErr != nil {
 				return Result{}, fmt.Errorf("run tui: %w (cleanup error: %v)", runErr, cleanupErr)
 			}
@@ -148,15 +184,18 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 		}
 
 		if cleanupErr != nil {
+			logging.TraceError("app.tui.cleanup_error", cleanupErr, "session", workspace.SessionName)
 			return Result{}, fmt.Errorf("cleanup tui session: %w", cleanupErr)
 		}
 
+		logging.Trace("app.tui.complete", "session", workspace.SessionName)
 		result.Interactive = true
 		return result, nil
 	}
 
 	if a.cfg.Inject != "" {
 		if err := client.SendKeys(ctx, workspace.TopPane.ID, a.cfg.Inject, a.cfg.InjectEnter); err != nil {
+			logging.TraceError("app.inject.error", err, "pane", workspace.TopPane.ID, "command", a.cfg.Inject)
 			return Result{}, fmt.Errorf("inject command: %w", err)
 		}
 
@@ -165,9 +204,14 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	}
 
 	if a.cfg.Track != "" {
-		observer := shell.NewObserver(client)
+		observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir)
+		observer.WithPromptHint(shell.GuessLocalContext(a.cfg.StartDir))
+		if err := observer.EnsureLocalShellIntegration(ctx, workspace.TopPane.ID); err != nil {
+			logging.TraceError("app.shell_integration.error", err, "pane", workspace.TopPane.ID)
+		}
 		tracked, err := observer.RunTrackedCommand(ctx, workspace.TopPane.ID, a.cfg.Track, shell.CommandTimeout(a.cfg.Track))
 		if err != nil {
+			logging.TraceError("app.track.error", err, "pane", workspace.TopPane.ID, "command", a.cfg.Track)
 			return Result{}, fmt.Errorf("track command: %w", err)
 		}
 
@@ -176,6 +220,13 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			"pane", workspace.TopPane.ID,
 			"command_id", tracked.CommandID,
 			"exit_code", tracked.ExitCode,
+		)
+		logging.Trace(
+			"app.track.complete",
+			"pane", workspace.TopPane.ID,
+			"command_id", tracked.CommandID,
+			"exit_code", tracked.ExitCode,
+			"captured_preview", logging.Preview(tracked.Captured, 1000),
 		)
 		result.Tracked = &tracked
 	}

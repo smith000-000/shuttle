@@ -12,12 +12,23 @@ As of March 11, 2026, the implementation state is:
 - Milestone 4: complete for the mock-runtime path
 - Milestone 5: in progress
 
+Execution-monitor redesign status on `command-execution-redesign`:
+- implemented: first-class command monitor, local managed shell transport, `awaiting_input` detection, `interactive_fullscreen` detection, `lost` execution state, `F2` handoff/reconciliation, raw `KEYS>` terminal input, remote prompt-return reconciliation, and agent-driven `keys` proposals
+- implemented: state-aware agent recovery guidance using active execution state plus a larger recovery snapshot
+- implemented: first-pass local semantic shell integration using `OSC 133` / `OSC 7` shims plus semantic metadata in monitor/provider context, with best-effort raw-marker parsing from tmux capture
+- in progress: reducing ambiguity between `running`, `awaiting_input`, and `lost` in edge cases where the shell is quiet or terminal ownership changes unexpectedly
+- in progress: security hardening for execution monitoring, tracing, and semantic shell state
+- next: move Shuttle runtime state out of the repo-local `.shuttle/` directory into a user-private runtime location, then keep local semantic-shell behavior stable while preventing bleed-through into remote/subshell flows, then add conservative subshell bootstrap
+
 Milestone 5 currently includes:
 - provider profile and resolver scaffolding
 - backend/auth abstraction layers
 - provider factory wiring
 - one real `responses_http` path for the standard OpenAI API endpoint with API-key auth
 - `httptest` coverage for the OpenAI-compatible adapter
+- execution monitor redesign for long-running and interactive shell commands
+- raw terminal input flow for active prompts and fullscreen apps
+- first-class agent `keys` proposals for interactive recovery
 
 Milestone 5 still needs:
 - OpenRouter verification and preset-specific tests
@@ -26,7 +37,26 @@ Milestone 5 still needs:
 - Codex CLI delegation path
 - provider switching UI
 - release-grade runtime management for socket/session lifecycle and crash recovery
-- execution-state redesign for long-running and interactive shell commands
+- a real patch-application path so proposed diffs can become actual workspace changes
+- guardrails that prevent the agent from claiming proposed files exist before the patch is applied
+- stronger monitor-side confidence so active-command classification such as `awaiting_input`, `interactive_fullscreen`, and `lost` is driven by better evidence and fewer fallback heuristics
+- pane-stream/fullscreen detection beyond tmux alternate-screen heuristics so aliases, wrappers, and remote fullscreen apps can be recognized from terminal behavior instead of command-name lists alone
+- richer state-aware agent recovery actions for ambiguous shell takeovers, including deciding when to propose raw terminal input versus simple recovery guidance
+- broader semantic shell integration and subshell/bootstrap support using signals such as `OSC 133` and `OSC 7`
+- any richer bootstrap or injected helper mode should come later, after the standards-based marker path exists
+- before touching richer subshell/bootstrap behavior for `ssh`, `docker exec -it`, or nested shells, run the manual regression checklist in [shell-execution-strategy.md](shell-execution-strategy.md) to avoid regressing the current moderately functional context-transition path
+- move runtime state, staged shell scripts, semantic state files, shell history, and logs out of the repo-local `.shuttle/` directory into a user-private runtime directory such as XDG state/runtime space, with `0700` directory permissions and no-follow/exclusive writes for staged files
+- do not add filesystem encryption to the runtime state directory in the first pass; prefer private location, strict permissions, and minimal retention over ad hoc app-level encryption
+- split tracing into at least two levels:
+  - safe/debug trace that avoids recording raw terminal contents, raw key input, provider bodies, and staged shell commands
+  - explicit sensitive trace that is opt-in only
+- when sensitive trace is requested, block normal launch behind a one-time explicit consent step that states trace may capture commands, shell output, key input, prompts, and provider payloads
+- rework semantic shell state serialization away from ad hoc tab-delimited text to a robust encoded format such as JSON so `cwd` and other fields cannot corrupt parsing
+- keep recovery snapshots as a supported feature, but add policy controls so future approval/sandbox modes can reduce or disable automatic terminal snapshot upload for untrusted providers or higher-sensitivity sessions
+- the next time `internal/tui/model.go` is touched for execution-control behavior, treat it as a refactor slice:
+  - extract composer/input-mode routing from command-execution control
+  - move fullscreen/raw-key submission logic behind a narrower interface
+  - reduce duplicated busy/lock/handoff gating in the TUI state machine
 
 ## Guiding Decisions
 - Build `P0` only first. That means Epics 1 through 4 in [requirements-mvp.md](requirements-mvp.md).
@@ -182,6 +212,7 @@ Implemented now:
 - provider resolution and factory wiring in the app startup path
 - one real OpenAI-compatible Responses adapter using API-key auth
 - normalized mapping from structured provider output into Shuttle `AgentResponse`
+- agent/runtime support for `proposal_kind = "keys"` so the model can request raw terminal input for active prompts and fullscreen apps
 
 Next:
 - validate and harden the OpenRouter preset
@@ -194,11 +225,32 @@ Next:
 - the same loop used in Milestone 4 works with a real provider
 - provider failures are surfaced as structured errors rather than crashing the app
 
+### Backlog Note
+- Patch proposals currently stop at proposal generation. Shuttle still needs an explicit apply/approve/apply-result flow for diffs and file creation.
+- Until that exists, the controller and provider prompts should treat proposed patches as inert and should not let the agent narrate them as already-created files.
+- The next execution-monitor slice should classify `awaiting_input` conservatively from shell-tail evidence and reserve `lost` for genuinely low-confidence tracking failures rather than silent long-running jobs.
+- After the current `awaiting_input` work, the next execution-monitor slice should add pane-stream/fullscreen detection in the same redesign track rather than as a separate feature branch.
+- That slice should prefer terminal behavior over command names so aliases, functions, and wrapped fullscreen apps do not regress back into weak prompt-return heuristics.
+- After fullscreen detection, add an explicit recovery-snapshot path so ambiguous shell takeovers can be fed back into the agent using a larger terminal page dump plus execution confidence metadata instead of only a tiny shell tail.
+- Recovery snapshots and state-aware agent check-ins are now implemented in a first pass; the next step is to improve monitor-side confidence so more ambiguous states are classified correctly before they reach the agent.
+- Agent-driven raw terminal input is now implemented in a first pass; the next step is to harden when the agent should use `keys` proposals versus plain recovery guidance, and to keep dangerous key sequences reviewable.
+- Security remediation follow-up:
+  - stop using repo-local `.shuttle/` as the default state root
+  - add no-follow/exclusive writes for staged scripts and semantic state artifacts
+  - add safe vs sensitive trace modes plus explicit sensitive-trace consent on launch
+  - migrate semantic shell sidecar serialization to a robust encoded format
+  - keep recovery snapshots, but make their upload policy configurable later
+  - refactor `internal/tui/model.go` before adding more execution-control behaviors
+
 Framework and ACP guidance: [agent-runtime-design.md](agent-runtime-design.md)
 Detailed provider decomposition: [provider-integration-design.md](provider-integration-design.md)
 Execution plan: [provider-integration-plan.md](provider-integration-plan.md)
 Runtime lifecycle design: [runtime-management-design.md](runtime-management-design.md)
 Shell and agent execution strategy: [shell-execution-strategy.md](shell-execution-strategy.md)
+Deferred patch/apply research: [patch-apply-research.md](patch-apply-research.md)
+
+### Execution Regression Note
+- After meaningful execution-monitor changes, run the manual regression checklist in [shell-execution-strategy.md](shell-execution-strategy.md) before treating the branch as stable.
 
 ---
 

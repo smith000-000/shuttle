@@ -116,6 +116,9 @@ The user can ask the agent to reason over recent shell state, propose actions, a
 - `FR-26`: In Agent mode, the user shall be able to submit natural-language instructions.
 - `FR-27`: The controller shall gather context from recent observed shell output, current host or session context, prior task state, and relevant execution results.
 - `FR-28`: The agent shall be able to produce a direct answer, a proposed shell command, a proposed multi-step plan, a proposed patch or diff, or an approval request.
+- `FR-28c`: When the shell is waiting for input or a fullscreen terminal app is active, the agent may propose a short raw terminal input sequence as a first-class action rather than only narrating what the user should press.
+- `FR-28a`: A proposed patch or diff shall remain proposal-only until the user explicitly applies it through a product-owned patch-application flow.
+- `FR-28b`: Until a proposed patch is actually applied, the agent and UI shall not claim that files were created, modified, or available for execution.
 - `FR-29`: The agent shall support iterative loops: observe, reason, propose or act, capture result, and continue until complete or cancelled.
 - `FR-30`: In Shell mode, input from the bottom pane shall be treated as a shell command.
 - `FR-31`: Shell commands entered in the bottom pane shall be injected into the top pane.
@@ -138,7 +141,9 @@ The user can ask the agent to reason over recent shell state, propose actions, a
 - Shell mode sends commands to the top pane rather than to an isolated subprocess.
 - Shell submissions use Shuttle-managed composer history independent of the shell's own history list.
 - Approval cards support Yes, No, and Refine, with Refine returning to a pre-seeded input flow.
+- When the shell is awaiting input or a fullscreen app is active, Shuttle can surface a first-class proposed terminal-input action instead of forcing the user to infer the needed keystrokes from prose alone.
 - The task loop can continue until the task is complete or the user cancels it.
+- The system does not treat patch proposals as real workspace state until they are explicitly applied, and follow-up commands cannot assume proposed files already exist.
 
 ---
 
