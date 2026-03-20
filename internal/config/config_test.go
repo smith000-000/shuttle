@@ -70,6 +70,9 @@ func TestParseEnablesTraceFromEnv(t *testing.T) {
 	if !cfg.Trace {
 		t.Fatalf("expected trace to be enabled from env")
 	}
+	if cfg.TraceMode != TraceModeSafe {
+		t.Fatalf("expected safe trace mode, got %q", cfg.TraceMode)
+	}
 
 	expected := filepath.Join(cfg.StateDir, defaultTraceName)
 	if cfg.TracePath != expected {
@@ -89,5 +92,50 @@ func TestParseResolvesCustomTracePath(t *testing.T) {
 
 	if !filepath.IsAbs(cfg.TracePath) {
 		t.Fatalf("expected absolute trace path, got %q", cfg.TracePath)
+	}
+}
+
+func TestParseDefaultsStateDirOutsideRepo(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", "/tmp/shuttle-state-home")
+
+	cfg, err := Parse(nil)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	expected := filepath.Join("/tmp/shuttle-state-home", "shuttle")
+	if cfg.StateDir != expected {
+		t.Fatalf("expected state dir %q, got %q", expected, cfg.StateDir)
+	}
+}
+
+func TestParseDefaultsRuntimeDir(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", "/tmp/shuttle-runtime-home")
+
+	cfg, err := Parse(nil)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	expected := filepath.Join("/tmp/shuttle-runtime-home", "shuttle")
+	if cfg.RuntimeDir != expected {
+		t.Fatalf("expected runtime dir %q, got %q", expected, cfg.RuntimeDir)
+	}
+}
+
+func TestParseAcceptsSensitiveTraceMode(t *testing.T) {
+	cfg, err := Parse([]string{"--trace-mode", "sensitive", "--trace-consent"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	if cfg.TraceMode != TraceModeSensitive {
+		t.Fatalf("expected sensitive trace mode, got %q", cfg.TraceMode)
+	}
+	if !cfg.Trace {
+		t.Fatalf("expected trace to be enabled for sensitive mode")
+	}
+	if !cfg.TraceConsent {
+		t.Fatalf("expected trace consent to be set")
 	}
 }

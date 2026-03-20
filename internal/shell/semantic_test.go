@@ -14,7 +14,7 @@ import (
 )
 
 func TestParseSemanticShellStatePrompt(t *testing.T) {
-	state, ok := parseSemanticShellState("event=prompt\texit=130\tcwd=/tmp/demo\tshell=zsh")
+	state, ok := parseSemanticShellState("{\"event\":\"prompt\",\"exit\":130,\"cwd\":\"/tmp/demo\",\"shell\":\"zsh\"}")
 	if !ok {
 		t.Fatal("expected semantic shell state to parse")
 	}
@@ -35,7 +35,7 @@ func TestReadSemanticShellState(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.WriteFile(path, []byte("event=command\texit=\tcwd=/home/jsmith\tshell=bash\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("{\"event\":\"command\",\"exit\":null,\"cwd\":\"/home/jsmith\",\"shell\":\"bash\"}\n"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
 
@@ -110,9 +110,9 @@ func TestRunTrackedMonitorCompletesFromSemanticPromptState(t *testing.T) {
 
 	go func() {
 		time.Sleep(80 * time.Millisecond)
-		_ = os.WriteFile(statePath, []byte("event=command\texit=\tcwd=/home/jsmith/source/repos/aiterm\tshell=bash\n"), 0o644)
+		_ = os.WriteFile(statePath, []byte("{\"event\":\"command\",\"exit\":null,\"cwd\":\"/home/jsmith/source/repos/aiterm\",\"shell\":\"bash\"}\n"), 0o644)
 		time.Sleep(80 * time.Millisecond)
-		_ = os.WriteFile(statePath, []byte("event=prompt\texit=0\tcwd=/home/jsmith/source/repos/aiterm\tshell=bash\n"), 0o644)
+		_ = os.WriteFile(statePath, []byte("{\"event\":\"prompt\",\"exit\":0,\"cwd\":\"/home/jsmith/source/repos/aiterm\",\"shell\":\"bash\"}\n"), 0o644)
 	}()
 
 	observer.runTrackedMonitor(context.Background(), monitor, "%0", "sleep 1", "sleep 1", 250*time.Millisecond, client.capture, markers, func() {})

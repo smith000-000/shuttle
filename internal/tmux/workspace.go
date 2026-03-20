@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
+
+	"aiterm/internal/securefs"
 )
 
 const shuttleHistoryLimit = 50000
@@ -136,14 +137,12 @@ func ensureSessionFiles(env map[string]string) error {
 		return nil
 	}
 
-	if err := os.MkdirAll(filepath.Dir(historyFile), 0o755); err != nil {
+	if err := securefs.EnsurePrivateDir(filepath.Dir(historyFile)); err != nil {
 		return fmt.Errorf("create shell history directory: %w", err)
 	}
 
-	file, err := os.OpenFile(historyFile, os.O_CREATE, 0o644)
-	if err != nil {
+	if err := securefs.EnsureFilePrivate(historyFile, 0o600); err != nil {
 		return fmt.Errorf("create shell history file: %w", err)
 	}
-
-	return file.Close()
+	return nil
 }

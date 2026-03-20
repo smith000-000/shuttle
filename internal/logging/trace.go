@@ -4,33 +4,32 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
+
+	"aiterm/internal/config"
+	"aiterm/internal/securefs"
 )
 
 var (
 	traceMu      sync.RWMutex
 	traceEnabled bool
+	traceMode    config.TraceMode
 	traceLogger  = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
 )
 
-func ConfigureTrace(tracePath string, enabled bool) (func() error, error) {
+func ConfigureTrace(tracePath string, mode config.TraceMode) (func() error, error) {
 	traceMu.Lock()
 	defer traceMu.Unlock()
 
-	traceEnabled = enabled
-	if !enabled {
+	traceEnabled = mode != config.TraceModeOff
+	traceMode = mode
+	if !traceEnabled {
 		traceLogger = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
 		return func() error { return nil }, nil
 	}
 
-	if err := os.MkdirAll(filepath.Dir(tracePath), 0o755); err != nil {
-		return nil, err
-	}
-
-	file, err := os.OpenFile(tracePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	file, err := securefs.OpenAppendPrivate(tracePath, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -49,7 +48,7 @@ func Trace(event string, attrs ...any) {
 		return
 	}
 
-	logger.Info(event, attrs...)
+	logger.Info(event, sanitizeTraceAttrs(traceMode, attrs...)...)
 }
 
 func TraceError(event string, err error, attrs ...any) {
@@ -66,6 +65,61 @@ func TraceEnabled() bool {
 	defer traceMu.RUnlock()
 
 	return traceEnabled
+}
+
+func TraceMode() config.TraceMode {
+	traceMu.RLock()
+	defer traceMu.RUnlock()
+	return traceMode
+}
+
+func sanitizeTraceAttrs(mode config.TraceMode, attrs ...any) []any {
+	if mode == config.TraceModeSensitive {
+		return attrs
+	}
+
+	sanitized := make([]any, 0, len(attrs))
+	for index := 0; index < len(attrs); index += 2 {
+		if index+1 >= len(attrs) {
+			sanitized = append(sanitized, attrs[index])
+			break
+		}
+
+		key, ok := attrs[index].(string)
+		if !ok {
+			sanitized = append(sanitized, attrs[index], attrs[index+1])
+			continue
+		}
+		sanitized = append(sanitized, key, sanitizeTraceValue(mode, key, attrs[index+1]))
+	}
+	return sanitized
+}
+
+func sanitizeTraceValue(mode config.TraceMode, key string, value any) any {
+	if mode == config.TraceModeSensitive {
+		return value
+	}
+
+	text, ok := value.(string)
+	if !ok {
+		return value
+	}
+
+	switch key {
+	case "body", "keys", "command", "prompt", "user_prompt", "note", "text", "runes",
+		"capture_preview", "captured_preview", "delta_preview", "tail_preview", "last_capture_preview",
+		"summary_preview", "message_preview", "agent_prompt_preview", "output_preview":
+		if strings.TrimSpace(text) == "" {
+			return text
+		}
+		return "[redacted in safe trace]"
+	case "args":
+		if strings.Contains(text, "send-keys") {
+			return "[redacted in safe trace]"
+		}
+	}
+
+	return value
 }
 
 func Preview(value string, maxRunes int) string {

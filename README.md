@@ -81,7 +81,10 @@ Important variables:
 - `OPENROUTER_API_KEY`: OpenRouter API key
 - `SHUTTLE_SESSION`: optional tmux session name override
 - `SHUTTLE_TMUX_SOCKET`: optional tmux socket/server name override
-- `SHUTTLE_TRACE=1`: enable verbose local trace logging
+- `SHUTTLE_STATE_DIR`: optional persistent state directory for logs and shell history
+- `SHUTTLE_RUNTIME_DIR`: optional private runtime directory for staged shell scripts and semantic shell state
+- `SHUTTLE_TRACE`: `off`, `safe`, or `sensitive`
+- `SHUTTLE_TRACE_CONSENT`: must be true or passed as `--trace-consent` when using sensitive trace
 
 `launch.sh` loads `./env.sh` if present, otherwise it falls back to `./env.sh.sample`.
 
@@ -124,20 +127,24 @@ go run ./cmd/shuttle --socket shuttle-dev --session shuttle-dev \
 
 ## Trace Logging
 
-Enable trace logging:
+Enable safe trace logging:
 
 ```bash
-export SHUTTLE_TRACE="1"
+export SHUTTLE_TRACE="safe"
 ./launch.sh --trace --tui
 ```
 
 Then inspect the log:
 
 ```bash
-tail -f .shuttle/trace.log
+tail -f "${XDG_STATE_HOME:-$HOME/.local/state}/shuttle/trace.log"
 ```
 
-The trace is intentionally verbose and may include shell output, prompts, and model traffic. Treat it as sensitive local debug output.
+Trace modes:
+- `safe`: redacts raw commands, terminal contents, key input, and provider bodies
+- `sensitive`: keeps full raw trace data, but Shuttle requires explicit consent before launch
+
+Persistent logs and shell history now default to XDG state space instead of the repo-local `.shuttle/` directory. Ephemeral staged command scripts and semantic shell state now live in a separate private runtime directory.
 
 ## TUI Notes
 
@@ -160,6 +167,7 @@ The TUI is intentionally keyboard-first. Current behavior is still evolving, so 
 - [agent-runtime-design.md](agent-runtime-design.md)
 - [runtime-management-design.md](runtime-management-design.md)
 - [requirements-mvp.md](requirements-mvp.md)
+- [patch-apply-research.md](patch-apply-research.md)
 
 ## Worktrees
 

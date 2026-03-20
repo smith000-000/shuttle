@@ -94,7 +94,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	}
 
 	if a.cfg.AgentPrompt != "" {
-		observer := shell.NewObserver(client).WithStateDir(a.cfg.StateDir)
+			observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir)
 		initialShellContext := initialPromptContext(ctx, observer, workspace.TopPane.ID, a.cfg.StartDir)
 		observer.WithPromptHint(initialShellContext)
 		if err := observer.EnsureLocalShellIntegration(ctx, workspace.TopPane.ID); err != nil {
@@ -137,7 +137,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	}
 
 	if a.cfg.TUI {
-		observer := shell.NewObserver(client).WithStateDir(a.cfg.StateDir)
+			observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir)
 		if err := client.BindNoPrefixKey(ctx, tui.TakeControlKey, "detach-client"); err != nil {
 			logging.TraceError("app.bind_take_control.error", err, "key", tui.TakeControlKey)
 			return Result{}, fmt.Errorf("configure take-control key: %w", err)
@@ -204,7 +204,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	}
 
 	if a.cfg.Track != "" {
-		observer := shell.NewObserver(client).WithStateDir(a.cfg.StateDir)
+		observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir)
 		observer.WithPromptHint(shell.GuessLocalContext(a.cfg.StartDir))
 		if err := observer.EnsureLocalShellIntegration(ctx, workspace.TopPane.ID); err != nil {
 			logging.TraceError("app.shell_integration.error", err, "pane", workspace.TopPane.ID)

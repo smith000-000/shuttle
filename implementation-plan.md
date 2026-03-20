@@ -17,7 +17,8 @@ Execution-monitor redesign status on `command-execution-redesign`:
 - implemented: state-aware agent recovery guidance using active execution state plus a larger recovery snapshot
 - implemented: first-pass local semantic shell integration using `OSC 133` / `OSC 7` shims plus semantic metadata in monitor/provider context, with best-effort raw-marker parsing from tmux capture
 - in progress: reducing ambiguity between `running`, `awaiting_input`, and `lost` in edge cases where the shell is quiet or terminal ownership changes unexpectedly
-- next: keep local semantic-shell behavior stable while preventing bleed-through into remote/subshell flows, then add conservative subshell bootstrap
+- in progress: security hardening for execution monitoring, tracing, and semantic shell state
+- next: move Shuttle runtime state out of the repo-local `.shuttle/` directory into a user-private runtime location, then keep local semantic-shell behavior stable while preventing bleed-through into remote/subshell flows, then add conservative subshell bootstrap
 
 Milestone 5 currently includes:
 - provider profile and resolver scaffolding
@@ -44,6 +45,18 @@ Milestone 5 still needs:
 - broader semantic shell integration and subshell/bootstrap support using signals such as `OSC 133` and `OSC 7`
 - any richer bootstrap or injected helper mode should come later, after the standards-based marker path exists
 - before touching richer subshell/bootstrap behavior for `ssh`, `docker exec -it`, or nested shells, run the manual regression checklist in [shell-execution-strategy.md](shell-execution-strategy.md) to avoid regressing the current moderately functional context-transition path
+- move runtime state, staged shell scripts, semantic state files, shell history, and logs out of the repo-local `.shuttle/` directory into a user-private runtime directory such as XDG state/runtime space, with `0700` directory permissions and no-follow/exclusive writes for staged files
+- do not add filesystem encryption to the runtime state directory in the first pass; prefer private location, strict permissions, and minimal retention over ad hoc app-level encryption
+- split tracing into at least two levels:
+  - safe/debug trace that avoids recording raw terminal contents, raw key input, provider bodies, and staged shell commands
+  - explicit sensitive trace that is opt-in only
+- when sensitive trace is requested, block normal launch behind a one-time explicit consent step that states trace may capture commands, shell output, key input, prompts, and provider payloads
+- rework semantic shell state serialization away from ad hoc tab-delimited text to a robust encoded format such as JSON so `cwd` and other fields cannot corrupt parsing
+- keep recovery snapshots as a supported feature, but add policy controls so future approval/sandbox modes can reduce or disable automatic terminal snapshot upload for untrusted providers or higher-sensitivity sessions
+- the next time `internal/tui/model.go` is touched for execution-control behavior, treat it as a refactor slice:
+  - extract composer/input-mode routing from command-execution control
+  - move fullscreen/raw-key submission logic behind a narrower interface
+  - reduce duplicated busy/lock/handoff gating in the TUI state machine
 
 ## Guiding Decisions
 - Build `P0` only first. That means Epics 1 through 4 in [requirements-mvp.md](requirements-mvp.md).
@@ -221,12 +234,20 @@ Next:
 - After fullscreen detection, add an explicit recovery-snapshot path so ambiguous shell takeovers can be fed back into the agent using a larger terminal page dump plus execution confidence metadata instead of only a tiny shell tail.
 - Recovery snapshots and state-aware agent check-ins are now implemented in a first pass; the next step is to improve monitor-side confidence so more ambiguous states are classified correctly before they reach the agent.
 - Agent-driven raw terminal input is now implemented in a first pass; the next step is to harden when the agent should use `keys` proposals versus plain recovery guidance, and to keep dangerous key sequences reviewable.
+- Security remediation follow-up:
+  - stop using repo-local `.shuttle/` as the default state root
+  - add no-follow/exclusive writes for staged scripts and semantic state artifacts
+  - add safe vs sensitive trace modes plus explicit sensitive-trace consent on launch
+  - migrate semantic shell sidecar serialization to a robust encoded format
+  - keep recovery snapshots, but make their upload policy configurable later
+  - refactor `internal/tui/model.go` before adding more execution-control behaviors
 
 Framework and ACP guidance: [agent-runtime-design.md](agent-runtime-design.md)
 Detailed provider decomposition: [provider-integration-design.md](provider-integration-design.md)
 Execution plan: [provider-integration-plan.md](provider-integration-plan.md)
 Runtime lifecycle design: [runtime-management-design.md](runtime-management-design.md)
 Shell and agent execution strategy: [shell-execution-strategy.md](shell-execution-strategy.md)
+Deferred patch/apply research: [patch-apply-research.md](patch-apply-research.md)
 
 ### Execution Regression Note
 - After meaningful execution-monitor changes, run the manual regression checklist in [shell-execution-strategy.md](shell-execution-strategy.md) before treating the branch as stable.

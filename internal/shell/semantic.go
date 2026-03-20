@@ -2,6 +2,7 @@ package shell
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"aiterm/internal/securefs"
 	"aiterm/internal/tmux"
 )
 
@@ -69,31 +71,20 @@ func parseSemanticShellState(raw string) (semanticShellState, bool) {
 		return semanticShellState{}, false
 	}
 
-	var state semanticShellState
-	for _, field := range strings.Split(line, "\t") {
-		key, value, ok := strings.Cut(field, "=")
-		if !ok {
-			continue
-		}
-		switch key {
-		case "event":
-			state.Event = semanticShellEvent(strings.TrimSpace(value))
-		case "exit":
-			value = strings.TrimSpace(value)
-			if value == "" {
-				continue
-			}
-			parsed, err := strconv.Atoi(value)
-			if err != nil {
-				return semanticShellState{}, false
-			}
-			state.ExitCode = &parsed
-		case "cwd":
-			state.Directory = value
-		case "shell":
-			state.Shell = strings.TrimSpace(value)
-		}
+	var payload struct {
+		Event string `json:"event"`
+		Exit  *int   `json:"exit"`
+		Cwd   string `json:"cwd"`
+		Shell string `json:"shell"`
 	}
+	if err := json.Unmarshal([]byte(line), &payload); err != nil {
+		return semanticShellState{}, false
+	}
+	var state semanticShellState
+	state.Event = semanticShellEvent(strings.TrimSpace(payload.Event))
+	state.ExitCode = payload.Exit
+	state.Directory = payload.Cwd
+	state.Shell = strings.TrimSpace(payload.Shell)
 
 	if state.Event == semanticEventUnknown {
 		return semanticShellState{}, false
@@ -161,14 +152,14 @@ func (o *Observer) EnsureLocalShellIntegration(ctx context.Context, paneID strin
 
 func writeSemanticShellIntegrationScript(stateDir string, pane tmux.Pane, shellName string) (string, error) {
 	integrationDir := filepath.Join(stateDir, "shell-integration")
-	if err := os.MkdirAll(integrationDir, 0o755); err != nil {
+	if err := securefs.EnsurePrivateDir(integrationDir); err != nil {
 		return "", fmt.Errorf("create shell integration directory: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Join(stateDir, "shell-state"), 0o755); err != nil {
+	if err := securefs.EnsurePrivateDir(filepath.Join(stateDir, "shell-state")); err != nil {
 		return "", fmt.Errorf("create shell state directory: %w", err)
 	}
 
-	scriptPath := filepath.Join(integrationDir, sanitizeIntegrationName(shellName+"-"+pane.ID)+".sh")
+	scriptPath := filepath.Join(integrationDir, sanitizeIntegrationName(shellName+"-"+pane.ID+"-"+strconv.FormatInt(time.Now().UnixNano(), 10))+".sh")
 	statePath := semanticStatePath(stateDir, pane.TTY)
 	var contents string
 	switch shellName {
@@ -180,7 +171,7 @@ func writeSemanticShellIntegrationScript(stateDir string, pane tmux.Pane, shellN
 		return "", fmt.Errorf("unsupported shell for semantic integration: %s", shellName)
 	}
 
-	if err := os.WriteFile(scriptPath, []byte(contents), 0o600); err != nil {
+	if err := securefs.WriteExclusivePrivate(scriptPath, []byte(contents), 0o600); err != nil {
 		return "", fmt.Errorf("write semantic shell integration script: %w", err)
 	}
 	return scriptPath, nil
@@ -200,7 +191,17 @@ __shuttle_semantic_emit_osc7() { printf '\033]7;file://%s%s\007' "${HOSTNAME:-lo
 __shuttle_semantic_write_state() {
   local event="$1"
   local exit_code="$2"
-  printf 'event=%s\texit=%s\tcwd=%s\tshell=%s\n' "$event" "$exit_code" "$PWD" "bash" >| "$SHUTTLE_SEMANTIC_SHELL_STATE_FILE"
+  local cwd_json="$PWD"
+  local exit_json="null"
+  cwd_json=${cwd_json//\\/\\\\}
+  cwd_json=${cwd_json//\"/\\\"}
+  cwd_json=${cwd_json//$'\n'/\\n}
+  cwd_json=${cwd_json//$'\r'/\\r}
+  cwd_json=${cwd_json//$'\t'/\\t}
+  if [ -n "$exit_code" ]; then
+    exit_json="$exit_code"
+  fi
+  printf '{"event":"%s","exit":%s,"cwd":"%s","shell":"bash"}\n' "$event" "$exit_json" "$cwd_json" >| "$SHUTTLE_SEMANTIC_SHELL_STATE_FILE"
 }
 __shuttle_semantic_preexec() {
   [ "${__shuttle_semantic_in_precmd:-0}" = "1" ] && return
@@ -243,7 +244,17 @@ __shuttle_semantic_emit_osc7() { printf '\033]7;file://%s%s\007' "${HOST:-localh
 __shuttle_semantic_write_state() {
   local event="$1"
   local exit_code="$2"
-  printf 'event=%s\texit=%s\tcwd=%s\tshell=%s\n' "$event" "$exit_code" "$PWD" "zsh" >| "$SHUTTLE_SEMANTIC_SHELL_STATE_FILE"
+  local cwd_json="$PWD"
+  local exit_json="null"
+  cwd_json=${cwd_json//\\/\\\\}
+  cwd_json=${cwd_json//\"/\\\"}
+  cwd_json=${cwd_json//$'\n'/\\n}
+  cwd_json=${cwd_json//$'\r'/\\r}
+  cwd_json=${cwd_json//$'\t'/\\t}
+  if [ -n "$exit_code" ]; then
+    exit_json="$exit_code"
+  fi
+  printf '{"event":"%s","exit":%s,"cwd":"%s","shell":"zsh"}\n' "$event" "$exit_json" "$cwd_json" >| "$SHUTTLE_SEMANTIC_SHELL_STATE_FILE"
 }
 __shuttle_semantic_preexec() {
   __shuttle_semantic_emit_osc133 "B"

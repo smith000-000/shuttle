@@ -22,6 +22,11 @@ func main() {
 		os.Exit(2)
 	}
 
+	if cfg.TraceMode == config.TraceModeSensitive && !cfg.TraceConsent {
+		fmt.Fprintf(os.Stderr, "config error: sensitive trace captures raw commands, terminal output, key input, prompts, and provider payloads. Re-run with --trace-consent to acknowledge the risk.\n")
+		os.Exit(2)
+	}
+
 	logger, closeLogger, err := logging.New(cfg.LogPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "logger error: %v\n", err)
@@ -29,12 +34,16 @@ func main() {
 	}
 	defer closeLogger()
 
-	closeTrace, err := logging.ConfigureTrace(cfg.TracePath, cfg.Trace)
+	closeTrace, err := logging.ConfigureTrace(cfg.TracePath, cfg.TraceMode)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "trace logger error: %v\n", err)
 		os.Exit(1)
 	}
 	defer closeTrace()
+
+	if cfg.TraceMode != config.TraceModeOff {
+		fmt.Fprintf(os.Stderr, "warning: %s trace enabled; output may contain debugging details in %s\n", cfg.TraceMode, cfg.TracePath)
+	}
 
 	logging.Trace(
 		"app.start",

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"aiterm/internal/protocol"
+	"aiterm/internal/securefs"
 )
 
 func (o *Observer) buildTrackedTransport(ctx context.Context, paneID string, command string, markers protocol.Markers) (string, func(), error) {
@@ -43,7 +44,7 @@ func (o *Observer) buildLocalManagedTransport(ctx context.Context, paneID string
 
 func writeTrackedCommandScript(stateDir string, command string, markers protocol.Markers) (string, error) {
 	commandsDir := filepath.Join(stateDir, "commands")
-	if err := os.MkdirAll(commandsDir, 0o755); err != nil {
+	if err := securefs.EnsurePrivateDir(commandsDir); err != nil {
 		return "", fmt.Errorf("create command staging directory: %w", err)
 	}
 
@@ -62,7 +63,7 @@ func writeTrackedCommandScript(stateDir string, command string, markers protocol
 	builder.WriteString(" \"$__shuttle_status\"\n")
 	builder.WriteString("unset __shuttle_status\n")
 
-	if err := os.WriteFile(scriptPath, []byte(builder.String()), 0o600); err != nil {
+	if err := securefs.WriteExclusivePrivate(scriptPath, []byte(builder.String()), 0o600); err != nil {
 		return "", fmt.Errorf("write tracked command script: %w", err)
 	}
 

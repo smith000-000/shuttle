@@ -18,7 +18,7 @@ func TestSanitizeCapturedBody(t *testing.T) {
 }
 
 func TestSanitizeCapturedBodyStripsSemanticBootstrapNoise(t *testing.T) {
-	body := "jsmith@linuxdesktop ~/source/repos/aiterm % [ -n \"$SHUTTLE_SEMANTIC_SHELL_V1\" ] || . '/home/jsmith/source/repos/aiterm/.shuttle/shell-integration/zsh-pane0.sh' >/dev/null 2>&1\njsmith@linuxdesktop ~/source/repos/aiterm % .\n '/home/jsmith/source/repos/aiterm/.shuttle/commands/cmd-1.sh'\n1\n2\n^C"
+	body := "jsmith@linuxdesktop ~/source/repos/aiterm % [ -n \"$SHUTTLE_SEMANTIC_SHELL_V1\" ] || . '/run/user/1000/shuttle/shell-integration/zsh-pane0.sh' >/dev/null 2>&1\njsmith@linuxdesktop ~/source/repos/aiterm % .\n '/run/user/1000/shuttle/commands/cmd-1.sh'\n1\n2\n^C"
 
 	got := sanitizeCapturedBody(body)
 	want := "1\n2\n^C"

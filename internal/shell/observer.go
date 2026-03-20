@@ -930,8 +930,8 @@ func stripShuttlePlumbingLines(lines []string) []string {
 
 func isShuttlePlumbingLine(line string) bool {
 	return strings.Contains(line, "SHUTTLE_SEMANTIC_SHELL_V1") ||
-		strings.Contains(line, "/.shuttle/shell-integration/") ||
-		strings.Contains(line, "/.shuttle/commands/")
+		strings.Contains(line, "/shell-integration/") ||
+		strings.Contains(line, "/commands/")
 }
 
 func isShuttleContinuationLine(line string) bool {
