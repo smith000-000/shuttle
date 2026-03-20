@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"aiterm/internal/config"
+	"aiterm/internal/securefs"
 
 	"github.com/zalando/go-keyring"
 )
@@ -20,7 +22,10 @@ const (
 	storedProviderVersion = 1
 	keyringServiceName    = "Shuttle"
 	keyringSourceLabel    = "os_keyring"
+	localFileSourceLabel  = "local_file"
 )
+
+var ErrSecretStoreUnavailable = errors.New("provider secret store is unavailable")
 
 var (
 	keyringSet    = keyring.Set
@@ -38,6 +43,10 @@ type persistedProviderConfig struct {
 	CLICommand string `json:"cli_command,omitempty"`
 }
 
+type SecretStoreOptions struct {
+	AllowPlaintextFallback bool
+}
+
 func ApplyStoredProviderConfig(cfg config.Config) (config.Config, error) {
 	if cfg.ProviderFlagsSet {
 		return cfg, nil
@@ -52,14 +61,18 @@ func ApplyStoredProviderConfig(cfg config.Config) (config.Config, error) {
 }
 
 func SaveStoredProviderConfig(stateDir string, profile Profile) error {
+	return SaveStoredProviderConfigWithOptions(stateDir, profile, SecretStoreOptions{})
+}
+
+func SaveStoredProviderConfigWithOptions(stateDir string, profile Profile, opts SecretStoreOptions) error {
 	if strings.TrimSpace(stateDir) == "" {
 		return errors.New("state dir must not be empty")
 	}
-	if err := os.MkdirAll(providersDirPath(stateDir), 0o700); err != nil {
+	if err := securefs.EnsurePrivateDir(providersDirPath(stateDir)); err != nil {
 		return fmt.Errorf("create provider state dir: %w", err)
 	}
 
-	stored, err := persistableProviderConfig(stateDir, profile)
+	stored, err := persistableProviderConfig(stateDir, profile, opts)
 	if err != nil {
 		return err
 	}
@@ -68,10 +81,10 @@ func SaveStoredProviderConfig(stateDir string, profile Profile) error {
 	if err != nil {
 		return fmt.Errorf("marshal provider config: %w", err)
 	}
-	if err := os.WriteFile(providerConfigPath(stateDir, profile.Preset), data, 0o600); err != nil {
+	if err := securefs.WriteAtomicPrivate(providerConfigPath(stateDir, profile.Preset), data, 0o600); err != nil {
 		return fmt.Errorf("write provider config: %w", err)
 	}
-	if err := os.WriteFile(selectedProviderPath(stateDir), []byte(strings.TrimSpace(string(profile.Preset))+"\n"), 0o600); err != nil {
+	if err := securefs.WriteAtomicPrivate(selectedProviderPath(stateDir), []byte(strings.TrimSpace(string(profile.Preset))+"\n"), 0o600); err != nil {
 		return fmt.Errorf("write selected provider: %w", err)
 	}
 
@@ -147,23 +160,33 @@ func LoadStoredProviderProfiles(stateDir string) ([]Profile, ProviderPreset, err
 	return profiles, selectedPreset, nil
 }
 
-func persistableProviderConfig(stateDir string, profile Profile) (persistedProviderConfig, error) {
+func persistableProviderConfig(stateDir string, profile Profile, opts SecretStoreOptions) (persistedProviderConfig, error) {
 	apiKeyRef := ""
 	if profile.AuthMethod == AuthAPIKey {
 		switch {
 		case shouldPersistProviderEnvRef(profile):
 			apiKeyRef = strings.TrimSpace(profile.APIKeyEnvVar)
 			_ = keyringDelete(keyringServiceName, providerKeyAccount(stateDir, profile.Preset))
+			_ = os.Remove(providerSecretPath(stateDir, profile.Preset))
 		case strings.TrimSpace(profile.APIKey) != "":
-			apiKeyRef = keyringSourceLabel
 			if err := keyringSet(keyringServiceName, providerKeyAccount(stateDir, profile.Preset), profile.APIKey); err != nil {
-				return persistedProviderConfig{}, fmt.Errorf("store provider API key: %w", err)
+				if !opts.AllowPlaintextFallback {
+					return persistedProviderConfig{}, wrapSecretStoreError("store provider API key", err)
+				}
+				if err := securefs.WriteAtomicPrivate(providerSecretPath(stateDir, profile.Preset), []byte(profile.APIKey), 0o600); err != nil {
+					return persistedProviderConfig{}, fmt.Errorf("write plaintext provider secret: %w", err)
+				}
+				apiKeyRef = localFileSourceLabel
+			} else {
+				apiKeyRef = keyringSourceLabel
+				_ = os.Remove(providerSecretPath(stateDir, profile.Preset))
 			}
 		default:
 			return persistedProviderConfig{}, errors.New("cannot persist provider without an API key value or env reference")
 		}
 	} else {
 		_ = keyringDelete(keyringServiceName, providerKeyAccount(stateDir, profile.Preset))
+		_ = os.Remove(providerSecretPath(stateDir, profile.Preset))
 	}
 
 	return persistedProviderConfig{
@@ -221,7 +244,13 @@ func loadPersistedAPIKey(stateDir string, preset ProviderPreset, apiKeyRef strin
 		if legacyErr == nil {
 			return legacyKey, keyringSourceLabel, nil
 		}
-		return "", "", fmt.Errorf("load stored provider API key: %w", err)
+		return "", "", wrapSecretStoreError("load stored provider API key", err)
+	case localFileSourceLabel:
+		apiKey, err := loadPlaintextProviderSecret(stateDir, preset)
+		if err != nil {
+			return "", "", err
+		}
+		return apiKey, localFileSourceLabel, nil
 	default:
 		return strings.TrimSpace(os.Getenv(apiKeyRef)), strings.TrimSpace(apiKeyRef), nil
 	}
@@ -258,7 +287,7 @@ func loadStoredProviderConfigs(stateDir string) ([]persistedProviderConfig, erro
 }
 
 func loadPersistedProviderConfigAtPath(path string) (persistedProviderConfig, bool, error) {
-	data, err := os.ReadFile(path)
+	data, _, err := securefs.ReadFileNoFollow(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return persistedProviderConfig{}, false, nil
 	}
@@ -285,7 +314,7 @@ func loadLegacyStoredProviderConfig(stateDir string) (persistedProviderConfig, b
 }
 
 func loadSelectedProviderPreset(stateDir string) (ProviderPreset, error) {
-	data, err := os.ReadFile(selectedProviderPath(stateDir))
+	data, _, err := securefs.ReadFileNoFollow(selectedProviderPath(stateDir))
 	if errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	}
@@ -306,6 +335,14 @@ func providerConfigPath(stateDir string, preset ProviderPreset) string {
 
 func selectedProviderPath(stateDir string) string {
 	return filepath.Join(stateDir, "selected-provider")
+}
+
+func providerSecretsDirPath(stateDir string) string {
+	return filepath.Join(stateDir, "provider-secrets")
+}
+
+func providerSecretPath(stateDir string, preset ProviderPreset) string {
+	return filepath.Join(providerSecretsDirPath(stateDir), string(preset)+".secret")
 }
 
 func legacyProviderConfigPath(stateDir string) string {
@@ -333,4 +370,28 @@ func shouldPersistProviderEnvRef(profile Profile) bool {
 	}
 
 	return strings.TrimSpace(os.Getenv(ref)) == apiKey
+}
+
+func wrapSecretStoreError(op string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w: %v", op, ErrSecretStoreUnavailable, err)
+}
+
+func loadPlaintextProviderSecret(stateDir string, preset ProviderPreset) (string, error) {
+	file, err := securefs.OpenFileNoFollow(providerSecretPath(stateDir, preset), os.O_RDONLY, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("read plaintext provider secret: %w", os.ErrNotExist)
+	}
+	if err != nil {
+		return "", fmt.Errorf("read plaintext provider secret: %w", err)
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return "", fmt.Errorf("read plaintext provider secret: %w", err)
+	}
+	return strings.TrimSpace(string(data)), nil
 }

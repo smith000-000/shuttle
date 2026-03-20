@@ -25,29 +25,30 @@ const (
 )
 
 type Config struct {
-	SessionName          string
-	StartDir             string
-	TmuxSocket           string
-	StateDir             string
-	RuntimeDir           string
-	LogPath              string
-	Trace                bool
-	TraceMode            TraceMode
-	TraceConsent         bool
-	TracePath            string
-	AgentPrompt          string
-	Inject               string
-	Track                string
-	TUI                  bool
-	InjectEnter          bool
-	ProviderType         string
-	ProviderAuthMethod   string
-	ProviderModel        string
-	ProviderBaseURL      string
-	ProviderAPIKey       string
-	ProviderAPIKeyEnvVar string
-	ProviderCLICommand   string
-	ProviderFlagsSet     bool
+	SessionName                   string
+	StartDir                      string
+	TmuxSocket                    string
+	StateDir                      string
+	RuntimeDir                    string
+	LogPath                       string
+	Trace                         bool
+	TraceMode                     TraceMode
+	TraceConsent                  bool
+	TracePath                     string
+	AgentPrompt                   string
+	Inject                        string
+	Track                         string
+	TUI                           bool
+	InjectEnter                   bool
+	ProviderType                  string
+	ProviderAuthMethod            string
+	ProviderModel                 string
+	ProviderBaseURL               string
+	ProviderAPIKey                string
+	ProviderAPIKeyEnvVar          string
+	ProviderCLICommand            string
+	AllowPlaintextProviderSecrets bool
+	ProviderFlagsSet              bool
 }
 
 func Parse(args []string) (Config, error) {
@@ -83,6 +84,7 @@ func Parse(args []string) (Config, error) {
 	tracePath := os.Getenv("SHUTTLE_TRACE_PATH")
 	traceConsent := envBool("SHUTTLE_TRACE_CONSENT")
 	providerCLICommand := os.Getenv("SHUTTLE_CLI_COMMAND")
+	allowPlaintextProviderSecrets := envBool("SHUTTLE_ALLOW_PLAINTEXT_PROVIDER_SECRETS")
 
 	fs := flag.NewFlagSet("shuttle", flag.ContinueOnError)
 
@@ -106,6 +108,7 @@ func Parse(args []string) (Config, error) {
 	fs.StringVar(&cfg.ProviderModel, "model", providerModel, "model name for the selected provider")
 	fs.StringVar(&cfg.ProviderBaseURL, "base-url", providerBaseURL, "base URL for the selected provider API")
 	fs.StringVar(&cfg.ProviderCLICommand, "cli-command", providerCLICommand, "CLI command path for CLI-backed providers")
+	fs.BoolVar(&cfg.AllowPlaintextProviderSecrets, "allow-plaintext-provider-secrets", allowPlaintextProviderSecrets, "allow less-secure local plaintext fallback for provider secrets when OS keyring is unavailable")
 
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err

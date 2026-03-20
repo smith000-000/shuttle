@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -1156,6 +1157,89 @@ func TestMainViewDoesNotRenderHeaderOrSideRails(t *testing.T) {
 	}
 	if strings.Contains(view, "│") {
 		t.Fatalf("expected no side rails in main view, got %q", view)
+	}
+}
+
+func TestStartupWarningAppearsForPlaintextProviderSecret(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{
+			Preset:       provider.PresetOpenAI,
+			Name:         "OpenAI Responses",
+			Model:        "gpt-5-nano-2025-08-07",
+			BaseURL:      "https://api.openai.com/v1",
+			APIKeyEnvVar: "local_file",
+		},
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	model.width = 100
+	model.height = 24
+
+	view := model.View()
+	if !strings.Contains(view, "Less Secure Secret Storage") {
+		t.Fatalf("expected startup security notice, got %q", view)
+	}
+	if !strings.Contains(view, "Y continue") {
+		t.Fatalf("expected startup notice actions, got %q", view)
+	}
+}
+
+func TestStartupWarningBlocksComposerUntilDismissed(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{
+			Preset:       provider.PresetAnthropic,
+			Name:         "Anthropic Messages",
+			Model:        "claude-sonnet-4-6",
+			BaseURL:      "https://api.anthropic.com",
+			APIKeyEnvVar: "local_file",
+		},
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	model.width = 100
+	model.height = 24
+	model.mode = ShellMode
+	model.input = "pwd"
+
+	updatedAny, cmd := model.submit()
+	model = updatedAny.(Model)
+	if cmd != nil {
+		t.Fatal("expected submit to stay blocked while startup notice is active")
+	}
+	if model.startupNotice == nil {
+		t.Fatal("expected startup notice to remain active")
+	}
+
+	updatedAny, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updatedAny.(Model)
+	if model.startupNotice != nil {
+		t.Fatal("expected Enter to dismiss startup notice")
+	}
+}
+
+func TestStartupWarningDismissesOnY(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{
+			Preset:       provider.PresetOpenAI,
+			Name:         "OpenAI Responses",
+			Model:        "gpt-5-nano-2025-08-07",
+			BaseURL:      "https://api.openai.com/v1",
+			APIKeyEnvVar: "local_file",
+		},
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+
+	updatedAny, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	model = updatedAny.(Model)
+	if model.startupNotice != nil {
+		t.Fatal("expected Y to dismiss startup notice")
 	}
 }
 
@@ -2826,6 +2910,51 @@ func TestSettingsActiveModelInfoToggleShowsSelectedDetailsOnly(t *testing.T) {
 	}
 }
 
+func TestSaveSettingsProfileRefreshesCurrentProviderEvenWhenPersistenceFails(t *testing.T) {
+	switchedCtrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
+		func() ([]provider.OnboardingCandidate, error) { return nil, nil },
+		nil,
+		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+			return switchedCtrl, profile, nil
+		},
+		func(provider.Profile) error {
+			return provider.ErrSecretStoreUnavailable
+		},
+	)
+	model.activeProvider = provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"}
+	form := buildOnboardingForm(provider.OnboardingCandidate{
+		Profile: provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
+	})
+	form.fields[2].value = "manual-secret"
+	model.settingsConfig = &form
+	model.settingsStep = settingsStepProviderForm
+
+	updated, cmd := model.saveSettingsProfile()
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected settings save command")
+	}
+	msg := cmd()
+	savedMsg, ok := msg.(settingsProviderSavedMsg)
+	if !ok {
+		t.Fatalf("expected settingsProviderSavedMsg, got %T", msg)
+	}
+	if !errors.Is(savedMsg.persistErr, provider.ErrSecretStoreUnavailable) {
+		t.Fatalf("expected secret-store persistence error, got %v", savedMsg.persistErr)
+	}
+	if savedMsg.ctrl != switchedCtrl {
+		t.Fatal("expected current provider to refresh even when persistence fails")
+	}
+	updated, _ = model.Update(savedMsg)
+	model = updated.(Model)
+	last := model.entries[len(model.entries)-1]
+	if last.Title != "error" || !strings.Contains(last.Body, "active for this session") {
+		t.Fatalf("expected session-only persistence warning, got %#v", last)
+	}
+}
+
 func TestStatusLineShowsLastReplyModel(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.width = 100
@@ -2835,6 +2964,32 @@ func TestStatusLineShowsLastReplyModel(t *testing.T) {
 	model = updated.(Model)
 	if !strings.Contains(model.View(), "MODEL openai/gpt-5-nano-2025-08-07") {
 		t.Fatalf("expected last reply model in status line, got %q", model.View())
+	}
+}
+
+func TestProviderSummaryLineShowsAuthSource(t *testing.T) {
+	profile := provider.Profile{
+		Preset:       provider.PresetOpenAI,
+		Model:        "gpt-5-nano-2025-08-07",
+		BaseURL:      "https://api.openai.com/v1",
+		APIKeyEnvVar: "os_keyring",
+	}
+	line := providerSummaryLine(profile)
+	if !strings.Contains(line, "auth=OS keyring") {
+		t.Fatalf("expected keyring auth source in summary, got %q", line)
+	}
+}
+
+func TestProviderSummaryLineShowsPlaintextFallbackSource(t *testing.T) {
+	profile := provider.Profile{
+		Preset:       provider.PresetAnthropic,
+		Model:        "claude-sonnet-4-6",
+		BaseURL:      "https://api.anthropic.com",
+		APIKeyEnvVar: "local_file",
+	}
+	line := providerSummaryLine(profile)
+	if !strings.Contains(line, "auth=local file (less secure)") {
+		t.Fatalf("expected plaintext fallback auth source in summary, got %q", line)
 	}
 }
 

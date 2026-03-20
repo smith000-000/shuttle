@@ -108,11 +108,17 @@ func sanitizeTraceValue(mode config.TraceMode, key string, value any) any {
 	switch key {
 	case "body", "keys", "command", "prompt", "user_prompt", "note", "text", "runes",
 		"capture_preview", "captured_preview", "delta_preview", "tail_preview", "last_capture_preview",
-		"summary_preview", "message_preview", "agent_prompt_preview", "output_preview":
+		"summary_preview", "message_preview", "agent_prompt_preview", "output_preview",
+		"summary", "refine_text", "patch", "proposal_patch", "approval_patch", "description", "proposal_description", "approval_summary":
 		if strings.TrimSpace(text) == "" {
 			return text
 		}
 		return "[redacted in safe trace]"
+	case "api_key", "api_key_env", "api_key_ref":
+		if strings.TrimSpace(text) == "" {
+			return text
+		}
+		return "[redacted auth metadata]"
 	case "args":
 		if strings.Contains(text, "send-keys") {
 			return "[redacted in safe trace]"

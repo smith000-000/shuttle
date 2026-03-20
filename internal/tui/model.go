@@ -84,6 +84,11 @@ type fullscreenAction struct {
 	ApprovalID string
 }
 
+type startupSecurityNotice struct {
+	Title string
+	Body  string
+}
+
 type providerSwitchedMsg struct {
 	ctrl       controller.Controller
 	profile    provider.Profile
@@ -189,6 +194,7 @@ type Model struct {
 	shellContext          shell.PromptContext
 	pendingApproval       *controller.ApprovalRequest
 	pendingProposal       *controller.ProposalPayload
+	startupNotice         *startupSecurityNotice
 	refiningApproval      *controller.ApprovalRequest
 	refiningProposal      *controller.ProposalPayload
 	editingProposal       *controller.ProposalPayload
@@ -287,6 +293,7 @@ func (m Model) WithProviderOnboarding(
 	saver func(provider.Profile) error,
 ) Model {
 	m.activeProvider = active
+	m.startupNotice = startupNoticeForProfile(active)
 	m.loadOnboarding = load
 	m.loadModels = loadModels
 	m.switchProvider = switcher
@@ -545,6 +552,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.ctrl = msg.ctrl
 		m.activeProvider = msg.profile
+		m.startupNotice = startupNoticeForProfile(msg.profile)
 		m.onboardingOpen = false
 		m.onboardingStep = onboardingStepProviders
 		m.onboardingIndex = 0
@@ -579,7 +587,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.persistErr != nil {
 			m.entries = append(m.entries, Entry{
 				Title: "error",
-				Body:  fmt.Sprintf("save provider config: %v", msg.persistErr),
+				Body:  providerPersistenceErrorBody(msg.profile, msg.persistErr),
 			})
 		}
 		m.selectedEntry = len(m.entries) - 1
@@ -650,7 +658,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.persistErr != nil {
 			m.entries = append(m.entries, Entry{
 				Title: "error",
-				Body:  fmt.Sprintf("save provider config: %v", msg.persistErr),
+				Body:  providerPersistenceErrorBody(msg.profile, msg.persistErr),
 			})
 		} else {
 			body := fmt.Sprintf("Saved provider settings for %s.", msg.profile.Name)
@@ -833,6 +841,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case tea.KeyEnter:
+			if m.startupNotice != nil {
+				m.startupNotice = nil
+				return m, nil
+			}
 			if !m.sendingFullscreenKeys && m.composerLocked() {
 				return m, nil
 			}
@@ -913,7 +925,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) composerLocked() bool {
-	return (m.pendingFullscreen != nil || m.pendingProposal != nil || m.pendingApproval != nil) && m.editingProposal == nil && m.refiningProposal == nil && m.refiningApproval == nil
+	return (m.startupNotice != nil || m.pendingFullscreen != nil || m.pendingProposal != nil || m.pendingApproval != nil) && m.editingProposal == nil && m.refiningProposal == nil && m.refiningApproval == nil
 }
 
 func (m Model) handleActionCardKey(msg tea.KeyMsg) (tea.Model, bool, tea.Cmd) {
@@ -923,6 +935,15 @@ func (m Model) handleActionCardKey(msg tea.KeyMsg) (tea.Model, bool, tea.Cmd) {
 
 	if msg.Type != tea.KeyRunes || len(msg.Runes) != 1 || msg.Alt {
 		return m, false, nil
+	}
+
+	if m.startupNotice != nil {
+		switch unicode.ToUpper(msg.Runes[0]) {
+		case 'Y':
+			m.startupNotice = nil
+			return m, true, nil
+		}
+		return m, true, nil
 	}
 
 	if m.pendingFullscreen != nil {
@@ -1028,6 +1049,10 @@ func (m Model) View() string {
 }
 
 func (m Model) submit() (tea.Model, tea.Cmd) {
+	if m.startupNotice != nil && !m.sendingFullscreenKeys {
+		return m, nil
+	}
+
 	text := strings.TrimSpace(m.input)
 	if m.sendingFullscreenKeys {
 		rawKeys := normalizeFullscreenKeys(m.input)
@@ -2199,17 +2224,15 @@ func (m Model) saveSettingsProfile() (tea.Model, tea.Cmd) {
 		if m.saveProvider != nil {
 			persistErr = m.saveProvider(profile)
 		}
-		if persistErr != nil {
-			return settingsProviderSavedMsg{profile: profile, persistErr: persistErr}
-		}
 		if profile.Preset != m.activeProvider.Preset || m.switchProvider == nil {
-			return settingsProviderSavedMsg{profile: profile}
+			return settingsProviderSavedMsg{profile: profile, persistErr: persistErr}
 		}
 		ctrl, switchedProfile, err := m.switchProvider(profile, m.currentShellContext())
 		return settingsProviderSavedMsg{
-			ctrl:    ctrl,
-			profile: switchedProfile,
-			err:     err,
+			ctrl:       ctrl,
+			profile:    switchedProfile,
+			err:        err,
+			persistErr: persistErr,
 		}
 	}
 }
@@ -2494,6 +2517,19 @@ func (m Model) renderActionCard(width int) string {
 		content := lipgloss.JoinVertical(
 			lipgloss.Left,
 			m.styles.actionTitle.Render("Fullscreen Still Active"),
+			m.styles.actionBody.Render(strings.Join(body, "\n")),
+		)
+		return m.styles.actionCard.BorderForeground(lipgloss.Color("214")).Width(width).Render(content)
+	}
+
+	if m.startupNotice != nil {
+		body := []string{
+			m.startupNotice.Body,
+			"Y continue  F10 settings",
+		}
+		content := lipgloss.JoinVertical(
+			lipgloss.Left,
+			m.styles.actionTitle.Render(m.startupNotice.Title),
 			m.styles.actionBody.Render(strings.Join(body, "\n")),
 		)
 		return m.styles.actionCard.BorderForeground(lipgloss.Color("214")).Width(width).Render(content)
@@ -2843,7 +2879,9 @@ func (m Model) footerParts(width int) []string {
 		if m.canSendActiveKeys() {
 			parts = append(parts, "[S]")
 		}
-		if m.pendingFullscreen != nil {
+		if m.startupNotice != nil {
+			parts = append(parts, "[Y]")
+		} else if m.pendingFullscreen != nil {
 			parts = append(parts, "[Y/N]")
 		} else if m.pendingApproval != nil {
 			parts = append(parts, "[Y/N/R]")
@@ -2864,7 +2902,9 @@ func (m Model) footerParts(width int) []string {
 		if m.canSendActiveKeys() {
 			parts = append(parts, "[S] keys")
 		}
-		if m.pendingFullscreen != nil {
+		if m.startupNotice != nil {
+			parts = append(parts, "[Y] continue")
+		} else if m.pendingFullscreen != nil {
 			parts = append(parts, "[Y/N] fullscreen")
 		} else if m.pendingApproval != nil {
 			parts = append(parts, "[Y/N/R]")
@@ -2886,7 +2926,9 @@ func (m Model) footerParts(width int) []string {
 	if m.canSendActiveKeys() {
 		parts = append(parts, "[S] send keys")
 	}
-	if m.pendingFullscreen != nil {
+	if m.startupNotice != nil {
+		parts = append(parts, "[Y] continue")
+	} else if m.pendingFullscreen != nil {
 		parts = append(parts, "[Y] send anyway", "[N] cancel")
 	} else if m.pendingApproval != nil {
 		parts = append(parts, "[Y] continue", "[N] reject", "[R] refine")
@@ -2903,6 +2945,16 @@ func (m Model) footerParts(width int) []string {
 	}
 	parts = append(parts, "[Ctrl+C] quit")
 	return parts
+}
+
+func startupNoticeForProfile(profile provider.Profile) *startupSecurityNotice {
+	if strings.TrimSpace(profile.APIKeyEnvVar) != "local_file" {
+		return nil
+	}
+	return &startupSecurityNotice{
+		Title: "Less Secure Secret Storage",
+		Body:  fmt.Sprintf("The active provider %s is using a locally stored plaintext secret file. This is less secure than OS keyring storage.", profile.Name),
+	}
 }
 
 func (m *Model) currentHistory() *composerHistory {
@@ -4702,17 +4754,40 @@ func providerSummaryLine(profile provider.Profile) string {
 		return "provider not configured"
 	}
 
-	return fmt.Sprintf("preset=%s  model=%s  base=%s", profile.Preset, profile.Model, profile.BaseURL)
+	auth := providerAuthSourceLabel(profile)
+	if strings.TrimSpace(auth) == "" {
+		auth = "unknown"
+	}
+	return fmt.Sprintf("preset=%s  model=%s  base=%s  auth=%s", profile.Preset, profile.Model, profile.BaseURL, auth)
 }
 
 func providerAuthSourceLabel(profile provider.Profile) string {
 	if strings.TrimSpace(profile.APIKeyEnvVar) != "" {
+		if strings.TrimSpace(profile.APIKeyEnvVar) == "os_keyring" {
+			return "OS keyring"
+		}
+		if strings.TrimSpace(profile.APIKeyEnvVar) == "local_file" {
+			return "local file (less secure)"
+		}
 		return profile.APIKeyEnvVar
+	}
+	if strings.TrimSpace(profile.APIKey) != "" {
+		return "session only"
 	}
 	if profile.AuthMethod == provider.AuthNone {
 		return "none"
 	}
 	return string(profile.AuthMethod)
+}
+
+func providerPersistenceErrorBody(profile provider.Profile, err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, provider.ErrSecretStoreUnavailable) {
+		return fmt.Sprintf("Provider settings for %s are active for this session, but the secret could not be persisted because secure key storage is unavailable: %v", profile.Name, err)
+	}
+	return fmt.Sprintf("save provider config: %v", err)
 }
 
 func currentProviderModelLabel(profile provider.Profile) string {

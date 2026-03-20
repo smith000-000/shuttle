@@ -83,6 +83,7 @@ Important variables:
 - `SHUTTLE_TMUX_SOCKET`: optional tmux socket/server name override
 - `SHUTTLE_STATE_DIR`: optional persistent state directory for logs and shell history
 - `SHUTTLE_RUNTIME_DIR`: optional private runtime directory for staged shell scripts and semantic shell state
+- `SHUTTLE_ALLOW_PLAINTEXT_PROVIDER_SECRETS`: allow an explicit less-secure local file fallback if OS keyring storage is unavailable
 - `SHUTTLE_TRACE`: `off`, `safe`, or `sensitive`
 - `SHUTTLE_TRACE_CONSENT`: must be true or passed as `--trace-consent` when using sensitive trace
 
@@ -144,7 +145,18 @@ Trace modes:
 - `safe`: redacts raw commands, terminal contents, key input, and provider bodies
 - `sensitive`: keeps full raw trace data, but Shuttle requires explicit consent before launch
 
+Important:
+- trace mode only controls what Shuttle writes to its trace log
+- it does not disable normal runtime context sent to the active provider, such as shell output or recovery snapshots needed for agent reasoning
+
 Persistent logs and shell history now default to XDG state space instead of the repo-local `.shuttle/` directory. Ephemeral staged command scripts and semantic shell state now live in a separate private runtime directory.
+
+Provider secret storage policy:
+- preferred: OS keyring
+- also supported: env var references
+- if secure persistence is unavailable, Shuttle can still use a manually entered key for the current session
+- optional fallback: plaintext local file storage, but only when explicitly enabled
+- if the active provider is using the plaintext local fallback, the TUI shows a startup warning before normal composer interaction
 
 ## TUI Notes
 

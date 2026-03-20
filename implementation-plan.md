@@ -20,6 +20,36 @@ Execution-monitor redesign status on `command-execution-redesign`:
 - in progress: security hardening for execution monitoring, tracing, and semantic shell state
 - next: move Shuttle runtime state out of the repo-local `.shuttle/` directory into a user-private runtime location, then keep local semantic-shell behavior stable while preventing bleed-through into remote/subshell flows, then add conservative subshell bootstrap
 
+Security hardening branch scope on `security-hardening-runtime`:
+- audit runtime artifact placement, permissions, and retention now that `main` includes both execution-monitor and provider-onboarding work
+- tighten trace/privacy policy boundaries, especially around sensitive traces and recovery snapshots
+- review semantic shell integration trust boundaries for local vs remote/subshell sessions
+- review provider secret handling end to end:
+  - confirm when API keys are stored in OS keyring vs env-var references
+  - verify no raw API keys are written to provider config files, traces, transcript entries, or debug logs
+  - define behavior when OS keyring is unavailable or fails
+  - policy decision: manual API key entry remains allowed for first-run usability
+  - preferred storage order:
+    - OS keyring when available
+    - env-var reference when configured by the user
+    - session-only secret use when the user does not want persistence
+    - explicit plaintext local fallback only with user consent if no keyring backend is available
+  - implemented on this branch:
+    - manual key entry remains allowed
+    - keyring failure no longer blocks provider use for the current session
+    - opt-in plaintext local fallback is available through `SHUTTLE_ALLOW_PLAINTEXT_PROVIDER_SECRETS` / `--allow-plaintext-provider-secrets`
+    - provider UI now labels `OS keyring`, `session only`, and `local file (less secure)` auth sources
+    - provider config and selected-provider reads now use no-follow file access instead of plain `os.ReadFile`
+    - semantic shell state reads now use no-follow file access as well
+    - provider startup logging now records only coarse auth-source labels such as `env_ref`, `os_keyring`, `local_file`, or `session_only` instead of raw env-var names
+    - safe trace mode now redacts provider auth metadata fields like `api_key_env` and `api_key_ref`
+    - the TUI now shows a blocking startup warning when the active provider is using the plaintext local secret fallback
+  - no local encrypted fallback in the first pass; without a trustworthy local key source it adds complexity more than security
+  - surface storage status in onboarding/settings so the user can see whether a provider secret is coming from keyring, env, session-only entry, or less-secure local storage
+  - close the current onboarding gap: onboarding/settings must be able to ingest a newly entered provider API key and route it through the same storage policy instead of assuming the key already exists in env or persistent config
+  - tighten redaction around provider/auth metadata in traces and onboarding flows
+- document any remaining privacy/security tradeoffs explicitly before the next merge back to `main`
+
 Milestone 5 currently includes:
 - provider profile and resolver scaffolding
 - backend/auth abstraction layers
@@ -53,6 +83,7 @@ Milestone 5 still needs:
 - when sensitive trace is requested, block normal launch behind a one-time explicit consent step that states trace may capture commands, shell output, key input, prompts, and provider payloads
 - rework semantic shell state serialization away from ad hoc tab-delimited text to a robust encoded format such as JSON so `cwd` and other fields cannot corrupt parsing
 - keep recovery snapshots as a supported feature, but add policy controls so future approval/sandbox modes can reduce or disable automatic terminal snapshot upload for untrusted providers or higher-sensitivity sessions
+- make the boundary explicit in docs and UX: trace mode governs local logging only, not the provider context needed for normal agent reasoning
 - the next time `internal/tui/model.go` is touched for execution-control behavior, treat it as a refactor slice:
   - extract composer/input-mode routing from command-execution control
   - move fullscreen/raw-key submission logic behind a narrower interface
