@@ -73,6 +73,18 @@ func TestSpaceKeyAddsSpaceToComposer(t *testing.T) {
 	}
 }
 
+func TestCurrentProviderModelLabelIncludesPresetAndModel(t *testing.T) {
+	label := currentProviderModelLabel(provider.Profile{
+		Name:   "Codex CLI",
+		Preset: provider.PresetCodexCLI,
+		Model:  "gpt-5-codex",
+	})
+
+	if label != "Codex CLI (codex_cli) / gpt-5-codex" {
+		t.Fatalf("unexpected label %q", label)
+	}
+}
+
 func TestLeftRightMovesComposerCursor(t *testing.T) {
 	model := NewModel(fakeWorkspace(), nil)
 	model.setInput("abcd")

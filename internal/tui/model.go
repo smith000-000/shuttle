@@ -4901,10 +4901,17 @@ func currentProviderModelLabel(profile provider.Profile) string {
 	if profile.Preset == "" {
 		return "not configured"
 	}
-	if strings.TrimSpace(profile.Model) == "" {
-		return string(profile.Preset)
+	providerLabel := profile.Name
+	if strings.TrimSpace(providerLabel) == "" {
+		providerLabel = settingsProviderLabel(profile.Preset)
 	}
-	return fmt.Sprintf("%s / %s", profile.Name, profile.Model)
+	if providerLabel == "" {
+		providerLabel = string(profile.Preset)
+	}
+	if strings.TrimSpace(profile.Model) == "" {
+		return fmt.Sprintf("%s (%s)", providerLabel, profile.Preset)
+	}
+	return fmt.Sprintf("%s (%s) / %s", providerLabel, profile.Preset, profile.Model)
 }
 
 func settingsMenuEntries() []settingsMenuEntry {
