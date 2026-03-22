@@ -39,7 +39,7 @@ Provider notes:
 - `mock` uses `none`
 - `openai`, `openrouter`, `openwebui`, `anthropic`, and `custom` normally use `api_key`
 - `ollama` normally uses `none`, but can optionally use `api_key`
-- `codex_cli` normally uses `codex_login`, but Shuttle also allows `api_key` or `none`
+- `codex_cli` uses `codex_login`
 
 ## Resolution Order at Startup
 
@@ -195,8 +195,6 @@ Backend family:
 
 Auth:
 - `codex_login`
-- `api_key`
-- `none`
 
 Current behavior:
 - `codex_login` checks `codex login status` before agent creation
@@ -323,18 +321,6 @@ Setup:
 Expected:
 - if `codex login status` reports logged in, provider can activate
 - if not logged in, Shuttle should fail clearly and tell you to run `codex login`
-
-### 7. Codex API-key path
-
-Setup:
-- configure `codex_cli`
-- set auth to `api_key`
-- provide a key manually or by env
-
-Expected:
-- provider profile resolves
-- model suggestions may come from OpenAI catalog
-- manual model entry still allowed
 
 ## Known Limitations
 

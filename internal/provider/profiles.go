@@ -224,12 +224,10 @@ func resolveResponsesProfile(cfg config.Config, defaults responsesDefaults) Prof
 func resolveCodexCLIProfile(cfg config.Config) Profile {
 	authMethod := AuthCodexLogin
 	switch strings.ToLower(strings.TrimSpace(cfg.ProviderAuthMethod)) {
-	case "api_key":
-		authMethod = AuthAPIKey
-	case "codex_login", "auto", "":
-		authMethod = AuthCodexLogin
 	case "none":
 		authMethod = AuthNone
+	case "codex_login", "auto", "", "api_key":
+		authMethod = AuthCodexLogin
 	}
 
 	return Profile{
