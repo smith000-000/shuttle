@@ -168,6 +168,7 @@ type settingsProviderSavedMsg struct {
 	profile    provider.Profile
 	err        error
 	persistErr error
+	activated  bool
 }
 
 const (
@@ -685,7 +686,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		} else {
 			body := fmt.Sprintf("Saved provider settings for %s.", msg.profile.Name)
-			if msg.ctrl != nil {
+			if msg.activated {
+				body = fmt.Sprintf("Saved and activated provider settings for %s.", msg.profile.Name)
+			} else if msg.ctrl != nil {
 				body = fmt.Sprintf("Saved and refreshed provider settings for %s.", msg.profile.Name)
 			}
 			m.entries = append(m.entries, Entry{
@@ -1903,6 +1906,11 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.settingsModelFilter = ""
 		m.settingsModelInfo = false
 		return m, nil
+	case tea.KeyF8:
+		if m.settingsStep == settingsStepProviderForm {
+			return m.saveSettingsProfile(true)
+		}
+		return m, nil
 	case tea.KeyEsc:
 		switch m.settingsStep {
 		case settingsStepProviderForm:
@@ -2194,7 +2202,7 @@ func (m Model) applySettingsSelection() (tea.Model, tea.Cmd) {
 		profile.SelectedModel = &model
 		return m.switchSettingsProfile(profile, settingsStepActiveModels)
 	case settingsStepProviderForm:
-		return m.saveSettingsProfile()
+		return m.saveSettingsProfile(false)
 	default:
 		return m, nil
 	}
@@ -2247,7 +2255,7 @@ func (m Model) loadSettingsModels() (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m Model) saveSettingsProfile() (tea.Model, tea.Cmd) {
+func (m Model) saveSettingsProfile(activate bool) (tea.Model, tea.Cmd) {
 	if m.settingsConfig == nil {
 		return m, nil
 	}
@@ -2278,8 +2286,13 @@ func (m Model) saveSettingsProfile() (tea.Model, tea.Cmd) {
 		if m.saveProvider != nil {
 			persistErr = m.saveProvider(profile)
 		}
-		if profile.Preset != m.activeProvider.Preset || m.switchProvider == nil {
-			return settingsProviderSavedMsg{profile: profile, persistErr: persistErr}
+		shouldActivate := activate || profile.Preset == m.activeProvider.Preset
+		if !shouldActivate || m.switchProvider == nil {
+			return settingsProviderSavedMsg{
+				profile:    profile,
+				persistErr: persistErr,
+				activated:  false,
+			}
 		}
 		ctrl, switchedProfile, err := m.switchProvider(profile, m.currentShellContext())
 		return settingsProviderSavedMsg{
@@ -2287,6 +2300,7 @@ func (m Model) saveSettingsProfile() (tea.Model, tea.Cmd) {
 			profile:    switchedProfile,
 			err:        err,
 			persistErr: persistErr,
+			activated:  err == nil,
 		}
 	}
 }
@@ -2844,7 +2858,15 @@ func (m Model) renderStatusLine(width int) string {
 			label = strings.TrimSpace(m.lastModelInfo.RequestedModel)
 		}
 		if label != "" {
-			rightParts = append(rightParts, m.styles.statusRemote.Render("MODEL "+label))
+			providerLabel := strings.TrimSpace(m.lastModelInfo.ProviderPreset)
+			if providerLabel != "" {
+				providerLabel = settingsProviderLabel(provider.ProviderPreset(providerLabel))
+			}
+			if providerLabel != "" {
+				rightParts = append(rightParts, m.styles.statusRemote.Render("MODEL "+providerLabel+" / "+label))
+			} else {
+				rightParts = append(rightParts, m.styles.statusRemote.Render("MODEL "+label))
+			}
 		}
 	}
 	if m.busy {
@@ -3495,7 +3517,8 @@ func (m Model) renderSettingsModels(contentWidth int) []string {
 			lastProvider = choice.profile.Name
 		}
 		current := choice.profile.Preset == m.activeProvider.Preset && choice.model.ID == m.activeProvider.Model
-		lines = append(lines, m.renderSettingsRow(choice.model.ID, index == m.settingsModelIdx, current, false))
+		label := fmt.Sprintf("%s / %s", settingsProviderLabel(choice.profile.Preset), choice.model.ID)
+		lines = append(lines, m.renderSettingsRow(label, index == m.settingsModelIdx, current, false))
 		detail := modelSummaryLine(choice.model)
 		if detail != "" {
 			for _, line := range wrapParagraphs(detail, max(10, contentWidth-2)) {
@@ -5171,7 +5194,7 @@ func settingsFooter(width int, step settingsStep) string {
 		case settingsStepActiveModels:
 			return "Type filter  Shift+I info  Enter activate  Esc clear/back  Pg page  F2 shell  F10 close"
 		case settingsStepProviderForm:
-			return "Type edit  Tab next  Enter save  Esc back  F2 shell  F10 close"
+			return "Type edit  Tab next  Enter save  F8 save+activate  Esc back  F2 shell  F10 close"
 		default:
 			return "Enter open  Esc close  Up/Down move  F2 shell  F10 close"
 		}
@@ -5185,7 +5208,7 @@ func settingsFooter(width int, step settingsStep) string {
 	case settingsStepActiveModels:
 		return "Type to filter models  Shift+I toggle info  Enter switch active model  Esc clear filter/back  Up/Down move  PgUp/PgDn page  F2 shell  F10 close"
 	case settingsStepProviderForm:
-		return "Type to edit fields  Tab/Up/Down move  Enter save settings  Esc back  F2 shell  F10 close"
+		return "Type to edit fields  Tab/Up/Down move  Enter save settings  F8 save and activate  Esc back  F2 shell  F10 close"
 	default:
 		return "Enter open section  Esc close  Up/Down move  F2 shell  F10 close"
 	}

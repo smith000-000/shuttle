@@ -2957,7 +2957,7 @@ func TestSaveSettingsProfileRejectsUnknownModelWhenCatalogIsAvailable(t *testing
 	model.settingsConfig = &form
 	model.settingsStep = settingsStepProviderForm
 
-	updated, cmd := model.saveSettingsProfile()
+	updated, cmd := model.saveSettingsProfile(false)
 	model = updated.(Model)
 	if cmd == nil {
 		t.Fatal("expected settings save command")
@@ -3040,6 +3040,9 @@ func TestSettingsActiveModelInfoToggleShowsSelectedDetailsOnly(t *testing.T) {
 	updated, _ = model.Update(loaded)
 	model = updated.(Model)
 	view := model.View()
+	if !strings.Contains(view, "OpenRouter / allenai/olmo-3-7b-think") {
+		t.Fatalf("expected provider label next to model slug, got %q", view)
+	}
 	if !strings.Contains(view, "AllenAI: Olmo 3 7B Think  context 65536  max out 65536  pricing p=0.00000012 c=0.0000002") || !strings.Contains(view, "mode text->text") || strings.Contains(view, "Long form provider description") || strings.Contains(view, "params reasoning,structured_outputs") {
 		t.Fatalf("unexpected default model info view %q", view)
 	}
@@ -3078,7 +3081,7 @@ func TestSaveSettingsProfileRefreshesCurrentProviderEvenWhenPersistenceFails(t *
 	model.settingsConfig = &form
 	model.settingsStep = settingsStepProviderForm
 
-	updated, cmd := model.saveSettingsProfile()
+	updated, cmd := model.saveSettingsProfile(false)
 	model = updated.(Model)
 	if cmd == nil {
 		t.Fatal("expected settings save command")
@@ -3102,6 +3105,57 @@ func TestSaveSettingsProfileRefreshesCurrentProviderEvenWhenPersistenceFails(t *
 	}
 }
 
+func TestF8SavesAndActivatesProviderFromSettingsForm(t *testing.T) {
+	switchedCtrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
+		func() ([]provider.OnboardingCandidate, error) { return nil, nil },
+		nil,
+		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+			return switchedCtrl, profile, nil
+		},
+		func(provider.Profile) error { return nil },
+	)
+	model.settingsOpen = true
+	model.settingsStep = settingsStepProviderForm
+	form := buildOnboardingForm(provider.OnboardingCandidate{
+		Profile: provider.Profile{
+			Preset:       provider.PresetOpenRouter,
+			Name:         "OpenRouter Responses",
+			Model:        "openai/gpt-5",
+			BaseURL:      "https://openrouter.ai/api/v1",
+			APIKeyEnvVar: "OPENROUTER_API_KEY",
+		},
+	})
+	model.settingsConfig = &form
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyF8})
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected F8 to trigger a save-and-activate command")
+	}
+	msg := cmd()
+	savedMsg, ok := msg.(settingsProviderSavedMsg)
+	if !ok {
+		t.Fatalf("expected settingsProviderSavedMsg, got %T", msg)
+	}
+	if !savedMsg.activated {
+		t.Fatalf("expected activated save result, got %#v", savedMsg)
+	}
+	if savedMsg.ctrl != switchedCtrl {
+		t.Fatal("expected switched controller when activating provider")
+	}
+	updated, _ = model.Update(savedMsg)
+	model = updated.(Model)
+	if model.activeProvider.Preset != provider.PresetOpenRouter {
+		t.Fatalf("expected active provider to switch, got %#v", model.activeProvider)
+	}
+	last := model.entries[len(model.entries)-1]
+	if last.Title != "system" || !strings.Contains(last.Body, "Saved and activated provider settings") {
+		t.Fatalf("expected activation success message, got %#v", last)
+	}
+}
+
 func TestStatusLineShowsLastReplyModel(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.width = 100
@@ -3109,7 +3163,7 @@ func TestStatusLineShowsLastReplyModel(t *testing.T) {
 	model.shellContext = shell.PromptContext{User: "jsmith", Host: "linuxdesktop", Directory: "~/source/repos/aiterm", PromptSymbol: "%"}
 	updated, _ := model.Update(controllerEventsMsg{events: []controller.TranscriptEvent{{Kind: controller.EventModelInfo, Payload: controller.AgentModelInfo{ProviderPreset: "openrouter", RequestedModel: "openrouter/auto", ResponseModel: "openai/gpt-5-nano-2025-08-07"}}}})
 	model = updated.(Model)
-	if !strings.Contains(model.View(), "MODEL openai/gpt-5-nano-2025-08-07") {
+	if !strings.Contains(model.View(), "MODEL OpenRouter / openai/gpt-5-nano-2025-08-07") {
 		t.Fatalf("expected last reply model in status line, got %q", model.View())
 	}
 }
