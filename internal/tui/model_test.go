@@ -2621,39 +2621,6 @@ func TestApprovalRefineUsesSeparateNoteFlow(t *testing.T) {
 	}
 }
 
-func TestF3OpensProviderOnboarding(t *testing.T) {
-	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
-		provider.Profile{Preset: provider.PresetOpenAI, Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
-		func() ([]provider.OnboardingCandidate, error) {
-			return []provider.OnboardingCandidate{
-				{
-					Profile: provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
-				},
-				{
-					Profile:    provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openai/gpt-5", BaseURL: "https://openrouter.ai/api/v1"},
-					AuthSource: "OPENROUTER_API_KEY",
-				},
-			}, nil
-		},
-		func(profile provider.Profile) ([]provider.ModelOption, error) {
-			return []provider.ModelOption{{ID: profile.Model}}, nil
-		},
-		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
-			return &fakeController{}, profile, nil
-		},
-		func(provider.Profile) error { return nil },
-	)
-
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF3})
-	next := updated.(Model)
-	if !next.onboardingOpen {
-		t.Fatal("expected provider onboarding to open")
-	}
-	if len(next.onboardingChoices) != 2 {
-		t.Fatalf("expected two onboarding choices, got %d", len(next.onboardingChoices))
-	}
-}
-
 func TestSlashOnboardOpensProviderOnboarding(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.mode = AgentMode
@@ -2702,9 +2669,12 @@ func TestProviderOnboardingSelectionSwitchesController(t *testing.T) {
 		func(provider.Profile) error { return nil },
 	)
 
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF3})
+	updated, cmd := model.openOnboarding()
 	model = updated.(Model)
-	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Fatal("expected onboarding open to be synchronous")
+	}
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = updated.(Model)
 	if cmd == nil {
 		t.Fatal("expected model enumeration command")
@@ -2758,13 +2728,16 @@ func TestManualProviderOnboardingCollectsConfigAndPersists(t *testing.T) {
 		},
 	)
 
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF3})
+	updated, cmd := model.openOnboarding()
 	model = updated.(Model)
+	if cmd != nil {
+		t.Fatal("expected onboarding open to be synchronous")
+	}
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = updated.(Model)
 	model.onboardingForm.index = 2
 	model.onboardingForm.fields[2].value = "router-secret"
-	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = updated.(Model)
 	if cmd == nil {
 		t.Fatal("expected provider switch command")

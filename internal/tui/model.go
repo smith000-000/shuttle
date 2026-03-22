@@ -266,7 +266,7 @@ func NewModel(workspace tmux.Workspace, ctrl controller.Controller) Model {
 			},
 			{
 				Title: "system",
-				Body:  "Tab mode. Up/Down history. PgUp/PgDn scroll. Enter submit. F2 take control. F3 providers. F10 settings. /onboard opens provider onboarding. Esc clear or interrupt. Ctrl+C quit.",
+				Body:  "Tab mode. Up/Down history. PgUp/PgDn scroll. Enter submit. F2 take control. F10 settings. /onboard opens provider onboarding. Esc clear or interrupt. Ctrl+C quit.",
 			},
 		},
 		selectedEntry: 1,
@@ -723,8 +723,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleComposerCtrlC()
 		case tea.KeyF2:
 			return m.takeControlNow()
-		case tea.KeyF3:
-			return m.openOnboarding()
 		case tea.KeyF10:
 			return m.openSettings()
 		case tea.KeyEsc:
@@ -2934,7 +2932,7 @@ func (m Model) footerParts(width int) []string {
 
 	switch {
 	case width < 72:
-		parts := []string{"[Tab]", "[Pg]", "[Enter]", "[Esc]", "[F2]", "[F3]", "[F10]", "[Ctrl+O]", "[Ctrl+C]"}
+		parts := []string{"[Tab]", "[Pg]", "[Enter]", "[Esc]", "[F2]", "[F10]", "[Ctrl+O]", "[Ctrl+C]"}
 		if m.canSendActiveKeys() {
 			parts = append(parts, "[S]")
 		}
@@ -2957,7 +2955,7 @@ func (m Model) footerParts(width int) []string {
 		}
 		return parts
 	case width < 100:
-		parts := []string{"[Tab] mode", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Enter] submit", escHint, "[F2] shell", "[F3] providers", "[F10] settings", "[Ctrl+C] quit"}
+		parts := []string{"[Tab] mode", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Enter] submit", escHint, "[F2] shell", "[F10] settings", "[Ctrl+C] quit"}
 		if m.canSendActiveKeys() {
 			parts = append(parts, "[S] keys")
 		}
@@ -2981,7 +2979,7 @@ func (m Model) footerParts(width int) []string {
 		return parts
 	}
 
-	parts := []string{"[Tab] mode", "[Up/Down] history", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Ctrl+U/D] half-page", "[Home/End] bounds", "[Enter] submit", escHint, "[Ctrl+J] newline", "[F2] shell", "[F3] providers", "[F10] settings"}
+	parts := []string{"[Tab] mode", "[Up/Down] history", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Ctrl+U/D] half-page", "[Home/End] bounds", "[Enter] submit", escHint, "[Ctrl+J] newline", "[F2] shell", "[F10] settings"}
 	if m.canSendActiveKeys() {
 		parts = append(parts, "[S] send keys")
 	}

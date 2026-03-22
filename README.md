@@ -181,6 +181,7 @@ The TUI is intentionally keyboard-first. Current behavior is still evolving, so 
 ## Important Docs
 
 - [implementation-plan.md](implementation-plan.md)
+- [provider-auth-guide.md](provider-auth-guide.md)
 - [shell-execution-strategy.md](shell-execution-strategy.md)
 - [provider-integration-plan.md](provider-integration-plan.md)
 - [agent-runtime-design.md](agent-runtime-design.md)
