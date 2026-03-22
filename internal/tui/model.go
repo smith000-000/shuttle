@@ -65,6 +65,10 @@ type shellInterruptMsg struct {
 	err error
 }
 
+type exitConfirmExpiredMsg struct {
+	token uint64
+}
+
 type fullscreenKeysSentMsg struct {
 	keys string
 	err  error
@@ -90,10 +94,11 @@ type startupSecurityNotice struct {
 }
 
 type providerSwitchedMsg struct {
-	ctrl       controller.Controller
-	profile    provider.Profile
-	err        error
-	persistErr error
+	ctrl         controller.Controller
+	profile      provider.Profile
+	err          error
+	persistErr   error
+	settingsStep settingsStep
 }
 
 type providerModelsLoadedMsg struct {
@@ -130,10 +135,11 @@ type onboardingFormState struct {
 type settingsStep string
 
 const (
-	settingsStepMenu         settingsStep = "menu"
-	settingsStepProviders    settingsStep = "providers"
-	settingsStepActiveModels settingsStep = "active_models"
-	settingsStepProviderForm settingsStep = "provider_form"
+	settingsStepMenu           settingsStep = "menu"
+	settingsStepProviders      settingsStep = "providers"
+	settingsStepActiveProvider settingsStep = "active_provider"
+	settingsStepActiveModels   settingsStep = "active_models"
+	settingsStepProviderForm   settingsStep = "provider_form"
 )
 
 type settingsMenuEntry struct {
@@ -214,6 +220,8 @@ type Model struct {
 	sendingFullscreenKeys bool
 	lastFullscreenKeys    string
 	lastFullscreenKeysAt  time.Time
+	exitConfirmUntil      time.Time
+	exitConfirmToken      uint64
 	checkInInFlight       bool
 	lastCheckInAt         time.Time
 	lastInterruptNoticeID string
@@ -513,6 +521,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.selectedEntry = len(m.entries) - 1
 		m.clampSelection()
 		return m, tea.Batch(m.pollShellTailCmd(), m.pollActiveExecutionCmd())
+	case exitConfirmExpiredMsg:
+		if msg.token == m.exitConfirmToken {
+			m.clearExitConfirm()
+		}
+		return m, nil
 	case fullscreenKeysSentMsg:
 		pinned := m.isTranscriptPinned()
 		if msg.err != nil {
@@ -561,17 +574,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.onboardingForm = nil
 		m.onboardingModels = nil
 		m.onboardingModelIdx = 0
-		m.settingsOpen = false
-		m.settingsStep = settingsStepMenu
-		m.settingsIndex = 0
-		m.settingsProviders = nil
-		m.settingsProviderIdx = 0
-		m.settingsConfig = nil
-		m.settingsModelCatalog = nil
-		m.settingsModels = nil
-		m.settingsModelIdx = 0
-		m.settingsModelFilter = ""
-		m.settingsModelInfo = false
+		if msg.settingsStep != "" {
+			m.settingsOpen = true
+			m.settingsStep = msg.settingsStep
+			m.settingsConfig = nil
+			m.settingsProviderIdx = m.currentSettingsProviderIndex()
+			if msg.settingsStep == settingsStepActiveModels {
+				m.applySettingsModelFilter()
+			}
+		} else {
+			m.settingsOpen = false
+			m.settingsStep = settingsStepMenu
+			m.settingsIndex = 0
+			m.settingsProviders = nil
+			m.settingsProviderIdx = 0
+			m.settingsConfig = nil
+			m.settingsModelCatalog = nil
+			m.settingsModels = nil
+			m.settingsModelIdx = 0
+			m.settingsModelFilter = ""
+			m.settingsModelInfo = false
+		}
 		m.pendingApproval = nil
 		m.pendingProposal = nil
 		m.refiningApproval = nil
@@ -697,7 +720,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.Type {
 		case tea.KeyCtrlC:
-			return m, tea.Quit
+			return m.handleComposerCtrlC()
 		case tea.KeyF2:
 			return m.takeControlNow()
 		case tea.KeyF3:
@@ -1899,6 +1922,8 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.settingsModels = nil
 			m.settingsModelIdx = 0
 			m.settingsModelInfo = false
+		case settingsStepActiveProvider:
+			m.settingsStep = settingsStepMenu
 		case settingsStepProviders:
 			m.settingsStep = settingsStepMenu
 		default:
@@ -1911,7 +1936,7 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.settingsIndex > 0 {
 				m.settingsIndex--
 			}
-		case settingsStepProviders:
+		case settingsStepProviders, settingsStepActiveProvider:
 			if m.settingsProviderIdx > 0 {
 				m.settingsProviderIdx--
 			}
@@ -1932,7 +1957,7 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.settingsIndex < len(settingsMenuEntries())-1 {
 				m.settingsIndex++
 			}
-		case settingsStepProviders:
+		case settingsStepProviders, settingsStepActiveProvider:
 			if m.settingsProviderIdx < len(m.settingsProviders)-1 {
 				m.settingsProviderIdx++
 			}
@@ -2060,6 +2085,14 @@ func (m Model) applyOnboardingSelection() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) switchOnboardingProfile(profile provider.Profile) (tea.Model, tea.Cmd) {
+	return m.switchProfile(profile, "")
+}
+
+func (m Model) switchSettingsProfile(profile provider.Profile, step settingsStep) (tea.Model, tea.Cmd) {
+	return m.switchProfile(profile, step)
+}
+
+func (m Model) switchProfile(profile provider.Profile, step settingsStep) (tea.Model, tea.Cmd) {
 	shellContext := m.currentShellContext()
 	m.busy = true
 	m.busyStartedAt = time.Now()
@@ -2070,10 +2103,11 @@ func (m Model) switchOnboardingProfile(profile provider.Profile) (tea.Model, tea
 			persistErr = m.saveProvider(profile)
 		}
 		return providerSwitchedMsg{
-			ctrl:       ctrl,
-			profile:    profile,
-			err:        err,
-			persistErr: persistErr,
+			ctrl:         ctrl,
+			profile:      profile,
+			err:          err,
+			persistErr:   persistErr,
+			settingsStep: step,
 		}
 	}
 }
@@ -2124,6 +2158,11 @@ func (m Model) applySettingsSelection() (tea.Model, tea.Cmd) {
 			m.settingsModelInfo = false
 			return m, nil
 		}
+		if m.settingsIndex == 1 {
+			m.settingsStep = settingsStepActiveProvider
+			m.settingsProviderIdx = m.currentSettingsProviderIndex()
+			return m, nil
+		}
 		return m.loadSettingsModels()
 	case settingsStepProviders:
 		if len(m.settingsProviders) == 0 {
@@ -2137,6 +2176,15 @@ func (m Model) applySettingsSelection() (tea.Model, tea.Cmd) {
 		m.settingsStep = settingsStepProviderForm
 		m.settingsConfig = &form
 		return m, nil
+	case settingsStepActiveProvider:
+		if len(m.settingsProviders) == 0 {
+			return m, nil
+		}
+		entry := m.settingsProviders[m.settingsProviderIdx]
+		if entry.disabled || entry.candidate == nil {
+			return m, nil
+		}
+		return m.switchSettingsProfile(entry.candidate.Profile, settingsStepActiveProvider)
 	case settingsStepActiveModels:
 		if len(m.settingsModels) == 0 {
 			return m, nil
@@ -2146,7 +2194,7 @@ func (m Model) applySettingsSelection() (tea.Model, tea.Cmd) {
 		model := choice.model
 		profile.Model = model.ID
 		profile.SelectedModel = &model
-		return m.switchOnboardingProfile(profile)
+		return m.switchSettingsProfile(profile, settingsStepActiveModels)
 	case settingsStepProviderForm:
 		return m.saveSettingsProfile()
 	default:
@@ -2220,6 +2268,14 @@ func (m Model) saveSettingsProfile() (tea.Model, tea.Cmd) {
 	m.busy = true
 	m.busyStartedAt = time.Now()
 	return m, func() tea.Msg {
+		if m.loadModels != nil && shouldValidateProviderModel(profile) {
+			models, modelErr := m.loadModels(profile)
+			if modelErr == nil && len(models) > 0 && !containsModelOption(models, profile.Model) {
+				return settingsProviderSavedMsg{
+					err: fmt.Errorf("model %q is not in the provider model list; pick a model from Active Model or enter an exact supported ID", profile.Model),
+				}
+			}
+		}
 		var persistErr error
 		if m.saveProvider != nil {
 			persistErr = m.saveProvider(profile)
@@ -2778,6 +2834,9 @@ func (m Model) renderFooter(width int) string {
 func (m Model) renderStatusLine(width int) string {
 	left := m.renderShellContext()
 	rightParts := make([]string, 0, 4)
+	if m.exitConfirmActive() {
+		rightParts = append(rightParts, m.styles.statusBusy.Render("Hit Ctrl-C again to exit"))
+	}
 	if m.shellContext.Remote {
 		rightParts = append(rightParts, m.styles.statusRemote.Render("REMOTE"))
 	}
@@ -2968,6 +3027,9 @@ func (m *Model) currentHistory() *composerHistory {
 func (m *Model) setInput(value string) {
 	m.input = value
 	m.cursor = utf8.RuneCountInString(value)
+	if strings.TrimSpace(value) != "" {
+		m.clearExitConfirm()
+	}
 }
 
 func (m *Model) clampCursor() {
@@ -2999,6 +3061,9 @@ func (m *Model) insertTextAtCursor(value string) {
 	runes = append(runes[:index], append(inserted, runes[index:]...)...)
 	m.input = string(runes)
 	m.cursor = index + len(inserted)
+	if strings.TrimSpace(m.input) != "" {
+		m.clearExitConfirm()
+	}
 }
 
 func (m *Model) backspaceAtCursor() {
@@ -3013,6 +3078,9 @@ func (m *Model) backspaceAtCursor() {
 	runes = append(runes[:index-1], runes[index:]...)
 	m.input = string(runes)
 	m.cursor = index - 1
+	if strings.TrimSpace(m.input) != "" {
+		m.clearExitConfirm()
+	}
 }
 
 func (m *Model) deleteAtCursor() {
@@ -3027,6 +3095,38 @@ func (m *Model) deleteAtCursor() {
 	runes = append(runes[:index], runes[index+1:]...)
 	m.input = string(runes)
 	m.cursor = index
+	if strings.TrimSpace(m.input) != "" {
+		m.clearExitConfirm()
+	}
+}
+
+func (m Model) handleComposerCtrlC() (tea.Model, tea.Cmd) {
+	if m.exitConfirmActive() {
+		return m, tea.Quit
+	}
+
+	if m.input != "" {
+		m.setInput("")
+	}
+	return m.armExitConfirm()
+}
+
+func (m Model) armExitConfirm() (tea.Model, tea.Cmd) {
+	m.exitConfirmToken++
+	token := m.exitConfirmToken
+	m.exitConfirmUntil = time.Now().Add(3 * time.Second)
+	return m, tea.Tick(3*time.Second, func(time.Time) tea.Msg {
+		return exitConfirmExpiredMsg{token: token}
+	})
+}
+
+func (m *Model) clearExitConfirm() {
+	m.exitConfirmUntil = time.Time{}
+	m.exitConfirmToken = 0
+}
+
+func (m Model) exitConfirmActive() bool {
+	return !m.exitConfirmUntil.IsZero() && time.Now().Before(m.exitConfirmUntil)
 }
 
 func (m Model) transcriptViewportHeight(actionCard string, planCard string, activeExecutionCard string, statusLine string, shellTail string, composer string, footer string, screenHeight int) int {
@@ -3312,6 +3412,10 @@ func (m Model) renderSettingsView() string {
 		lines = append(lines, m.styles.detailBody.Render("Providers"))
 		lines = append(lines, m.styles.detailMeta.Render("Edit provider settings and save them for future sessions."))
 		lines = append(lines, m.renderSettingsProviders(contentWidth)...)
+	case settingsStepActiveProvider:
+		lines = append(lines, m.styles.detailBody.Render("Active Provider"))
+		lines = append(lines, m.styles.detailMeta.Render("Choose which configured provider Shuttle should use right now."))
+		lines = append(lines, m.renderSettingsProviders(contentWidth)...)
 	case settingsStepActiveModels:
 		lines = append(lines, m.styles.detailBody.Render("Active Model"))
 		lines = append(lines, m.styles.detailMeta.Render("Choose the provider/model Shuttle should use right now."))
@@ -3372,6 +3476,9 @@ func (m Model) renderSettingsModels(contentWidth int) []string {
 	}
 	lines = append(lines, m.styles.detailMeta.Render(filterLine))
 	lines = append(lines, m.styles.detailMeta.Render("Shift+I shows extra model details for the highlighted row."))
+	if settingsModelChoicesContainPreset(m.settingsModelCatalog, provider.PresetCodexCLI) {
+		lines = append(lines, m.styles.detailMeta.Render("Codex CLI entries are suggested from the OpenAI catalog when available. The live codex CLI picker may differ, and manual entry is still allowed."))
+	}
 	if len(m.settingsModels) == 0 {
 		if strings.TrimSpace(m.settingsModelFilter) != "" && len(m.settingsModelCatalog) > 0 {
 			lines = append(lines, m.styles.detailBody.Render("No models match the current filter."))
@@ -4803,6 +4910,7 @@ func currentProviderModelLabel(profile provider.Profile) string {
 func settingsMenuEntries() []settingsMenuEntry {
 	return []settingsMenuEntry{
 		{label: "Providers"},
+		{label: "Active Provider"},
 		{label: "Active Model"},
 	}
 }
@@ -4988,12 +5096,35 @@ func fuzzySubsequenceMatch(field string, filter string) bool {
 }
 
 func containsModelOption(models []provider.ModelOption, target string) bool {
+	target = strings.TrimSpace(target)
 	for _, model := range models {
-		if model.ID == target {
+		if strings.TrimSpace(model.ID) == target {
 			return true
 		}
 	}
 	return false
+}
+
+func settingsModelChoicesContainPreset(choices []settingsModelChoice, preset provider.ProviderPreset) bool {
+	for _, choice := range choices {
+		if choice.profile.Preset == preset {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldValidateProviderModel(profile provider.Profile) bool {
+	if strings.TrimSpace(profile.Model) == "" {
+		return false
+	}
+
+	switch profile.Preset {
+	case provider.PresetOpenAI, provider.PresetOpenRouter, provider.PresetOpenWebUI, provider.PresetAnthropic, provider.PresetOllama:
+		return true
+	default:
+		return false
+	}
 }
 
 func onboardingFooter(width int, step onboardingStep) string {
@@ -5030,6 +5161,8 @@ func settingsFooter(width int, step settingsStep) string {
 		switch step {
 		case settingsStepProviders:
 			return "Enter edit  Esc back  Up/Down move  F2 shell  F10 close"
+		case settingsStepActiveProvider:
+			return "Enter switch  Esc back  Up/Down move  F2 shell  F10 close"
 		case settingsStepActiveModels:
 			return "Type filter  Shift+I info  Enter activate  Esc clear/back  Pg page  F2 shell  F10 close"
 		case settingsStepProviderForm:
@@ -5042,6 +5175,8 @@ func settingsFooter(width int, step settingsStep) string {
 	switch step {
 	case settingsStepProviders:
 		return "Enter edit provider settings  Esc back  Up/Down move  F2 shell  F10 close"
+	case settingsStepActiveProvider:
+		return "Enter switch active provider  Esc back  Up/Down move  F2 shell  F10 close"
 	case settingsStepActiveModels:
 		return "Type to filter models  Shift+I toggle info  Enter switch active model  Esc clear filter/back  Up/Down move  PgUp/PgDn page  F2 shell  F10 close"
 	case settingsStepProviderForm:

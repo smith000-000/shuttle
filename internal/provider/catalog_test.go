@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -119,6 +120,50 @@ func TestListModelsAnthropic(t *testing.T) {
 }
 
 func TestListModelsCodexCLI(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Fatalf("expected /v1/models, got %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer codex-key" {
+			t.Fatalf("expected auth header, got %q", got)
+		}
+		io.WriteString(w, `{"data":[
+			{"id":"gpt-5.4"},
+			{"id":"gpt-5.3-codex"},
+			{"id":"gpt-4.1"},
+			{"id":"o4-mini"}
+		]}`)
+	}))
+	defer server.Close()
+
+	models, err := ListModels(Profile{
+		BackendFamily: BackendCLIAgent,
+		Preset:        PresetCodexCLI,
+		Model:         "gpt-5.2-codex",
+		BaseURL:       server.URL + "/v1",
+		APIKey:        "codex-key",
+	}, server.Client())
+	if err != nil {
+		t.Fatalf("ListModels() error = %v", err)
+	}
+
+	if len(models) != 3 {
+		t.Fatalf("expected 3 codex suggestions, got %#v", models)
+	}
+	if models[0].ID != "gpt-5.2-codex" || models[1].ID != "gpt-5.3-codex" || models[2].ID != "gpt-5.4" {
+		t.Fatalf("unexpected codex model list %#v", models)
+	}
+	for _, model := range models {
+		if strings.Contains(model.ID, "gpt-4.1") || strings.Contains(model.ID, "o4-mini") {
+			t.Fatalf("unexpected non-codex suggestion %#v", models)
+		}
+		if !strings.Contains(model.Description, "Codex CLI's own picker may differ") {
+			t.Fatalf("expected warning text in description, got %#v", model)
+		}
+	}
+}
+
+func TestListModelsCodexCLIFallsBackToCuratedList(t *testing.T) {
 	models, err := ListModels(Profile{
 		BackendFamily: BackendCLIAgent,
 		Preset:        PresetCodexCLI,
@@ -127,19 +172,11 @@ func TestListModelsCodexCLI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListModels() error = %v", err)
 	}
-
 	if len(models) == 0 {
 		t.Fatal("expected curated codex models")
 	}
-	found := false
-	for _, model := range models {
-		if model.ID == "gpt-5.2-codex" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("expected selected codex model to be present, got %#v", models)
+	if models[0].ID == "" {
+		t.Fatalf("expected non-empty curated model IDs %#v", models)
 	}
 }
 

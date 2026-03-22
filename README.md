@@ -18,6 +18,7 @@ What is working now:
 - `KEYS>` mode for sending raw terminal input
 - partial semantic shell integration for local shells
 - real OpenAI Responses API path with API-key auth
+- Codex CLI model suggestions sourced from the OpenAI models catalog when available, with free-text entry still allowed
 
 What is still in progress:
 - provider onboarding and saved profiles
@@ -157,6 +158,12 @@ Provider secret storage policy:
 - if secure persistence is unavailable, Shuttle can still use a manually entered key for the current session
 - optional fallback: plaintext local file storage, but only when explicitly enabled
 - if the active provider is using the plaintext local fallback, the TUI shows a startup warning before normal composer interaction
+
+Codex CLI model selection:
+- Shuttle does not have an authoritative machine-readable Codex CLI picker feed
+- when OpenAI model listing is available, Shuttle uses that catalog as a suggestions source for Codex-related models
+- the settings UI labels those entries as suggestions; the live Codex CLI picker may differ
+- manual model entry is still allowed for Codex CLI profiles
 
 ## TUI Notes
 

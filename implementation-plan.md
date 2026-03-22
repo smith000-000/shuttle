@@ -34,7 +34,7 @@ Security hardening branch scope on `security-hardening-runtime`:
     - env-var reference when configured by the user
     - session-only secret use when the user does not want persistence
     - explicit plaintext local fallback only with user consent if no keyring backend is available
-  - implemented on this branch:
+- implemented on this branch:
     - manual key entry remains allowed
     - keyring failure no longer blocks provider use for the current session
     - opt-in plaintext local fallback is available through `SHUTTLE_ALLOW_PLAINTEXT_PROVIDER_SECRETS` / `--allow-plaintext-provider-secrets`
@@ -44,6 +44,7 @@ Security hardening branch scope on `security-hardening-runtime`:
     - provider startup logging now records only coarse auth-source labels such as `env_ref`, `os_keyring`, `local_file`, or `session_only` instead of raw env-var names
     - safe trace mode now redacts provider auth metadata fields like `api_key_env` and `api_key_ref`
     - the TUI now shows a blocking startup warning when the active provider is using the plaintext local secret fallback
+    - Codex CLI model selection now uses the OpenAI models endpoint as a suggestions source when available, while keeping manual free-text model entry and explicit caveats that the live Codex CLI picker may differ
   - no local encrypted fallback in the first pass; without a trustworthy local key source it adds complexity more than security
   - surface storage status in onboarding/settings so the user can see whether a provider secret is coming from keyring, env, session-only entry, or less-secure local storage
   - close the current onboarding gap: onboarding/settings must be able to ingest a newly entered provider API key and route it through the same storage policy instead of assuming the key already exists in env or persistent config
@@ -54,6 +55,7 @@ Milestone 5 currently includes:
 - provider profile and resolver scaffolding
 - backend/auth abstraction layers
 - provider factory wiring
+- provider registration is still static and hand-wired across profile resolution, factory construction, onboarding detection, settings ordering, and model listing; a future provider registry should make first-class providers self-registering instead of requiring edits in multiple switch statements
 - one real `responses_http` path for the standard OpenAI API endpoint with API-key auth
 - `httptest` coverage for the OpenAI-compatible adapter
 - execution monitor redesign for long-running and interactive shell commands
