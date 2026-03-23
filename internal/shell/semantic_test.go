@@ -89,6 +89,24 @@ func TestEnsureLocalShellIntegrationSendsSourceCommand(t *testing.T) {
 	}
 }
 
+func TestSemanticShellScriptsUseSTTerminators(t *testing.T) {
+	bashScript := bashSemanticShellIntegrationScript("/tmp/bash.state")
+	zshScript := zshSemanticShellIntegrationScript("/tmp/zsh.state")
+
+	if !strings.Contains(bashScript, `printf '\033]133;%s\033\\' "$1"`) {
+		t.Fatalf("expected bash semantic script to emit OSC 133 with ST terminator, got %q", bashScript)
+	}
+	if !strings.Contains(zshScript, `printf '\033]133;%s\033\\' "$1"`) {
+		t.Fatalf("expected zsh semantic script to emit OSC 133 with ST terminator, got %q", zshScript)
+	}
+	if !strings.Contains(bashScript, `printf '\033]7;file://%s%s\033\\'`) {
+		t.Fatalf("expected bash semantic script to emit OSC 7 with ST terminator, got %q", bashScript)
+	}
+	if !strings.Contains(zshScript, `printf '\033]7;file://%s%s\033\\'`) {
+		t.Fatalf("expected zsh semantic script to emit OSC 7 with ST terminator, got %q", zshScript)
+	}
+}
+
 func TestRunTrackedMonitorCompletesFromSemanticPromptState(t *testing.T) {
 	dir := t.TempDir()
 	client := &fakeSemanticPaneClient{
@@ -132,6 +150,7 @@ type fakeSemanticPaneClient struct {
 	mu      sync.Mutex
 	pane    tmux.Pane
 	capture string
+	escaped string
 	sent    []string
 }
 
@@ -152,4 +171,10 @@ func (f *fakeSemanticPaneClient) PaneInfo(ctx context.Context, target string) (t
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.pane, nil
+}
+
+func (f *fakeSemanticPaneClient) CapturePaneEscaped(ctx context.Context, target string, startLine int) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.escaped, nil
 }

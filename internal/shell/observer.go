@@ -869,15 +869,11 @@ func (o *Observer) captureSemanticShellState(ctx context.Context, paneID string,
 	if shouldIgnoreLocalSemanticState(currentPaneCommand, promptContext) {
 		return semanticShellState{}, semanticSourceNone, false
 	}
-	if escapedClient, ok := o.client.(escapedPaneClient); ok {
-		if raw, err := escapedClient.CapturePaneEscaped(ctx, paneID, -200); err == nil {
-			if state, ok := parseSemanticShellStateFromOSCCapture(raw); ok {
-				return state, semanticSourceOSCCapture, true
-			}
+	for _, collector := range o.semanticCollectors() {
+		observation, ok := collector.Collect(ctx, paneID, paneTTY, currentPaneCommand, promptContext)
+		if ok {
+			return observation.State, observation.Source, true
 		}
-	}
-	if state, ok := readSemanticShellState(o.stateDir, paneTTY); ok {
-		return state, semanticSourceState, true
 	}
 	return semanticShellState{}, semanticSourceNone, false
 }

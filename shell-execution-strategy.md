@@ -84,13 +84,27 @@ Before adding any tiny local classifier, the next major architecture upgrade sho
 - `OSC 133` for prompt/command lifecycle
 - `OSC 7` for cwd tracking
 
-That would let Shuttle rely less on prompt scraping and tail heuristics for local shells. The current branch does **not** implement these signals yet.
+That lets Shuttle rely less on prompt scraping and tail heuristics for local shells. Shuttle already has a first-pass local semantic shim plus best-effort `osc_capture` / state-file consumption; the next step is to promote semantic consumption into a stronger primary source.
 
 Keep this line explicit:
 - first, adopt portable shell markers that are already documented and shared across terminals
 - later, if needed, add an optional richer bootstrap/helper mode similar to Warp's subshell setup or Wave's shell bridge
 
 Shuttle should not jump straight to a proprietary bootstrap model before implementing the standards-based marker path.
+
+Current semantic-shell learning:
+- local `bash` / `zsh` shims now emit `OSC 133` / `OSC 7`
+- tmux `capture-pane -e` is still useful, but only as an opportunistic snapshot source
+- a live tmux spike proved `pipe-pane -O` preserves raw `OSC 133` / `OSC 7` bytes well enough to support a real semantic stream source
+- the remaining blocker is not transport preservation; it is stream reduction
+  - a cumulative pane-output stream must be reduced incrementally
+  - a snapshot-style "keep the last marker in the whole buffer" parser will misattribute later prompt markers to earlier command events
+
+Recommended source precedence going forward:
+- `osc_stream`
+- `osc_capture`
+- `state_file`
+- heuristics
 
 ### Subshell Bootstrap
 

@@ -136,6 +136,19 @@ func (c *Client) CapturePaneEscaped(ctx context.Context, target string, startLin
 	return c.capturePane(ctx, target, startLine, true)
 }
 
+func (c *Client) PipePaneOutput(ctx context.Context, target string, shellCommand string) error {
+	if strings.TrimSpace(shellCommand) == "" {
+		return fmt.Errorf("pipe-pane shell command cannot be empty")
+	}
+	_, err := c.run(ctx, "pipe-pane", "-O", "-t", target, shellCommand)
+	return err
+}
+
+func (c *Client) ClosePipePane(ctx context.Context, target string) error {
+	_, err := c.run(ctx, "pipe-pane", "-t", target)
+	return err
+}
+
 func (c *Client) capturePane(ctx context.Context, target string, startLine int, escaped bool) (string, error) {
 	if len(target) == 0 || target[0] != '%' {
 		return "", fmt.Errorf("invalid pane target %q", target)

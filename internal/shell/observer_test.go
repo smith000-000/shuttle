@@ -1,9 +1,13 @@
 package shell
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"aiterm/internal/protocol"
+	"aiterm/internal/tmux"
 )
 
 func TestSanitizeCapturedBody(t *testing.T) {
@@ -162,6 +166,37 @@ func TestShouldIgnoreLocalSemanticStateForRemotePromptContext(t *testing.T) {
 func TestShouldIgnoreLocalSemanticStateForSSHPaneCommand(t *testing.T) {
 	if !shouldIgnoreLocalSemanticState("ssh", PromptContext{}) {
 		t.Fatal("expected ssh pane command to suppress local semantic state")
+	}
+}
+
+func TestCaptureSemanticShellStatePrefersOSCCaptureOverStateFile(t *testing.T) {
+	dir := t.TempDir()
+	client := &fakeSemanticPaneClient{
+		pane:    tmux.Pane{ID: "%0", CurrentCommand: "zsh", TTY: "/dev/pts/12"},
+		capture: "jsmith@linuxdesktop ~/source/repos/aiterm %",
+		escaped: "\x1b]133;C\x1b\\\x1b]7;file://linuxdesktop/home/jsmith/source/repos/aiterm\x1b\\",
+	}
+	statePath := semanticStatePath(dir, client.pane.TTY)
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(statePath, []byte("{\"event\":\"prompt\",\"exit\":0,\"cwd\":\"/tmp/fallback\",\"shell\":\"zsh\"}\n"), 0o644); err != nil {
+		t.Fatalf("write state file: %v", err)
+	}
+
+	observer := (&Observer{client: client}).WithStateDir(dir)
+	state, source, ok := observer.captureSemanticShellState(context.Background(), "%0", client.pane.TTY, client.pane.CurrentCommand, PromptContext{})
+	if !ok {
+		t.Fatal("expected semantic shell state")
+	}
+	if source != semanticSourceOSCCapture {
+		t.Fatalf("expected osc capture source, got %q", source)
+	}
+	if state.Event != semanticEventCommand {
+		t.Fatalf("expected command event, got %#v", state)
+	}
+	if state.Directory != "/home/jsmith/source/repos/aiterm" {
+		t.Fatalf("expected osc capture cwd, got %#v", state)
 	}
 }
 

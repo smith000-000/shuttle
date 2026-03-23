@@ -16,9 +16,10 @@ Execution-monitor redesign status on `command-execution-redesign`:
 - implemented: first-class command monitor, local managed shell transport, `awaiting_input` detection, `interactive_fullscreen` detection, `lost` execution state, `F2` handoff/reconciliation, raw `KEYS>` terminal input, remote prompt-return reconciliation, and agent-driven `keys` proposals
 - implemented: state-aware agent recovery guidance using active execution state plus a larger recovery snapshot
 - implemented: first-pass local semantic shell integration using `OSC 133` / `OSC 7` shims plus semantic metadata in monitor/provider context, with best-effort raw-marker parsing from tmux capture
+- implemented on `semantic-shell-bootstrap`: collector abstraction for semantic sources and spec-correct `ST`-terminated local marker emission; a tmux spike now proves `pipe-pane -O` preserves raw `OSC 133` / `OSC 7` bytes well enough to support a real stream source
 - in progress: reducing ambiguity between `running`, `awaiting_input`, and `lost` in edge cases where the shell is quiet or terminal ownership changes unexpectedly
 - in progress: security hardening for execution monitoring, tracing, and semantic shell state
-- next: move Shuttle runtime state out of the repo-local `.shuttle/` directory into a user-private runtime location, then keep local semantic-shell behavior stable while preventing bleed-through into remote/subshell flows, then add conservative subshell bootstrap
+- next: promote semantic consumption from opportunistic snapshot parsing to a real stream reducer, then keep local semantic-shell behavior stable while preventing bleed-through into remote/subshell flows, then add conservative subshell bootstrap
 
 Security hardening branch scope on `security-hardening-runtime`:
 - audit runtime artifact placement, permissions, and retention now that `main` includes both execution-monitor and provider-onboarding work
@@ -90,6 +91,161 @@ Milestone 5 still needs:
   - extract composer/input-mode routing from command-execution control
   - move fullscreen/raw-key submission logic behind a narrower interface
   - reduce duplicated busy/lock/handoff gating in the TUI state machine
+
+### Semantic Shell And Subshell Bootstrap Plan
+
+This item is now concrete enough to split into separate implementation phases.
+
+Research-backed constraints:
+- tmux 3.4 already understands semantic prompt markers well enough to power `next-prompt` / `previous-prompt`, and `-o` output jumping depends on `OSC 133;C`.
+- tmux `capture-pane -e` can expose escape sequences, but it is still not a reliable sole source of truth for lifecycle metadata. Shuttle should treat raw OSC capture as opportunistic, not guaranteed.
+- Warp's public subshell design is two-layered:
+  - detect a compatible transition such as `bash`, `ssh`, or `docker exec`
+  - wait for an RC-file readiness signal, then run a setup script
+- Wave's public implementation is also two-layered:
+  - standards-based `OSC 7` for cwd
+  - richer shell context tracking through shell-specific hooks and optional `wsh` bootstrap on remote connections
+- Conclusion: Shuttle should keep the standards path and the bootstrap path separate.
+
+Design rules:
+- standards first:
+  - `OSC 133` for prompt and command lifecycle
+  - `OSC 7` for cwd
+- bootstrap second:
+  - only to extend semantic coverage into nested shells and remote/container sessions
+  - never required for correctness
+  - silent fallback to existing heuristic monitoring
+- do not adopt a proprietary helper protocol before the standards path is strong and well-tested
+
+Phase 1: make local semantic markers spec-correct and durable
+- tighten the current local `bash` / `zsh` shell hooks so Shuttle emits a proper semantic lifecycle rather than the current partial approximation
+- target lifecycle:
+  - `A` prompt start
+  - `B` prompt end / command line start
+  - `C` command execution start
+  - `D;<exit>` command finished
+- keep `OSC 7` for cwd
+- preserve shell-specific behavior:
+  - `bash` will still need `preexec` / `precmd` support, likely via `bash-preexec`
+  - `zsh` should continue using hooks such as `precmd`, `preexec`, and `chpwd`
+- define source precedence clearly:
+  - `osc_stream`
+  - `osc_capture`
+  - `state_file`
+  - heuristic prompt/tail inference
+- success criteria:
+  - local prompt return, exit code, and cwd updates no longer rely on heuristic parsing when shell integration is active
+  - semantic metadata is explicit in monitor/controller/provider state
+
+Phase 2: improve semantic consumption beyond best-effort capture
+- keep the sidecar semantic state file as a compatibility fallback
+- completed spike result:
+  - tmux `pipe-pane -O` preserves raw `OSC 133` / `OSC 7` bytes
+  - that makes `osc_stream` a viable transport, not just a theory
+  - but a cumulative pane-output stream cannot be parsed with the same "scan the whole buffer and keep the last marker" logic used for snapshots
+  - later prompt markers overwrite earlier command markers unless Shuttle reduces the stream incrementally
+- preferred options in order:
+  - `osc_stream` backed by tmux pane-output piping and an incremental event reducer
+  - best-effort `capture-pane -e` parsing where it works
+  - state-file fallback where tmux drops or normalizes control data
+- add a semantic collector abstraction so the observer no longer knows about individual transport details
+- record:
+  - semantic source
+  - semantic event timestamp
+  - confidence tier
+- next concrete implementation slice:
+  - add `semanticSourceStream`
+  - implement a reducer that tracks:
+    - prompt start
+    - command-line start
+    - command execution start
+    - command finish with exit code
+    - cwd updates
+  - make source precedence explicit and observable:
+    - `osc_stream`
+    - `osc_capture`
+    - `state_file`
+    - heuristics
+- success criteria:
+  - Shuttle can explain why a lifecycle decision came from semantic data versus heuristics
+  - `osc_stream` becomes the preferred primary semantic source on supported local panes
+  - `osc_capture` remains a snapshot fallback, not the hoped-for end state
+
+Phase 3: subshell transition detection
+- add a first-class transition detector for commands likely to hand control to a nested interactive shell
+- initial targets:
+  - nested local `bash` / `zsh`
+  - `ssh`
+  - `docker exec -it`
+  - `kubectl exec -it`
+  - `sudo -i`
+  - `sudo -s`
+- do not rely on a fixed command-name allowlist as the only mechanism
+- use multiple signals:
+  - submitted command text when available
+  - prompt/context transition
+  - pane foreground command
+  - later, semantic readiness signal from the child shell
+- classify transitions as:
+  - likely local nested shell
+  - likely remote shell
+  - likely container/exec shell
+  - unknown interactive transition
+- success criteria:
+  - Shuttle can tell when it should attempt semantic bootstrap versus when it should remain heuristic-only
+
+Phase 4: conservative bootstrap for nested shells and remote sessions
+- once a supported transition settles and a new prompt is visible, inject a per-session semantic integration snippet into the child shell
+- bootstrap requirements:
+  - only after prompt settlement
+  - idempotent inside the target shell session
+  - per-session only by default
+  - no persistent RC-file edits without explicit user action
+  - no helper binary requirement in the first pass
+- implementation preference:
+  - inline shell snippet or one-shot staged script plus source command
+  - export a session marker like `SHUTTLE_SEMANTIC_SHELL_V1=1` inside the child shell
+- remote/container bootstrap should be treated as best-effort:
+  - if injection fails, Shuttle stays on heuristic monitoring
+  - no partial failure should wedge the shell
+- success criteria:
+  - nested local shells gain semantic tracking after prompt settlement
+  - remote `ssh` and container shells can opt into the same lifecycle semantics without persistent machine changes
+
+Phase 5: optional persistent bootstrap UX
+- only after per-session bootstrap is stable
+- offer an explicit user-approved install snippet for shells where persistent setup is desired
+- this is the closest Shuttle analogue to Warp's auto-warpify RC-file snippet
+- keep it clearly separate from the standards implementation:
+  - standards describe the protocol
+  - persistent bootstrap is only a convenience install path
+- success criteria:
+  - users can choose convenience without Shuttle silently mutating remote or nested shell startup files
+
+Out-of-scope for this branch unless forced by implementation:
+- a proprietary helper protocol like Wave's custom OSC 16162 channel
+- a required remote helper binary
+- running background helper commands during remote idle time
+- shell editing/completion features beyond execution tracking and recovery
+
+Validation plan:
+- unit tests:
+  - spec-correct `OSC 133` parsing and precedence
+  - stream reducer correctness over cumulative pane output
+  - bootstrap decision engine for local vs remote vs unsupported contexts
+  - idempotent child-shell bootstrap decisions
+- integration tests:
+  - local `bash` nested inside local `zsh`
+  - local `zsh` nested inside local `bash`
+  - semantic prompt return after `F2 -> Ctrl+C -> F2`
+  - explicit `pipe-pane -O` stream parsing when tmux preserves markers
+  - `capture-pane -e` fallback parsing when stream mode is unavailable
+- manual tests:
+  - existing remote/subshell regression checklist in [shell-execution-strategy.md](shell-execution-strategy.md)
+  - nested local shell followed by tracked command
+  - `ssh` followed by tracked command, awaiting-input, and fullscreen app
+  - `docker exec -it` or `kubectl exec -it` where available
+  - bootstrap failure path where Shuttle must degrade back to heuristic monitoring without user-visible corruption
 
 ## Guiding Decisions
 - Build `P0` only first. That means Epics 1 through 4 in [requirements-mvp.md](requirements-mvp.md).

@@ -180,8 +180,8 @@ func bashSemanticShellIntegrationScript(statePath string) string {
 	return strings.TrimSpace(`
 export SHUTTLE_SEMANTIC_SHELL_V1=1
 export SHUTTLE_SEMANTIC_SHELL_STATE_FILE=`+shellQuote(statePath)+`
-__shuttle_semantic_emit_osc133() { printf '\033]133;%s\007' "$1"; }
-__shuttle_semantic_emit_osc7() { printf '\033]7;file://%s%s\007' "${HOSTNAME:-localhost}" "$PWD"; }
+__shuttle_semantic_emit_osc133() { printf '\033]133;%s\033\\' "$1"; }
+__shuttle_semantic_emit_osc7() { printf '\033]7;file://%s%s\033\\' "${HOSTNAME:-localhost}" "$PWD"; }
 __shuttle_semantic_write_state() {
   local event="$1"
   local exit_code="$2"
@@ -233,8 +233,8 @@ func zshSemanticShellIntegrationScript(statePath string) string {
 export SHUTTLE_SEMANTIC_SHELL_V1=1
 export SHUTTLE_SEMANTIC_SHELL_STATE_FILE=`+shellQuote(statePath)+`
 autoload -Uz add-zsh-hook
-__shuttle_semantic_emit_osc133() { printf '\033]133;%s\007' "$1"; }
-__shuttle_semantic_emit_osc7() { printf '\033]7;file://%s%s\007' "${HOST:-localhost}" "$PWD"; }
+__shuttle_semantic_emit_osc133() { printf '\033]133;%s\033\\' "$1"; }
+__shuttle_semantic_emit_osc7() { printf '\033]7;file://%s%s\033\\' "${HOST:-localhost}" "$PWD"; }
 __shuttle_semantic_write_state() {
   local event="$1"
   local exit_code="$2"
