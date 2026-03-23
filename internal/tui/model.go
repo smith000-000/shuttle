@@ -4,6 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/user"
+	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -34,6 +39,14 @@ type Entry struct {
 	Detail string
 }
 
+type composerCompletion struct {
+	Start      int
+	End        int
+	Fragment   string
+	Candidates []string
+	Index      int
+}
+
 type controllerEventsMsg struct {
 	events []controller.TranscriptEvent
 	err    error
@@ -53,6 +66,49 @@ type shellTailMsg struct {
 
 type activeExecutionMsg struct {
 	execution *controller.CommandExecution
+}
+
+type transcriptRenderLine struct {
+	text       string
+	entryIndex int
+	tagStart   int
+	tagEnd     int
+}
+
+type actionCardAction string
+
+const (
+	actionCardContinueStartup   actionCardAction = "continue_startup"
+	actionCardConfirmFullscreen actionCardAction = "confirm_fullscreen"
+	actionCardCancelFullscreen  actionCardAction = "cancel_fullscreen"
+	actionCardTakeControl       actionCardAction = "take_control"
+	actionCardApprove           actionCardAction = "approve"
+	actionCardReject            actionCardAction = "reject"
+	actionCardRefine            actionCardAction = "refine"
+	actionCardEditProposal      actionCardAction = "edit_proposal"
+)
+
+type actionCardButton struct {
+	label  string
+	action actionCardAction
+}
+
+type actionCardSpec struct {
+	title       string
+	body        []string
+	buttons     []actionCardButton
+	borderColor lipgloss.TerminalColor
+}
+
+type actionCardButtonHit struct {
+	action actionCardAction
+	start  int
+	end    int
+}
+
+type actionCardButtonLine struct {
+	text string
+	hits []actionCardButtonHit
 }
 
 type activeExecutionCheckInMsg struct {
@@ -179,6 +235,12 @@ const (
 	repeatCheckInDelay   = 30 * time.Second
 )
 
+var (
+	ansiCSIPattern = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+	ansiOSCPattern = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
+	ansiEscPattern = regexp.MustCompile(`\x1b[@-_]`)
+)
+
 type Model struct {
 	workspace             tmux.Workspace
 	ctrl                  controller.Controller
@@ -193,12 +255,16 @@ type Model struct {
 	busyStartedAt         time.Time
 	transcriptScroll      int
 	transcriptFollow      bool
+	inlineDetailEntry     int
+	helpOpen              bool
+	helpScroll            int
 	detailOpen            bool
 	detailScroll          int
 	shellHistory          composerHistory
 	agentHistory          composerHistory
 	activePlan            *controller.ActivePlan
 	shellContext          shell.PromptContext
+	pendingLocalEcho      *Entry
 	pendingApproval       *controller.ApprovalRequest
 	pendingProposal       *controller.ProposalPayload
 	startupNotice         *startupSecurityNotice
@@ -249,8 +315,10 @@ type Model struct {
 	settingsModels        []settingsModelChoice
 	settingsModelIdx      int
 	settingsModelFilter   string
+	settingsModelScope    provider.ProviderPreset
 	settingsModelInfo     bool
 	lastModelInfo         *controller.AgentModelInfo
+	completion            *composerCompletion
 	styles                styles
 }
 
@@ -267,11 +335,12 @@ func NewModel(workspace tmux.Workspace, ctrl controller.Controller) Model {
 			},
 			{
 				Title: "system",
-				Body:  "Tab mode. Up/Down history. PgUp/PgDn scroll. Enter submit. F2 take control. F10 settings. /onboard opens provider onboarding. Esc clear or interrupt. Ctrl+C quit.",
+				Body:  "F1 help. Ctrl+] mode. Tab inserts a tab. Up/Down history. PgUp/PgDn scroll. Enter submit. F2 take control. F10 settings. /onboard setup. /provider and /model open pickers. /quit exits. Esc clear or interrupt. Ctrl+C quit.",
 			},
 		},
-		selectedEntry: 1,
-		styles:        newStyles(),
+		selectedEntry:     1,
+		inlineDetailEntry: -1,
+		styles:            newStyles(),
 	}
 }
 
@@ -334,12 +403,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 		pinned := m.isTranscriptPinned()
 		autoContinue := m.shouldAutoContinue(msg.events)
+		eventEntries := m.consumePendingLocalEcho(eventsToEntries(msg.events, !m.directShellPending))
 		m.busy = false
 		m.busyStartedAt = time.Time{}
 		m.inFlightCancel = nil
 		if len(msg.events) > 0 {
-			m.entries = append(m.entries, eventsToEntries(msg.events, !m.directShellPending)...)
 			m.syncActionState(msg.events)
+		}
+		if len(eventEntries) > 0 {
+			m.entries = append(m.entries, eventEntries...)
 			if pinned {
 				m.scrollTranscriptToBottom()
 			} else {
@@ -705,9 +777,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		return m, tea.Batch(tickBusy(), m.pollShellTailCmd(), m.pollActiveExecutionCmd(), m.maybeExecutionCheckInCmd(time.Time(msg)))
+	case tea.MouseMsg:
+		if m.helpOpen || m.settingsOpen || m.onboardingOpen || m.detailOpen {
+			return m, nil
+		}
+		return m.handleMouse(msg)
 	case tea.KeyMsg:
 		if m.sendingFullscreenKeys {
 			logging.Trace("tui.fullscreen_keys.key", "type", int(msg.Type), "text", msg.String(), "runes", string(msg.Runes))
+		}
+		if msg.Type == tea.KeyF1 {
+			return m.toggleHelp()
+		}
+		if m.helpOpen {
+			return m.updateHelp(msg)
 		}
 		if m.settingsOpen {
 			return m.updateSettings(msg)
@@ -734,6 +817,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.setInput("")
 				return m, nil
 			}
+			if m.inlineDetailEntry >= 0 {
+				m.inlineDetailEntry = -1
+				return m, nil
+			}
+			if m.clearCompletion() {
+				return m, nil
+			}
 			if m.busy || m.activeExecution != nil {
 				return m.interruptInFlight()
 			}
@@ -757,7 +847,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.setInput("")
 			return m, nil
-		case tea.KeyTab:
+		case tea.KeyCtrlCloseBracket:
 			if m.sendingFullscreenKeys {
 				return m, nil
 			}
@@ -770,6 +860,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.mode = ShellMode
 			}
+			m.recomputeCompletion()
+			return m, nil
+		case tea.KeyTab:
+			if m.advanceCompletion() {
+				return m, nil
+			}
+			if m.sendingFullscreenKeys {
+				m.insertTextAtCursor("\t")
+				return m, nil
+			}
+			if m.composerLocked() {
+				return m, nil
+			}
+			m.insertTextAtCursor("\t")
 			return m, nil
 		case tea.KeyUp:
 			if msg.Alt {
@@ -808,6 +912,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.moveCursor(-1)
 			return m, nil
 		case tea.KeyRight:
+			if m.acceptCompletion() {
+				return m, nil
+			}
 			if m.sendingFullscreenKeys {
 				m.moveCursor(1)
 				return m, nil
@@ -939,7 +1046,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if !m.sendingFullscreenKeys && m.composerLocked() {
 					return m, nil
 				}
-				m.insertTextAtCursor(string(msg.Runes))
+				inserted := string(msg.Runes)
+				if msg.Paste {
+					inserted = sanitizePastedText(inserted)
+				}
+				if inserted == "" {
+					return m, nil
+				}
+				m.insertTextAtCursor(inserted)
 				return m, nil
 			}
 		}
@@ -1011,21 +1125,24 @@ func (m Model) handleActionCardKey(msg tea.KeyMsg) (tea.Model, bool, tea.Cmd) {
 }
 
 func (m Model) View() string {
+	if m.helpOpen {
+		return m.renderScreen(m.renderHelpView())
+	}
 	if m.settingsOpen {
-		return m.renderSettingsView()
+		return m.renderScreen(m.renderSettingsView())
 	}
 	if m.onboardingOpen {
-		return m.renderOnboardingView()
+		return m.renderScreen(m.renderOnboardingView())
 	}
 	if m.detailOpen {
-		return m.renderDetailView()
+		return m.renderScreen(m.renderDetailView())
 	}
 
 	width := m.width
 	if width <= 0 {
 		width = 100
 	}
-	screenWidth := max(40, width)
+	screenWidth := width
 	transcriptWidth := screenWidth
 	actionWidth := m.contentWidthFor(screenWidth, m.styles.actionCard)
 	statusWidth := m.contentWidthFor(screenWidth, m.styles.status)
@@ -1065,11 +1182,14 @@ func (m Model) View() string {
 	if shellTail != "" {
 		sections = append(sections, shellTail)
 	}
-	sections = append(sections, composer, footer)
+	footerSections := []string{composer, footer}
+	bodyHeight := lipgloss.Height(strings.Join(append(append([]string(nil), sections...), footerSections...), "\n"))
+	if fillerHeight := screenHeight - bodyHeight; fillerHeight > 0 {
+		sections = append(sections, blankBlock(fillerHeight))
+	}
+	sections = append(sections, footerSections...)
 
-	return m.styles.screen.
-		Width(screenWidth).
-		Render(lipgloss.JoinVertical(lipgloss.Left, sections...))
+	return m.renderScreen(lipgloss.JoinVertical(lipgloss.Left, sections...))
 }
 
 func (m Model) submit() (tea.Model, tea.Cmd) {
@@ -1125,6 +1245,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		m.appendLocalTranscriptEcho(Entry{Title: "user", Body: text})
 		m.busy = true
 		m.busyStartedAt = time.Now()
 		if !recoveryAgentPrompt {
@@ -1132,6 +1253,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 			m.liveShellTail = ""
 			m.syncActiveExecution(nil)
 		}
+		m.refreshTranscriptViewport()
 		prompt := text
 		refining := m.refiningApproval
 		refiningProposal := m.refiningProposal
@@ -1175,6 +1297,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	m.appendLocalTranscriptEcho(Entry{Title: "shell", Body: text})
 	m.busy = true
 	m.busyStartedAt = time.Now()
 	m.directShellPending = true
@@ -1182,6 +1305,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	command := text
 	logging.Trace("tui.submit.shell", "command", command)
 	m.syncActiveExecution(newLocalExecution(command, controller.CommandOriginUserShell))
+	m.refreshTranscriptViewport()
 	ctx, cancel := context.WithCancel(context.Background())
 	m.inFlightCancel = cancel
 	return m, tea.Batch(func() tea.Msg {
@@ -1197,12 +1321,35 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 
 func (m Model) handleComposerCommand(text string) (bool, tea.Model, tea.Cmd) {
 	switch strings.ToLower(strings.TrimSpace(text)) {
-	case "/onboard", "/onboarding", "/provider", "/providers":
+	case "/onboard", "/onboarding":
 		m.input = ""
 		m.currentHistory().reset()
 		next, cmd := m.openOnboarding()
 		return true, next, cmd
+	case "/provider", "/providers":
+		m.input = ""
+		m.currentHistory().reset()
+		next, cmd := m.openActiveProviderSettings()
+		return true, next, cmd
+	case "/model", "/models":
+		m.input = ""
+		m.currentHistory().reset()
+		next, cmd := m.openActiveModelSettings()
+		return true, next, cmd
+	case "/quit", "/exit":
+		m.input = ""
+		m.currentHistory().reset()
+		return true, m, tea.Quit
 	default:
+		if strings.HasPrefix(strings.TrimSpace(text), "/") {
+			m.setInput("")
+			m.currentHistory().reset()
+			m.appendTranscriptEntry(Entry{
+				Title: "system",
+				Body:  fmt.Sprintf("Unknown slash command: %s. Try /onboard, /provider, /model, or /quit.", strings.TrimSpace(text)),
+			})
+			return true, m, nil
+		}
 		return false, m, nil
 	}
 }
@@ -1236,12 +1383,14 @@ func (m Model) confirmFullscreenAction() (tea.Model, tea.Cmd) {
 
 	switch action.Kind {
 	case fullscreenActionShellSubmit:
+		m.appendLocalTranscriptEcho(Entry{Title: "shell", Body: action.Command})
 		m.busy = true
 		m.busyStartedAt = time.Now()
 		m.directShellPending = true
 		m.showShellTail = true
 		m.syncActiveExecution(newLocalExecution(action.Command, controller.CommandOriginUserShell))
 		m.setInput("")
+		m.refreshTranscriptViewport()
 		ctx, cancel := context.WithCancel(context.Background())
 		m.inFlightCancel = cancel
 		return m, tea.Batch(func() tea.Msg {
@@ -1486,8 +1635,35 @@ func (m Model) openSettings() (tea.Model, tea.Cmd) {
 	m.settingsModels = nil
 	m.settingsModelIdx = 0
 	m.settingsModelFilter = ""
+	m.settingsModelScope = ""
 	m.settingsModelInfo = false
 	return m, nil
+}
+
+func (m Model) openActiveProviderSettings() (tea.Model, tea.Cmd) {
+	nextAny, cmd := m.openSettings()
+	next := nextAny.(Model)
+	if cmd != nil || !next.settingsOpen {
+		return next, cmd
+	}
+
+	next.settingsStep = settingsStepActiveProvider
+	next.settingsIndex = 1
+	next.settingsProviderIdx = next.currentSettingsProviderIndex()
+	return next, nil
+}
+
+func (m Model) openActiveModelSettings() (tea.Model, tea.Cmd) {
+	nextAny, cmd := m.openSettings()
+	next := nextAny.(Model)
+	if cmd != nil || !next.settingsOpen {
+		return next, cmd
+	}
+
+	next.settingsStep = settingsStepActiveModels
+	next.settingsIndex = 2
+	next.settingsModelScope = next.activeProvider.Preset
+	return next.loadSettingsModels()
 }
 
 func (m Model) refreshShellContextCmd() tea.Cmd {
@@ -2210,6 +2386,15 @@ func (m Model) applySettingsSelection() (tea.Model, tea.Cmd) {
 
 func (m Model) loadSettingsModels() (tea.Model, tea.Cmd) {
 	profiles := m.settingsConfiguredProfiles()
+	if m.settingsModelScope != "" {
+		filtered := make([]provider.Profile, 0, len(profiles))
+		for _, profile := range profiles {
+			if profile.Preset == m.settingsModelScope {
+				filtered = append(filtered, profile)
+			}
+		}
+		profiles = filtered
+	}
 	if len(profiles) == 0 {
 		m.entries = append(m.entries, Entry{
 			Title: "system",
@@ -2469,9 +2654,34 @@ func (m Model) currentShellContext() *shell.PromptContext {
 }
 
 func (m Model) transcriptLines(width int) []string {
-	lines := make([]string, 0, len(m.entries)*2)
+	displayLines := m.transcriptDisplayLines(width)
+	lines := make([]string, 0, len(displayLines))
+	for _, line := range displayLines {
+		lines = append(lines, line.text)
+	}
+
+	return lines
+}
+
+func (m Model) transcriptDisplayLines(width int) []transcriptRenderLine {
+	lines := make([]transcriptRenderLine, 0, len(m.entries)*2)
 	for index, entry := range m.entries {
-		lines = append(lines, m.renderEntryLines(index, entry, width)...)
+		prefix := "  "
+		if index == m.selectedEntry {
+			prefix = "› "
+		}
+		tag := m.renderTag(entry.Title)
+		tagStart := lipgloss.Width(prefix)
+		tagEnd := tagStart + lipgloss.Width(tag)
+		rendered := m.renderEntryLines(index, entry, width)
+		for lineIndex, line := range rendered {
+			displayLine := transcriptRenderLine{text: line, entryIndex: index, tagStart: -1, tagEnd: -1}
+			if lineIndex == 0 {
+				displayLine.tagStart = tagStart
+				displayLine.tagEnd = tagEnd
+			}
+			lines = append(lines, displayLine)
+		}
 	}
 
 	return lines
@@ -2511,6 +2721,12 @@ func (m Model) renderEntryLines(index int, entry Entry, width int) []string {
 		}
 		for _, wrapped := range wrappedLines {
 			rendered = append(rendered, indent+bodyStyle.Render(wrapped))
+		}
+	}
+
+	if m.inlineDetailEntry == index && index == m.selectedEntry && strings.TrimSpace(entry.Detail) != "" {
+		for _, line := range m.inlineDetailLines(entry, bodyWidth) {
+			rendered = append(rendered, indent+m.styles.detailMeta.Render("  "+line))
 		}
 	}
 
@@ -2576,53 +2792,6 @@ func (m Model) renderHeader(width int) string {
 }
 
 func (m Model) renderActionCard(width int) string {
-	if m.pendingFullscreen != nil {
-		body := []string{
-			"A fullscreen terminal app still appears active in the shell pane.",
-			"command: " + m.pendingFullscreen.Command,
-			"Y send anyway  N cancel  F2 take control",
-		}
-		content := lipgloss.JoinVertical(
-			lipgloss.Left,
-			m.styles.actionTitle.Render("Fullscreen Still Active"),
-			m.styles.actionBody.Render(strings.Join(body, "\n")),
-		)
-		return m.styles.actionCard.BorderForeground(lipgloss.Color("214")).Width(width).Render(content)
-	}
-
-	if m.startupNotice != nil {
-		body := []string{
-			m.startupNotice.Body,
-			"Y continue  F10 settings",
-		}
-		content := lipgloss.JoinVertical(
-			lipgloss.Left,
-			m.styles.actionTitle.Render(m.startupNotice.Title),
-			m.styles.actionBody.Render(strings.Join(body, "\n")),
-		)
-		return m.styles.actionCard.BorderForeground(lipgloss.Color("214")).Width(width).Render(content)
-	}
-
-	if m.pendingApproval != nil {
-		body := []string{
-			m.pendingApproval.Title,
-			m.pendingApproval.Summary,
-		}
-		if m.pendingApproval.Command != "" {
-			body = append(body, "command: "+m.pendingApproval.Command)
-		}
-		if m.pendingApproval.Risk != "" {
-			body = append(body, "risk: "+string(m.pendingApproval.Risk))
-		}
-		body = append(body, "Y continue  N reject  R refine")
-		content := lipgloss.JoinVertical(
-			lipgloss.Left,
-			m.styles.actionTitle.Render("Approval Required"),
-			m.styles.actionBody.Render(strings.Join(body, "\n")),
-		)
-		return m.styles.actionCard.BorderForeground(lipgloss.Color("160")).Width(width).Render(content)
-	}
-
 	if m.refiningApproval != nil {
 		body := []string{
 			m.refiningApproval.Title,
@@ -2677,19 +2846,90 @@ func (m Model) renderActionCard(width int) string {
 		return m.styles.actionCard.BorderForeground(lipgloss.Color("111")).Width(width).Render(content)
 	}
 
+	spec := m.currentActionCardSpec()
+	if spec == nil {
+		return ""
+	}
+	body := actionCardBodyLines(spec.body, width)
+	buttonLines := layoutActionCardButtons(spec.buttons, width)
+	for _, line := range buttonLines {
+		body = append(body, line.text)
+	}
+	content := lipgloss.JoinVertical(
+		lipgloss.Left,
+		m.styles.actionTitle.Render(spec.title),
+		m.styles.actionBody.Render(strings.Join(body, "\n")),
+	)
+	return m.styles.actionCard.BorderForeground(spec.borderColor).Width(width).Render(content)
+}
+
+func (m Model) currentActionCardSpec() *actionCardSpec {
+	if m.pendingFullscreen != nil {
+		return &actionCardSpec{
+			title: "Fullscreen Still Active",
+			body: []string{
+				"A fullscreen terminal app still appears active in the shell pane.",
+				"command: " + m.pendingFullscreen.Command,
+			},
+			buttons: []actionCardButton{
+				{label: "Y send anyway", action: actionCardConfirmFullscreen},
+				{label: "N cancel", action: actionCardCancelFullscreen},
+				{label: "F2 take control", action: actionCardTakeControl},
+			},
+			borderColor: lipgloss.Color("214"),
+		}
+	}
+
+	if m.startupNotice != nil {
+		return &actionCardSpec{
+			title: m.startupNotice.Title,
+			body:  []string{m.startupNotice.Body},
+			buttons: []actionCardButton{
+				{label: "Y continue", action: actionCardContinueStartup},
+			},
+			borderColor: lipgloss.Color("214"),
+		}
+	}
+
+	if m.pendingApproval != nil {
+		body := []string{
+			m.pendingApproval.Title,
+			m.pendingApproval.Summary,
+		}
+		if m.pendingApproval.Command != "" {
+			body = append(body, "command: "+m.pendingApproval.Command)
+		}
+		if m.pendingApproval.Risk != "" {
+			body = append(body, "risk: "+string(m.pendingApproval.Risk))
+		}
+		return &actionCardSpec{
+			title: "Approval Required",
+			body:  body,
+			buttons: []actionCardButton{
+				{label: "Y continue", action: actionCardApprove},
+				{label: "N reject", action: actionCardReject},
+				{label: "R refine", action: actionCardRefine},
+			},
+			borderColor: lipgloss.Color("160"),
+		}
+	}
+
 	if m.pendingProposal != nil && m.pendingProposal.Keys != "" {
 		body := []string{}
 		if m.pendingProposal.Description != "" {
 			body = append(body, m.pendingProposal.Description)
 		}
 		body = append(body, "keys: "+previewFullscreenKeys(m.pendingProposal.Keys))
-		body = append(body, "Y send keys  N reject  R ask agent")
-		content := lipgloss.JoinVertical(
-			lipgloss.Left,
-			m.styles.actionTitle.Render("Proposed Terminal Input"),
-			m.styles.actionBody.Render(strings.Join(body, "\n")),
-		)
-		return m.styles.actionCard.BorderForeground(lipgloss.Color("31")).Width(width).Render(content)
+		return &actionCardSpec{
+			title: "Proposed Terminal Input",
+			body:  body,
+			buttons: []actionCardButton{
+				{label: "Y send keys", action: actionCardApprove},
+				{label: "N reject", action: actionCardReject},
+				{label: "R ask agent", action: actionCardRefine},
+			},
+			borderColor: lipgloss.Color("31"),
+		}
 	}
 
 	if m.pendingProposal != nil && m.pendingProposal.Command != "" {
@@ -2698,16 +2938,20 @@ func (m Model) renderActionCard(width int) string {
 			body = append(body, m.pendingProposal.Description)
 		}
 		body = append(body, "command: "+m.pendingProposal.Command)
-		body = append(body, "Y continue  N reject  R ask agent  E tweak command")
-		content := lipgloss.JoinVertical(
-			lipgloss.Left,
-			m.styles.actionTitle.Render("Proposed Command"),
-			m.styles.actionBody.Render(strings.Join(body, "\n")),
-		)
-		return m.styles.actionCard.BorderForeground(lipgloss.Color("31")).Width(width).Render(content)
+		return &actionCardSpec{
+			title: "Proposed Command",
+			body:  body,
+			buttons: []actionCardButton{
+				{label: "Y continue", action: actionCardApprove},
+				{label: "N reject", action: actionCardReject},
+				{label: "R ask agent", action: actionCardRefine},
+				{label: "E tweak command", action: actionCardEditProposal},
+			},
+			borderColor: lipgloss.Color("31"),
+		}
 	}
 
-	return ""
+	return nil
 }
 
 func (m Model) renderPlanCard(width int) string {
@@ -2786,7 +3030,7 @@ func (m Model) renderActiveExecutionCard(width int) string {
 
 func (m Model) renderTranscript(width int, height int) string {
 	lines := m.transcriptWindow(m.transcriptLines(width), height)
-	return m.styles.transcript.Width(width).MaxWidth(width).Render(strings.Join(lines, "\n"))
+	return m.styles.transcript.Width(width).Height(height).MaxWidth(width).Render(strings.Join(lines, "\n"))
 }
 
 func (m Model) renderComposer(width int) string {
@@ -2817,17 +3061,19 @@ func (m Model) renderComposer(width int) string {
 		prompt = "#>"
 	}
 
-	cursorStyle := m.styles.input.Copy().Reverse(true)
-	lines := composerDisplayLines(m.input, m.cursor)
+	inputStyle := m.styles.input.Copy().Background(composerStyle.GetBackground())
+	ghostStyle := m.styles.inputGhost.Copy().Background(composerStyle.GetBackground())
+	cursorStyle := inputStyle.Copy().Reverse(true)
+	lines := composerDisplayLines(m.input, m.cursor, m.currentCompletionGhostText())
 	prefixWidth := lipgloss.Width(prompt)
 	rendered := make([]string, 0, len(lines))
 	for index, line := range lines {
-		lineBody := renderComposerLine(line, cursorStyle, m.styles.input)
+		lineBody := renderComposerLine(line, cursorStyle, inputStyle, ghostStyle)
 		if index == 0 {
-			rendered = append(rendered, lipgloss.JoinHorizontal(lipgloss.Left, promptStyle.Render(prompt), m.styles.input.Render(" "), lineBody))
+			rendered = append(rendered, lipgloss.JoinHorizontal(lipgloss.Left, promptStyle.Render(prompt), inputStyle.Render(" "), lineBody))
 			continue
 		}
-		rendered = append(rendered, m.styles.input.Render(strings.Repeat(" ", prefixWidth+1))+lineBody)
+		rendered = append(rendered, inputStyle.Render(strings.Repeat(" ", prefixWidth+1))+lineBody)
 	}
 
 	return composerStyle.Width(width).Render(strings.Join(rendered, "\n"))
@@ -2848,6 +3094,9 @@ func (m Model) renderStatusLine(width int) string {
 	rightParts := make([]string, 0, 4)
 	if m.exitConfirmActive() {
 		rightParts = append(rightParts, m.styles.statusBusy.Render("Hit Ctrl-C again to exit"))
+	}
+	if m.shellContext.Root {
+		rightParts = append(rightParts, m.styles.statusRoot.Render("ROOT"))
 	}
 	if m.shellContext.Remote {
 		rightParts = append(rightParts, m.styles.statusRemote.Render("REMOTE"))
@@ -2954,7 +3203,7 @@ func (m Model) footerParts(width int) []string {
 
 	switch {
 	case width < 72:
-		parts := []string{"[Tab]", "[Pg]", "[Enter]", "[Esc]", "[F2]", "[F10]", "[Ctrl+O]", "[Ctrl+C]"}
+		parts := []string{"[F1]", "[Ctrl+]]", "[Tab]", "[→]", "[Pg]", "[Enter]", "[Esc]", "[F2]", "[F10]", "[Ctrl+O]", "[Ctrl+C]"}
 		if m.canSendActiveKeys() {
 			parts = append(parts, "[S]")
 		}
@@ -2977,7 +3226,7 @@ func (m Model) footerParts(width int) []string {
 		}
 		return parts
 	case width < 100:
-		parts := []string{"[Tab] mode", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Enter] submit", escHint, "[F2] shell", "[F10] settings", "[Ctrl+C] quit"}
+		parts := []string{"[F1] help", "[Ctrl+]] mode", "[Tab] cycle/tab", "[→] accept", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Enter] submit", escHint, "[F2] shell", "[F10] settings", "[Ctrl+C] quit"}
 		if m.canSendActiveKeys() {
 			parts = append(parts, "[S] keys")
 		}
@@ -3001,7 +3250,7 @@ func (m Model) footerParts(width int) []string {
 		return parts
 	}
 
-	parts := []string{"[Tab] mode", "[Up/Down] history", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Ctrl+U/D] half-page", "[Home/End] bounds", "[Enter] submit", escHint, "[Ctrl+J] newline", "[F2] shell", "[F10] settings"}
+	parts := []string{"[F1] help", "[Ctrl+]] mode", "[Tab] cycle/tab", "[→] accept", "[Up/Down] history", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Ctrl+U/D] half-page", "[Home/End] bounds", "[Enter] submit", escHint, "[Ctrl+J] newline", "[F2] shell", "[F10] settings"}
 	if m.canSendActiveKeys() {
 		parts = append(parts, "[S] send keys")
 	}
@@ -3050,6 +3299,7 @@ func (m *Model) setInput(value string) {
 	if strings.TrimSpace(value) != "" {
 		m.clearExitConfirm()
 	}
+	m.recomputeCompletion()
 }
 
 func (m *Model) clampCursor() {
@@ -3066,6 +3316,7 @@ func (m *Model) clampCursor() {
 func (m *Model) moveCursor(delta int) {
 	m.cursor += delta
 	m.clampCursor()
+	m.recomputeCompletion()
 }
 
 func (m *Model) insertTextAtCursor(value string) {
@@ -3084,6 +3335,30 @@ func (m *Model) insertTextAtCursor(value string) {
 	if strings.TrimSpace(m.input) != "" {
 		m.clearExitConfirm()
 	}
+	m.recomputeCompletion()
+}
+
+func sanitizePastedText(value string) string {
+	sanitized := ansiOSCPattern.ReplaceAllString(value, "")
+	sanitized = ansiCSIPattern.ReplaceAllString(sanitized, "")
+	sanitized = ansiEscPattern.ReplaceAllString(sanitized, "")
+
+	filtered := strings.Builder{}
+	filtered.Grow(len(sanitized))
+	for _, r := range sanitized {
+		switch {
+		case r == '\n' || r == '\t':
+			filtered.WriteRune(r)
+		case r == '\r':
+			continue
+		case unicode.IsControl(r):
+			continue
+		default:
+			filtered.WriteRune(r)
+		}
+	}
+
+	return filtered.String()
 }
 
 func (m *Model) backspaceAtCursor() {
@@ -3101,6 +3376,7 @@ func (m *Model) backspaceAtCursor() {
 	if strings.TrimSpace(m.input) != "" {
 		m.clearExitConfirm()
 	}
+	m.recomputeCompletion()
 }
 
 func (m *Model) deleteAtCursor() {
@@ -3118,6 +3394,305 @@ func (m *Model) deleteAtCursor() {
 	if strings.TrimSpace(m.input) != "" {
 		m.clearExitConfirm()
 	}
+	m.recomputeCompletion()
+}
+
+func (m *Model) clearCompletion() bool {
+	if m.completion == nil {
+		return false
+	}
+	m.completion = nil
+	return true
+}
+
+func (m *Model) currentCompletionGhostText() string {
+	if m.completion == nil || len(m.completion.Candidates) == 0 {
+		return ""
+	}
+	index := m.completion.Index
+	if index < 0 || index >= len(m.completion.Candidates) {
+		return ""
+	}
+	candidate := m.completion.Candidates[index]
+	if !strings.HasPrefix(candidate, m.completion.Fragment) {
+		return ""
+	}
+	return candidate[len(m.completion.Fragment):]
+}
+
+func (m *Model) acceptCompletion() bool {
+	if m.completion == nil || len(m.completion.Candidates) == 0 {
+		return false
+	}
+	index := m.completion.Index
+	if index < 0 || index >= len(m.completion.Candidates) {
+		return false
+	}
+	candidate := m.completion.Candidates[index]
+	if candidate == m.completion.Fragment {
+		return false
+	}
+	m.replaceCompletionFragment(candidate)
+	return true
+}
+
+func (m *Model) advanceCompletion() bool {
+	next := m.computeCompletion()
+	if next == nil || len(next.Candidates) == 0 {
+		m.completion = nil
+		return false
+	}
+
+	if m.completion != nil && sameCompletionQuery(*m.completion, *next) && len(next.Candidates) > 0 {
+		next.Index = (m.completion.Index + 1) % len(next.Candidates)
+	}
+	m.completion = next
+	return true
+}
+
+func (m *Model) recomputeCompletion() {
+	m.completion = m.computeCompletion()
+}
+
+func (m *Model) computeCompletion() *composerCompletion {
+	if m.composerLocked() || m.sendingFullscreenKeys {
+		return nil
+	}
+
+	runes := []rune(m.input)
+	if m.cursor != len(runes) {
+		return nil
+	}
+	if strings.Contains(m.input, "\n") {
+		return nil
+	}
+
+	var completion *composerCompletion
+	switch {
+	case m.editingProposal != nil || m.mode == ShellMode:
+		completion = m.computeShellCompletion(runes)
+	case m.mode == AgentMode && m.refiningApproval == nil && m.refiningProposal == nil:
+		completion = m.computeSlashCompletion(runes)
+	}
+	if completion == nil || len(completion.Candidates) == 0 {
+		return nil
+	}
+
+	if m.completion != nil && sameCompletionQuery(*m.completion, *completion) {
+		current := m.completion.Candidates[m.completion.Index]
+		if index := indexOfString(completion.Candidates, current); index >= 0 {
+			completion.Index = index
+		}
+	}
+
+	if completion.Index < 0 || completion.Index >= len(completion.Candidates) {
+		completion.Index = 0
+	}
+	return completion
+}
+
+func (m *Model) computeSlashCompletion(runes []rune) *composerCompletion {
+	input := string(runes)
+	if !strings.HasPrefix(input, "/") || strings.ContainsAny(input, " \t") {
+		return nil
+	}
+
+	commands := []string{"/model", "/models", "/onboard", "/onboarding", "/provider", "/providers", "/quit", "/exit"}
+	candidates := make([]string, 0, len(commands))
+	for _, command := range commands {
+		if strings.HasPrefix(command, input) {
+			candidates = append(candidates, command)
+		}
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	return &composerCompletion{
+		Start:      0,
+		End:        len(runes),
+		Fragment:   input,
+		Candidates: candidates,
+	}
+}
+
+func (m *Model) computeShellCompletion(runes []rune) *composerCompletion {
+	start := lastTokenStart(runes)
+	fragment := string(runes[start:])
+	if fragment == "" {
+		return nil
+	}
+
+	var candidates []string
+	if start == 0 && !strings.Contains(fragment, "/") && !strings.HasPrefix(fragment, ".") && !strings.HasPrefix(fragment, "~") {
+		candidates = executableCompletionCandidates(fragment)
+	} else {
+		candidates = pathCompletionCandidates(m.currentWorkingDirectory(), fragment)
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	return &composerCompletion{
+		Start:      start,
+		End:        len(runes),
+		Fragment:   fragment,
+		Candidates: candidates,
+	}
+}
+
+func (m *Model) replaceCompletionFragment(candidate string) {
+	if m.completion == nil {
+		return
+	}
+	runes := []rune(m.input)
+	start := m.completion.Start
+	end := m.completion.End
+	if start < 0 {
+		start = 0
+	}
+	if end > len(runes) {
+		end = len(runes)
+	}
+	if start > end {
+		start = end
+	}
+	updated := append(append(append([]rune{}, runes[:start]...), []rune(candidate)...), runes[end:]...)
+	m.input = string(updated)
+	m.cursor = start + len([]rune(candidate))
+	if strings.TrimSpace(m.input) != "" {
+		m.clearExitConfirm()
+	}
+	m.recomputeCompletion()
+}
+
+func (m Model) currentWorkingDirectory() string {
+	dir := strings.TrimSpace(m.shellContext.Directory)
+	if dir == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			return cwd
+		}
+		return "."
+	}
+	if strings.HasPrefix(dir, "~") {
+		if currentUser, err := user.Current(); err == nil {
+			switch dir {
+			case "~":
+				return currentUser.HomeDir
+			case "~/":
+				return currentUser.HomeDir
+			default:
+				if strings.HasPrefix(dir, "~/") {
+					return filepath.Join(currentUser.HomeDir, strings.TrimPrefix(dir, "~/"))
+				}
+			}
+		}
+	}
+	return dir
+}
+
+func sameCompletionQuery(current composerCompletion, next composerCompletion) bool {
+	return current.Start == next.Start && current.End == next.End && current.Fragment == next.Fragment
+}
+
+func lastTokenStart(runes []rune) int {
+	for index := len(runes) - 1; index >= 0; index-- {
+		if unicode.IsSpace(runes[index]) {
+			return index + 1
+		}
+	}
+	return 0
+}
+
+func executableCompletionCandidates(prefix string) []string {
+	pathValue := strings.TrimSpace(os.Getenv("PATH"))
+	if pathValue == "" {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	candidates := []string{}
+	for _, dir := range filepath.SplitList(pathValue) {
+		if dir == "" {
+			continue
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if _, ok := seen[name]; ok || !strings.HasPrefix(name, prefix) {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil || info.Mode().IsDir() || info.Mode()&0o111 == 0 {
+				continue
+			}
+			seen[name] = struct{}{}
+			candidates = append(candidates, name)
+		}
+	}
+	sort.Strings(candidates)
+	return candidates
+}
+
+func pathCompletionCandidates(workingDir string, fragment string) []string {
+	searchDir := workingDir
+	prefixDir := ""
+	basePrefix := fragment
+	if slash := strings.LastIndex(fragment, "/"); slash >= 0 {
+		prefixDir = fragment[:slash+1]
+		basePrefix = fragment[slash+1:]
+		searchDir = resolveCompletionDir(workingDir, strings.TrimSuffix(prefixDir, "/"))
+	}
+
+	entries, err := os.ReadDir(searchDir)
+	if err != nil {
+		return nil
+	}
+	candidates := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, basePrefix) {
+			continue
+		}
+		candidate := prefixDir + name
+		if entry.IsDir() {
+			candidate += "/"
+		}
+		candidates = append(candidates, candidate)
+	}
+	sort.Strings(candidates)
+	return candidates
+}
+
+func resolveCompletionDir(workingDir string, fragment string) string {
+	if fragment == "" {
+		return workingDir
+	}
+	if strings.HasPrefix(fragment, "~") {
+		if currentUser, err := user.Current(); err == nil {
+			switch fragment {
+			case "~":
+				return currentUser.HomeDir
+			default:
+				if strings.HasPrefix(fragment, "~/") {
+					return filepath.Join(currentUser.HomeDir, strings.TrimPrefix(fragment, "~/"))
+				}
+			}
+		}
+	}
+	if filepath.IsAbs(fragment) {
+		return fragment
+	}
+	return filepath.Join(workingDir, fragment)
+}
+
+func indexOfString(values []string, target string) int {
+	for index, value := range values {
+		if value == target {
+			return index
+		}
+	}
+	return -1
 }
 
 func (m Model) handleComposerCtrlC() (tea.Model, tea.Cmd) {
@@ -3187,12 +3762,50 @@ func (m Model) transcriptWindow(lines []string, height int) []string {
 	return window
 }
 
+func (m Model) transcriptWindowDisplay(lines []transcriptRenderLine, height int) []transcriptRenderLine {
+	start := m.transcriptScroll
+	maxStart := m.maxTranscriptScrollForDisplay(lines, height)
+	if m.transcriptFollow {
+		start = maxStart
+	}
+	if start > maxStart {
+		start = maxStart
+	}
+	if start < 0 {
+		start = 0
+	}
+
+	end := start + height
+	if end > len(lines) {
+		end = len(lines)
+	}
+
+	window := append([]transcriptRenderLine(nil), lines[start:end]...)
+	if len(window) < height {
+		padding := make([]transcriptRenderLine, 0, height-len(window))
+		for i := len(window); i < height; i++ {
+			padding = append(padding, transcriptRenderLine{entryIndex: -1})
+		}
+		window = append(window, padding...)
+	}
+
+	return window
+}
+
 func (m Model) transcriptLineCount() int {
 	return len(m.transcriptLines(m.currentTranscriptWidth()))
 }
 
 func (m Model) maxTranscriptScroll() int {
 	return m.maxTranscriptScrollFor(m.transcriptLines(m.currentTranscriptWidth()), m.currentTranscriptHeight())
+}
+
+func (m Model) maxTranscriptScrollForDisplay(lines []transcriptRenderLine, height int) int {
+	if len(lines) <= height {
+		return 0
+	}
+
+	return len(lines) - height
 }
 
 func (m Model) maxTranscriptScrollFor(lines []string, height int) int {
@@ -3231,7 +3844,7 @@ func (m Model) currentTranscriptWidth() int {
 		width = 100
 	}
 
-	return max(40, width)
+	return max(10, width)
 }
 
 func (m Model) activeComposerStyle() lipgloss.Style {
@@ -3252,6 +3865,35 @@ func (m Model) contentWidthFor(totalWidth int, style lipgloss.Style) int {
 	}
 
 	return width
+}
+
+func (m Model) renderScreen(body string) string {
+	width := m.width
+	if width <= 0 {
+		width = 100
+	}
+	height := m.height
+	if height <= 0 {
+		height = 24
+	}
+
+	lines := strings.Split(body, "\n")
+	switch {
+	case len(lines) < height:
+		lines = append(lines, make([]string, height-len(lines))...)
+	case len(lines) > height:
+		lines = lines[:height]
+	}
+
+	return m.styles.screen.Width(width).Height(height).Render(strings.Join(lines, "\n"))
+}
+
+func blankBlock(height int) string {
+	if height <= 0 {
+		return ""
+	}
+	lines := make([]string, height)
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) selectedEntryValue() Entry {
@@ -3303,6 +3945,232 @@ func (m *Model) selectNextEntry() {
 	if m.selectedEntry < len(m.entries)-1 {
 		m.selectedEntry++
 	}
+}
+
+func (m Model) inlineDetailLineLimit() int {
+	height := m.height
+	if height <= 0 {
+		height = 24
+	}
+	return max(4, height*3/10)
+}
+
+func (m Model) inlineDetailLines(entry Entry, width int) []string {
+	body := strings.TrimSpace(entry.Detail)
+	if body == "" {
+		return nil
+	}
+
+	lines := wrapParagraphs(body, max(10, width-2))
+	if len(lines) == 0 {
+		return nil
+	}
+
+	limit := m.inlineDetailLineLimit()
+	if len(lines) > limit {
+		lines = append(lines[:limit], "… Ctrl+O for more")
+	}
+
+	return lines
+}
+
+func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		if m.mouseInTranscript(msg.X, msg.Y) {
+			m.scrollTranscriptBy(-3)
+		}
+		return m, nil
+	case tea.MouseButtonWheelDown:
+		if m.mouseInTranscript(msg.X, msg.Y) {
+			m.scrollTranscriptBy(3)
+		}
+		return m, nil
+	}
+
+	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+		return m, nil
+	}
+
+	if m.mouseOnShellTailLabel(msg.X, msg.Y) {
+		return m.takeControlNow()
+	}
+	if action, ok := m.actionCardActionAtMouse(msg.X, msg.Y); ok {
+		return m.performActionCardAction(action)
+	}
+
+	entryIndex, ok := m.transcriptTagEntryAtMouse(msg.X, msg.Y)
+	if !ok {
+		if m.inlineDetailEntry >= 0 {
+			m.inlineDetailEntry = -1
+		}
+		return m, nil
+	}
+
+	m.selectedEntry = entryIndex
+	m.clampSelection()
+	if strings.TrimSpace(m.entries[entryIndex].Detail) == "" {
+		m.inlineDetailEntry = -1
+		return m, nil
+	}
+	if m.inlineDetailEntry == entryIndex {
+		m.inlineDetailEntry = -1
+		return m, nil
+	}
+	m.inlineDetailEntry = entryIndex
+	return m, nil
+}
+
+func (m Model) mouseInTranscript(x int, y int) bool {
+	if x < 0 || y < 0 || x >= m.currentTranscriptWidth() {
+		return false
+	}
+
+	lines := m.transcriptWindowDisplay(m.transcriptDisplayLines(m.currentTranscriptWidth()), m.currentTranscriptHeight())
+	if y >= len(lines) {
+		return false
+	}
+
+	return lines[y].entryIndex >= 0
+}
+
+func (m Model) transcriptTagEntryAtMouse(x int, y int) (int, bool) {
+	if !m.mouseInTranscript(x, y) {
+		return 0, false
+	}
+
+	lines := m.transcriptWindowDisplay(m.transcriptDisplayLines(m.currentTranscriptWidth()), m.currentTranscriptHeight())
+	line := lines[y]
+	if line.tagStart < 0 || line.tagEnd <= line.tagStart || x < line.tagStart || x >= line.tagEnd {
+		return 0, false
+	}
+
+	entryIndex := line.entryIndex
+	if entryIndex < 0 || entryIndex >= len(m.entries) {
+		return 0, false
+	}
+
+	return entryIndex, true
+}
+
+func (m Model) actionCardActionAtMouse(x int, y int) (actionCardAction, bool) {
+	spec := m.currentActionCardSpec()
+	if spec == nil || len(spec.buttons) == 0 || x < 0 || y < 0 {
+		return "", false
+	}
+
+	startY, ok := m.actionCardStartY()
+	if !ok {
+		return "", false
+	}
+
+	contentWidth := m.contentWidthFor(m.currentTranscriptWidth(), m.styles.actionCard)
+	bodyLines := actionCardBodyLines(spec.body, contentWidth)
+	buttonLines := layoutActionCardButtons(spec.buttons, contentWidth)
+	lineIndex := y - (startY + m.styles.actionCard.GetBorderTopSize() + 1 + len(bodyLines))
+	if lineIndex < 0 || lineIndex >= len(buttonLines) {
+		return "", false
+	}
+
+	textX := x - (m.styles.actionCard.GetBorderLeftSize() + m.styles.actionCard.GetPaddingLeft())
+	if textX < 0 {
+		return "", false
+	}
+
+	for _, hit := range buttonLines[lineIndex].hits {
+		if textX >= hit.start && textX < hit.end {
+			return hit.action, true
+		}
+	}
+
+	return "", false
+}
+
+func (m Model) actionCardStartY() (int, bool) {
+	if m.currentActionCardSpec() == nil {
+		return 0, false
+	}
+	return m.currentTranscriptHeight(), true
+}
+
+func (m Model) performActionCardAction(action actionCardAction) (tea.Model, tea.Cmd) {
+	switch action {
+	case actionCardContinueStartup:
+		m.startupNotice = nil
+		return m, nil
+	case actionCardConfirmFullscreen:
+		return m.confirmFullscreenAction()
+	case actionCardCancelFullscreen:
+		m.pendingFullscreen = nil
+		return m, nil
+	case actionCardTakeControl:
+		return m.takeControlNow()
+	case actionCardApprove:
+		return m.primaryAction()
+	case actionCardReject:
+		if m.pendingProposal != nil {
+			return m.rejectProposal()
+		}
+		return m.decideApproval(controller.DecisionReject)
+	case actionCardRefine:
+		if m.pendingProposal != nil {
+			return m.refineProposal()
+		}
+		return m.refineApproval()
+	case actionCardEditProposal:
+		if m.pendingProposal != nil {
+			return m.editProposalCommand()
+		}
+	}
+
+	return m, nil
+}
+
+func (m Model) mouseOnShellTailLabel(x int, y int) bool {
+	if x < 0 || y < 0 {
+		return false
+	}
+
+	startY, ok := m.shellTailStartY()
+	if !ok {
+		return false
+	}
+	if y != startY {
+		return false
+	}
+
+	labelStart := m.styles.tail.GetHorizontalPadding()
+	labelEnd := labelStart + lipgloss.Width(m.styles.tailLabel.Render("shell"))
+	return x >= labelStart && x < labelEnd
+}
+
+func (m Model) shellTailStartY() (int, bool) {
+	if !m.showShellTail || m.activeExecution != nil && m.activeExecution.State == controller.CommandExecutionInteractiveFullscreen {
+		return 0, false
+	}
+	if strings.TrimSpace(m.liveShellTail) == "" {
+		return 0, false
+	}
+
+	width := m.currentTranscriptWidth()
+	actionWidth := m.contentWidthFor(width, m.styles.actionCard)
+	statusWidth := m.contentWidthFor(width, m.styles.status)
+
+	y := m.currentTranscriptHeight()
+	if actionCard := m.renderActionCard(actionWidth); actionCard != "" {
+		y += lipgloss.Height(actionCard)
+	}
+	if planCard := m.renderPlanCard(actionWidth); planCard != "" {
+		y += lipgloss.Height(planCard)
+	}
+	if activeExecutionCard := m.renderActiveExecutionCard(actionWidth); activeExecutionCard != "" {
+		y += lipgloss.Height(activeExecutionCard)
+	}
+	if statusLine := m.renderStatusLine(statusWidth); statusLine != "" {
+		y += lipgloss.Height(statusLine)
+	}
+
+	return y, true
 }
 
 func (m Model) openDetail() (tea.Model, tea.Cmd) {
@@ -3383,13 +4251,57 @@ func (m Model) renderDetailView() string {
 	}
 	lines = append(lines, "", m.styles.detailMeta.Render(m.renderDetailFooter(contentWidth)))
 
-	return m.styles.detail.Width(contentWidth).Render(strings.Join(lines, "\n"))
+	return m.styles.detail.Width(contentWidth).Height(height).Render(strings.Join(lines, "\n"))
+}
+
+func (m Model) renderHelpView() string {
+	width := m.width
+	if width <= 0 {
+		width = 100
+	}
+	height := m.height
+	if height <= 0 {
+		height = 24
+	}
+
+	contentWidth := m.contentWidthFor(width, m.styles.detail)
+	header := []string{
+		m.styles.detailTitle.Render("HELP"),
+		m.styles.detailMeta.Render("Shuttle controls, modes, slash commands, and mouse actions"),
+		"",
+	}
+
+	bodyLines := helpContentLines(contentWidth, m.mode, m.canSendActiveKeys())
+	viewportHeight := height - lipgloss.Height(strings.Join(header, "\n")) - m.styles.detail.GetVerticalFrameSize() - 2
+	if viewportHeight < 4 {
+		viewportHeight = 4
+	}
+	bodyLines = detailWindow(bodyLines, m.helpScroll, viewportHeight)
+
+	lines := append([]string(nil), header...)
+	for _, line := range bodyLines {
+		if strings.HasPrefix(line, "# ") {
+			lines = append(lines, m.styles.detailBody.Render(strings.TrimPrefix(line, "# ")))
+			continue
+		}
+		if strings.HasPrefix(line, "> ") {
+			lines = append(lines, m.styles.detailMeta.Render(strings.TrimPrefix(line, "> ")))
+			continue
+		}
+		lines = append(lines, m.styles.detailBody.Render(line))
+	}
+	lines = append(lines, "", m.styles.detailMeta.Render(m.renderHelpFooter(contentWidth)))
+	return m.styles.detail.Width(contentWidth).Height(height).Render(strings.Join(lines, "\n"))
 }
 
 func (m Model) renderOnboardingView() string {
 	width := m.width
 	if width <= 0 {
 		width = 100
+	}
+	height := m.height
+	if height <= 0 {
+		height = 24
 	}
 
 	contentWidth := m.contentWidthFor(width, m.styles.detail)
@@ -3412,13 +4324,17 @@ func (m Model) renderOnboardingView() string {
 	}
 
 	lines = append(lines, "", m.styles.detailMeta.Render(onboardingFooter(width, m.onboardingStep)))
-	return m.styles.detail.Width(contentWidth).Render(strings.Join(lines, "\n"))
+	return m.styles.detail.Width(contentWidth).Height(height).Render(strings.Join(lines, "\n"))
 }
 
 func (m Model) renderSettingsView() string {
 	width := m.width
 	if width <= 0 {
 		width = 100
+	}
+	height := m.height
+	if height <= 0 {
+		height = 24
 	}
 
 	contentWidth := m.contentWidthFor(width, m.styles.detail)
@@ -3453,7 +4369,83 @@ func (m Model) renderSettingsView() string {
 	}
 
 	lines = append(lines, "", m.styles.detailMeta.Render(settingsFooter(width, m.settingsStep)))
-	return m.styles.detail.Width(contentWidth).Render(strings.Join(lines, "\n"))
+	return m.styles.detail.Width(contentWidth).Height(height).Render(strings.Join(lines, "\n"))
+}
+
+func helpContentLines(width int, mode Mode, canSendKeys bool) []string {
+	lines := []string{
+		"# Slash Commands",
+		"/onboard or /onboarding: open provider onboarding",
+		"/provider or /providers: open the active provider picker",
+		"/model or /models: open the active model picker",
+		"/quit or /exit: leave Shuttle",
+		"> Slash commands only trigger in agent mode. In shell mode, leading / stays a path.",
+		"",
+		"# Global Keys",
+		"F1: open or close this help view",
+		"F2: jump to the shell pane / take control",
+		"F10: open settings",
+		"Ctrl+C: quit Shuttle",
+		"Ctrl+]: toggle between agent and shell mode",
+		"Ctrl+O: open the selected transcript entry in the full detail view",
+		"PgUp/PgDn: scroll transcript",
+		"Ctrl+U / Ctrl+D: half-page transcript scroll",
+		"Home / End: jump transcript to top or bottom",
+		"Alt+Up / Alt+Down: move transcript selection",
+	}
+	if mode == ShellMode {
+		lines = append(lines, "Up / Down: shell command history")
+	} else {
+		lines = append(lines, "Up / Down: agent prompt history")
+	}
+	lines = append(lines,
+		"Right Arrow: accept the current ghost-text completion",
+		"Esc: clear the composer, collapse inline transcript detail, or interrupt active work",
+		"",
+		"# Composer",
+		"Enter: submit the composer",
+		"Ctrl+J: insert a newline",
+		"Tab: cycle completion candidates, or insert a literal tab if no completion is available",
+		"> In shell mode the first token completes PATH executables and later tokens complete filesystem paths.",
+		"> In agent mode leading / offers Shuttle slash-command completion.",
+		"",
+		"# Action Cards",
+		"Y: primary action for the current card",
+		"N: reject or cancel when available",
+		"R: refine when available",
+		"E: edit a proposed command",
+		"> Approval and proposal cards also support clickable actions with the mouse.",
+	)
+	if canSendKeys {
+		lines = append(lines, "S: enter KEYS> mode to send raw keys to a fullscreen app")
+	}
+	lines = append(lines,
+		"",
+		"# Mouse",
+		"Click a transcript icon/tag: expand or collapse inline detail for that entry",
+		"Mouse wheel over transcript: scroll transcript",
+		"Click shell label in the shell-tail block: same as F2 take control",
+		"Shift-select: use terminal selection/copy while Bubble Tea mouse mode is active",
+		"",
+		"# Modes",
+		"Shell mode: direct shell commands from $>",
+		"Agent mode: send natural-language prompts from OE>",
+		"> The current mode changes the composer prompt, history, slash-command behavior, and completion source.",
+	)
+
+	wrapped := make([]string, 0, len(lines)*2)
+	for _, line := range lines {
+		switch {
+		case line == "":
+			wrapped = append(wrapped, "")
+		case strings.HasPrefix(line, "# "), strings.HasPrefix(line, "> "):
+			wrapped = append(wrapped, line)
+		default:
+			wrapped = append(wrapped, wrapText(line, max(10, width))...)
+		}
+	}
+
+	return wrapped
 }
 
 func (m Model) renderSettingsMenu(contentWidth int) []string {
@@ -3491,8 +4483,14 @@ func (m Model) renderSettingsProviders(contentWidth int) []string {
 func (m Model) renderSettingsModels(contentWidth int) []string {
 	lines := []string{m.renderSettingsCurrentLine("Current: " + currentProviderModelLabel(m.activeProvider))}
 	filterLine := "Filter: type to search models"
+	if m.settingsModelScope != "" {
+		filterLine = fmt.Sprintf("Provider: %s  %s", settingsProviderLabel(m.settingsModelScope), filterLine)
+	}
 	if strings.TrimSpace(m.settingsModelFilter) != "" {
 		filterLine = fmt.Sprintf("Filter: %s  (%d matches)", m.settingsModelFilter, len(m.settingsModels))
+		if m.settingsModelScope != "" {
+			filterLine = fmt.Sprintf("Provider: %s  %s", settingsProviderLabel(m.settingsModelScope), filterLine)
+		}
 	}
 	lines = append(lines, m.styles.detailMeta.Render(filterLine))
 	lines = append(lines, m.styles.detailMeta.Render("Shift+I shows extra model details for the highlighted row."))
@@ -3535,6 +4533,67 @@ func (m Model) renderSettingsModels(contentWidth int) []string {
 	}
 
 	return lines
+}
+
+func (m Model) toggleHelp() (tea.Model, tea.Cmd) {
+	if m.helpOpen {
+		m.helpOpen = false
+		m.helpScroll = 0
+		return m, nil
+	}
+
+	m.helpOpen = true
+	m.helpScroll = 0
+	return m, nil
+}
+
+func (m Model) updateHelp(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		return m, tea.Quit
+	case tea.KeyF2:
+		return m.takeControlNow()
+	case tea.KeyEsc:
+		m.helpOpen = false
+		m.helpScroll = 0
+		return m, nil
+	case tea.KeyUp:
+		if m.helpScroll > 0 {
+			m.helpScroll--
+		}
+		return m, nil
+	case tea.KeyDown:
+		m.helpScroll++
+		m.clampHelpScroll()
+		return m, nil
+	case tea.KeyPgUp:
+		m.helpScroll -= m.detailPageSize()
+		m.clampHelpScroll()
+		return m, nil
+	case tea.KeyPgDown:
+		m.helpScroll += m.detailPageSize()
+		m.clampHelpScroll()
+		return m, nil
+	case tea.KeyHome:
+		m.helpScroll = 0
+		return m, nil
+	case tea.KeyEnd:
+		m.helpScroll = m.maxHelpScroll()
+		return m, nil
+	default:
+		return m, nil
+	}
+}
+
+func (m Model) renderHelpFooter(width int) string {
+	switch {
+	case width < 40:
+		return "[F1/Esc] close  [Up/Down]  [Pg]  [F2]  [Ctrl+C]"
+	case width < 64:
+		return "[F1/Esc] close  [Up/Down] scroll  [PgUp/PgDn] page  [F2] shell  [Ctrl+C] quit"
+	default:
+		return "[F1/Esc] close  [Up/Down] scroll  [PgUp/PgDn] page  [Home/End] bounds  [F2] shell  [Ctrl+C] quit"
+	}
 }
 
 func (m Model) renderSettingsConfig(contentWidth int) []string {
@@ -3926,7 +4985,7 @@ func (m Model) maxDetailScroll() int {
 	if width <= 0 {
 		width = 100
 	}
-	contentWidth := m.contentWidthFor(max(40, width), m.styles.detail)
+	contentWidth := m.contentWidthFor(width, m.styles.detail)
 	lines := wrapParagraphs(entry.DetailBody(), max(10, contentWidth))
 	height := m.height
 	if height <= 0 {
@@ -3936,6 +4995,44 @@ func (m Model) maxDetailScroll() int {
 	if viewportHeight < 4 {
 		viewportHeight = 4
 	}
+	if len(lines) <= viewportHeight {
+		return 0
+	}
+
+	return len(lines) - viewportHeight
+}
+
+func (m *Model) clampHelpScroll() {
+	if m.helpScroll < 0 {
+		m.helpScroll = 0
+		return
+	}
+	if m.helpScroll > m.maxHelpScroll() {
+		m.helpScroll = m.maxHelpScroll()
+	}
+}
+
+func (m Model) maxHelpScroll() int {
+	width := m.width
+	if width <= 0 {
+		width = 100
+	}
+	height := m.height
+	if height <= 0 {
+		height = 24
+	}
+
+	contentWidth := m.contentWidthFor(width, m.styles.detail)
+	headerHeight := lipgloss.Height(strings.Join([]string{
+		m.styles.detailTitle.Render("HELP"),
+		m.styles.detailMeta.Render("Shuttle controls, modes, slash commands, and mouse actions"),
+		"",
+	}, "\n"))
+	viewportHeight := height - headerHeight - m.styles.detail.GetVerticalFrameSize() - 2
+	if viewportHeight < 4 {
+		viewportHeight = 4
+	}
+	lines := helpContentLines(contentWidth, m.mode, m.canSendActiveKeys())
 	if len(lines) <= viewportHeight {
 		return 0
 	}
@@ -3973,6 +5070,14 @@ func (m *Model) scrollTranscriptToBottom() {
 	m.transcriptFollow = true
 }
 
+func (m *Model) refreshTranscriptViewport() {
+	if m.transcriptFollow {
+		m.scrollTranscriptToBottom()
+		return
+	}
+	m.clampTranscriptScroll()
+}
+
 func (m Model) isTranscriptPinned() bool {
 	return m.transcriptFollow || m.transcriptScroll >= m.maxTranscriptScroll()
 }
@@ -3991,6 +5096,31 @@ func (m Model) halfPageScrollSize() int {
 }
 
 func (m Model) renderTag(title string) string {
+	if transcriptEmojiEnabled() {
+		switch title {
+		case "system":
+			return m.styles.glyphSystem.Render("⚙")
+		case "user":
+			return m.styles.glyphShell.Render("👤")
+		case "shell":
+			return m.styles.glyphShell.Render("💻")
+		case "result":
+			return m.styles.glyphResult.Render("✅")
+		case "agent":
+			return m.styles.glyphAgent.Render("🤖")
+		case "plan":
+			return m.styles.glyphAgent.Render("🗺️")
+		case "proposal":
+			return m.styles.glyphAgent.Render("📝")
+		case "approval":
+			return m.styles.glyphError.Render("⚠️")
+		case "error":
+			return m.styles.glyphError.Render("⛔")
+		default:
+			return m.styles.glyphSystem.Render("•")
+		}
+	}
+
 	text := strings.ToUpper(title)
 
 	switch title {
@@ -4015,6 +5145,16 @@ func (m Model) renderTag(title string) string {
 	default:
 		return m.styles.tagSystem.Render(text)
 	}
+}
+
+func transcriptEmojiEnabled() bool {
+	for _, key := range []string{"LC_ALL", "LC_CTYPE", "LANG"} {
+		value := strings.ToUpper(strings.TrimSpace(os.Getenv(key)))
+		if strings.Contains(value, "UTF-8") || strings.Contains(value, "UTF8") {
+			return true
+		}
+	}
+	return false
 }
 
 func (m Model) runProposalCommand() (tea.Model, tea.Cmd) {
@@ -4395,9 +5535,10 @@ type composerLine struct {
 	Before string
 	Cursor string
 	After  string
+	Ghost  string
 }
 
-func composerDisplayLines(input string, cursor int) []composerLine {
+func composerDisplayLines(input string, cursor int, ghost string) []composerLine {
 	runes := []rune(input)
 	if cursor < 0 {
 		cursor = 0
@@ -4445,22 +5586,24 @@ func composerDisplayLines(input string, cursor int) []composerLine {
 		display = append(display, composerLine{
 			Before: line,
 			Cursor: " ",
+			Ghost:  ghost,
 		})
 	}
 
 	if len(display) == 0 {
-		display = append(display, composerLine{Cursor: " "})
+		display = append(display, composerLine{Cursor: " ", Ghost: ghost})
 	}
 
 	return display
 }
 
-func renderComposerLine(line composerLine, cursorStyle lipgloss.Style, inputStyle lipgloss.Style) string {
+func renderComposerLine(line composerLine, cursorStyle lipgloss.Style, inputStyle lipgloss.Style, ghostStyle lipgloss.Style) string {
 	return lipgloss.JoinHorizontal(
 		lipgloss.Left,
 		inputStyle.Render(line.Before),
 		cursorStyle.Render(line.Cursor),
 		inputStyle.Render(line.After),
+		ghostStyle.Render(line.Ghost),
 	)
 }
 
@@ -4811,6 +5954,40 @@ func (m Model) settingsConfiguredProfiles() []provider.Profile {
 	return profiles
 }
 
+func (m *Model) appendTranscriptEntry(entry Entry) {
+	pinned := m.isTranscriptPinned()
+	m.entries = append(m.entries, entry)
+	if pinned {
+		m.scrollTranscriptToBottom()
+	} else {
+		m.clampTranscriptScroll()
+	}
+	m.selectedEntry = len(m.entries) - 1
+	m.clampSelection()
+}
+
+func (m *Model) appendLocalTranscriptEcho(entry Entry) {
+	m.appendTranscriptEntry(entry)
+	echo := entry
+	m.pendingLocalEcho = &echo
+}
+
+func (m *Model) consumePendingLocalEcho(entries []Entry) []Entry {
+	if m.pendingLocalEcho == nil {
+		return entries
+	}
+
+	echo := *m.pendingLocalEcho
+	m.pendingLocalEcho = nil
+	if len(entries) == 0 {
+		return entries
+	}
+	if entries[0].Title == echo.Title && entries[0].Body == echo.Body {
+		return entries[1:]
+	}
+	return entries
+}
+
 func (m *Model) applySettingsModelFilter() {
 	selectedKey := ""
 	if len(m.settingsModels) > 0 && m.settingsModelIdx >= 0 && m.settingsModelIdx < len(m.settingsModels) {
@@ -5102,6 +6279,80 @@ func settingsModelMatches(choice settingsModelChoice, filter string) bool {
 	}
 
 	return true
+}
+
+func actionCardBodyLines(body []string, width int) []string {
+	width = max(10, width)
+	lines := make([]string, 0, len(body))
+	for _, line := range body {
+		lines = append(lines, wrapText(line, width)...)
+	}
+	return lines
+}
+
+func layoutActionCardButtons(buttons []actionCardButton, width int) []actionCardButtonLine {
+	width = max(10, width)
+	if len(buttons) == 0 {
+		return nil
+	}
+
+	lines := make([]actionCardButtonLine, 0, len(buttons))
+	current := actionCardButtonLine{}
+	currentWidth := 0
+
+	flush := func() {
+		if current.text == "" {
+			return
+		}
+		lines = append(lines, current)
+		current = actionCardButtonLine{}
+		currentWidth = 0
+	}
+
+	for _, button := range buttons {
+		segments := wrapText(button.label, width)
+		if len(segments) > 1 {
+			flush()
+			for _, segment := range segments {
+				segmentWidth := runewidth.StringWidth(segment)
+				lines = append(lines, actionCardButtonLine{
+					text: segment,
+					hits: []actionCardButtonHit{{
+						action: button.action,
+						start:  0,
+						end:    segmentWidth,
+					}},
+				})
+			}
+			continue
+		}
+
+		label := button.label
+		labelWidth := runewidth.StringWidth(label)
+		gap := 0
+		if current.text != "" {
+			gap = 2
+		}
+		if current.text != "" && currentWidth+gap+labelWidth > width {
+			flush()
+			gap = 0
+		}
+
+		start := currentWidth + gap
+		if gap > 0 {
+			current.text += strings.Repeat(" ", gap)
+		}
+		current.text += label
+		current.hits = append(current.hits, actionCardButtonHit{
+			action: button.action,
+			start:  start,
+			end:    start + labelWidth,
+		})
+		currentWidth = start + labelWidth
+	}
+
+	flush()
+	return lines
 }
 
 func fuzzySubsequenceMatch(field string, filter string) bool {

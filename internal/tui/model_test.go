@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,14 +19,655 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-func TestTabTogglesMode(t *testing.T) {
+func TestCtrlCloseBracketTogglesMode(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlCloseBracket})
+	next := updated.(Model)
+
+	if next.mode != AgentMode {
+		t.Fatalf("expected AgentMode, got %s", next.mode)
+	}
+}
+
+func TestF1OpensAndClosesHelpView(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF1})
+	next := updated.(Model)
+	if !next.helpOpen {
+		t.Fatal("expected F1 to open help view")
+	}
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyF1})
+	next = updated.(Model)
+	if next.helpOpen {
+		t.Fatal("expected F1 to close help view when already open")
+	}
+}
+
+func TestHelpViewContainsSlashCommandsAndShortcuts(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.width = 100
+	model.height = 48
+	model.helpOpen = true
+
+	view := model.View()
+	for _, fragment := range []string{"HELP", "/onboard", "/provider", "/model", "/quit", "Ctrl+]", "F2", "Shift-select"} {
+		if !strings.Contains(view, fragment) {
+			t.Fatalf("expected help view to contain %q, got %q", fragment, view)
+		}
+	}
+}
+
+func TestHelpFooterUsesShorterHintsAtNarrowWidths(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+
+	narrow := model.renderHelpFooter(32)
+	if strings.Contains(narrow, "Home/End") || strings.Contains(narrow, "PgUp/PgDn") {
+		t.Fatalf("expected narrow help footer to omit long hints, got %q", narrow)
+	}
+	if !strings.Contains(narrow, "[Pg]") {
+		t.Fatalf("expected narrow help footer to use short paging hint, got %q", narrow)
+	}
+
+	wide := model.renderHelpFooter(80)
+	if !strings.Contains(wide, "Home/End") || !strings.Contains(wide, "PgUp/PgDn") {
+		t.Fatalf("expected wide help footer to keep full hints, got %q", wide)
+	}
+}
+
+func TestTabInsertsTabIntoComposer(t *testing.T) {
 	model := NewModel(fakeWorkspace(), nil)
 
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyTab})
 	next := updated.(Model)
 
-	if next.mode != AgentMode {
-		t.Fatalf("expected AgentMode, got %s", next.mode)
+	if next.input != "\t" {
+		t.Fatalf("expected tab inserted into composer, got %q", next.input)
+	}
+}
+
+func TestSlashCompletionAcceptsGhostWithRightArrow(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.mode = AgentMode
+	model.setInput("/pr")
+
+	if ghost := model.currentCompletionGhostText(); ghost != "ovider" {
+		t.Fatalf("expected provider ghost text, got %q", ghost)
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRight})
+	next := updated.(Model)
+	if next.input != "/provider" {
+		t.Fatalf("expected right arrow to accept slash completion, got %q", next.input)
+	}
+}
+
+func TestTabCyclesSlashCompletionCandidatesInline(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.mode = AgentMode
+	model.setInput("/pr")
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	next := updated.(Model)
+	if next.input != "/pr" {
+		t.Fatalf("expected tab cycle to keep input unchanged, got %q", next.input)
+	}
+	if ghost := next.currentCompletionGhostText(); ghost != "oviders" {
+		t.Fatalf("expected providers ghost text after tab cycle, got %q", ghost)
+	}
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRight})
+	next = updated.(Model)
+	if next.input != "/providers" {
+		t.Fatalf("expected right arrow to accept cycled slash completion, got %q", next.input)
+	}
+}
+
+func TestShellPathCompletionAcceptsGhostWithRightArrow(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "alpha.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatalf("write alpha.txt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "alpine.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatalf("write alpine.txt: %v", err)
+	}
+
+	model := NewModel(fakeWorkspace(), nil)
+	model.shellContext = shell.PromptContext{Directory: dir}
+	model.setInput("cat al")
+
+	if ghost := model.currentCompletionGhostText(); ghost != "pha.txt" {
+		t.Fatalf("expected alpha.txt ghost text, got %q", ghost)
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRight})
+	next := updated.(Model)
+	if next.input != "cat alpha.txt" {
+		t.Fatalf("expected right arrow to accept path completion, got %q", next.input)
+	}
+}
+
+func TestTabCyclesShellPathCompletionCandidatesInline(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "alpha.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatalf("write alpha.txt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "alpine.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatalf("write alpine.txt: %v", err)
+	}
+
+	model := NewModel(fakeWorkspace(), nil)
+	model.shellContext = shell.PromptContext{Directory: dir}
+	model.setInput("cat al")
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	next := updated.(Model)
+	if next.input != "cat al" {
+		t.Fatalf("expected tab cycle to keep shell input unchanged, got %q", next.input)
+	}
+	if ghost := next.currentCompletionGhostText(); ghost != "pine.txt" {
+		t.Fatalf("expected alpine.txt ghost text after tab cycle, got %q", ghost)
+	}
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRight})
+	next = updated.(Model)
+	if next.input != "cat alpine.txt" {
+		t.Fatalf("expected right arrow to accept cycled shell completion, got %q", next.input)
+	}
+}
+
+func TestMouseClickTranscriptEntryOpensInlineDetail(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.width = 80
+	model.height = 24
+	model.entries = []Entry{
+		{Title: "agent", Body: "Hello", Detail: "detail line one\ndetail line two"},
+		{Title: "system", Body: "Later"},
+	}
+	model.selectedEntry = 1
+
+	y := transcriptLineIndexForEntry(model, 0)
+	updated, _ := model.Update(tea.MouseMsg{
+		X:      2,
+		Y:      y,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	next := updated.(Model)
+
+	if next.selectedEntry != 0 {
+		t.Fatalf("expected clicked entry to become selected, got %d", next.selectedEntry)
+	}
+	if next.inlineDetailEntry != 0 {
+		t.Fatalf("expected inline detail to open for entry 0, got %d", next.inlineDetailEntry)
+	}
+	if rendered := strings.Join(next.renderEntryLines(0, next.entries[0], next.currentTranscriptWidth()), "\n"); !strings.Contains(rendered, "Ctrl+O for more") && !strings.Contains(rendered, "detail line one") {
+		t.Fatalf("expected rendered entry to include inline detail, got %q", rendered)
+	}
+}
+
+func TestMouseClickTranscriptBodyDoesNotOpenInlineDetail(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.width = 80
+	model.height = 24
+	model.entries = []Entry{
+		{Title: "agent", Body: "Hello", Detail: "detail line one"},
+	}
+	model.selectedEntry = 0
+
+	y := transcriptLineIndexForEntry(model, 0)
+	updated, _ := model.Update(tea.MouseMsg{
+		X:      12,
+		Y:      y,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	next := updated.(Model)
+
+	if next.inlineDetailEntry != -1 {
+		t.Fatalf("expected transcript body click to leave inline detail closed, got %d", next.inlineDetailEntry)
+	}
+}
+
+func TestMouseClickOutsideTranscriptClosesInlineDetail(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.width = 80
+	model.height = 24
+	model.entries = []Entry{
+		{Title: "agent", Body: "Hello", Detail: "detail line one"},
+	}
+	model.selectedEntry = 0
+	model.inlineDetailEntry = 0
+
+	updated, _ := model.Update(tea.MouseMsg{
+		X:      0,
+		Y:      model.currentTranscriptHeight(),
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	next := updated.(Model)
+
+	if next.inlineDetailEntry != -1 {
+		t.Fatalf("expected click away to close inline detail, got %d", next.inlineDetailEntry)
+	}
+}
+
+func TestMouseWheelScrollsTranscript(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.width = 80
+	model.height = 8
+	model.entries = []Entry{
+		{Title: "system", Body: "one"},
+		{Title: "system", Body: "two"},
+		{Title: "system", Body: "three"},
+		{Title: "system", Body: "four"},
+		{Title: "system", Body: "five"},
+		{Title: "system", Body: "six"},
+		{Title: "system", Body: "seven"},
+		{Title: "system", Body: "eight"},
+		{Title: "system", Body: "nine"},
+		{Title: "system", Body: "ten"},
+	}
+
+	updated, _ := model.Update(tea.MouseMsg{
+		X:      0,
+		Y:      0,
+		Button: tea.MouseButtonWheelUp,
+		Action: tea.MouseActionPress,
+	})
+	next := updated.(Model)
+
+	if next.transcriptFollow {
+		t.Fatal("expected wheel up to unpin transcript follow")
+	}
+	if next.transcriptScroll >= next.maxTranscriptScroll() {
+		t.Fatalf("expected wheel up to move transcript above the bottom, got scroll=%d max=%d", next.transcriptScroll, next.maxTranscriptScroll())
+	}
+}
+
+func TestMouseClickShellTailLabelStartsTakeControl(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil).WithTakeControl("sock", "sess", "%0", TakeControlKey)
+	model.width = 80
+	model.height = 24
+	model.showShellTail = true
+	model.liveShellTail = "line one\nline two"
+
+	startY, ok := model.shellTailStartY()
+	if !ok {
+		t.Fatal("expected shell tail start position")
+	}
+
+	updated, cmd := model.Update(tea.MouseMsg{
+		X:      model.styles.tail.GetHorizontalPadding() + 1,
+		Y:      startY,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	next := updated.(Model)
+
+	if cmd == nil {
+		t.Fatal("expected shell tail label click to trigger take-control command")
+	}
+	if next.busy {
+		t.Fatal("expected take-control click not to leave model busy")
+	}
+}
+
+func TestMouseClickApprovalRejectButtonDecidesApproval(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.width = 80
+	model.height = 24
+	model.pendingApproval = &controller.ApprovalRequest{
+		ID:      "approval-1",
+		Title:   "Run it?",
+		Summary: "Need approval",
+		Command: "rm -rf tmp",
+	}
+
+	x, y := actionCardButtonPoint(t, model, 1)
+	updated, cmd := model.Update(tea.MouseMsg{
+		X:      x,
+		Y:      y,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	model = updated.(Model)
+	msg := controllerEventsFromCmd(t, cmd)
+	if len(ctrl.decisions) != 1 || ctrl.decisions[0].decision != controller.DecisionReject {
+		t.Fatalf("expected reject decision from mouse click, got %#v", ctrl.decisions)
+	}
+	updated, _ = model.Update(msg)
+	model = updated.(Model)
+	if model.pendingApproval != nil {
+		t.Fatalf("expected approval to clear after reject, got %#v", model.pendingApproval)
+	}
+}
+
+func TestMouseClickProposalRefineButtonBeginsRefinement(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.width = 80
+	model.height = 24
+	model.pendingProposal = &controller.ProposalPayload{
+		Kind:        controller.ProposalCommand,
+		Command:     "git status",
+		Description: "Inspect the worktree.",
+	}
+
+	x, y := actionCardButtonPoint(t, model, 2)
+	updated, cmd := model.Update(tea.MouseMsg{
+		X:      x,
+		Y:      y,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	next := updated.(Model)
+	if cmd != nil {
+		t.Fatal("expected proposal refine click to stay local")
+	}
+	if next.refiningProposal == nil || next.pendingProposal != nil || next.mode != AgentMode {
+		t.Fatalf("expected refine proposal mode from mouse click, got pending=%#v refining=%#v mode=%s", next.pendingProposal, next.refiningProposal, next.mode)
+	}
+}
+
+func TestMouseClickStartupContinueDismissesWarning(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{
+			Preset:       provider.PresetOpenAI,
+			Name:         "OpenAI Responses",
+			Model:        "gpt-5",
+			BaseURL:      "https://api.openai.com/v1",
+			APIKeyEnvVar: "local_file",
+		},
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	model.width = 80
+	model.height = 24
+
+	x, y := actionCardButtonPoint(t, model, 0)
+	updated, cmd := model.Update(tea.MouseMsg{
+		X:      x,
+		Y:      y,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	next := updated.(Model)
+	if cmd != nil {
+		t.Fatal("expected startup continue click to stay local")
+	}
+	if next.startupNotice != nil {
+		t.Fatalf("expected startup notice cleared, got %#v", next.startupNotice)
+	}
+}
+
+func TestMouseClickFullscreenConfirmRunsShellCommand(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.width = 80
+	model.height = 24
+	model.pendingFullscreen = &fullscreenAction{
+		Kind:    fullscreenActionShellSubmit,
+		Command: "ls",
+	}
+
+	x, y := actionCardButtonPoint(t, model, 0)
+	updated, cmd := model.Update(tea.MouseMsg{
+		X:      x,
+		Y:      y,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	next := updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected fullscreen confirm click to submit shell command")
+	}
+	if next.pendingFullscreen != nil {
+		t.Fatalf("expected fullscreen confirmation to clear, got %#v", next.pendingFullscreen)
+	}
+	msg := controllerEventsFromCmd(t, cmd)
+	if len(ctrl.shellCommands) != 1 || ctrl.shellCommands[0] != "ls" {
+		t.Fatalf("expected fullscreen confirm to run shell command, got %#v", ctrl.shellCommands)
+	}
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+	if next.busy {
+		t.Fatal("expected model to leave busy state after command result")
+	}
+}
+
+func TestMouseClickFullscreenCancelClearsPending(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.width = 80
+	model.height = 24
+	model.pendingFullscreen = &fullscreenAction{
+		Kind:    fullscreenActionShellSubmit,
+		Command: "ls",
+	}
+
+	x, y := actionCardButtonPoint(t, model, 1)
+	updated, cmd := model.Update(tea.MouseMsg{
+		X:      x,
+		Y:      y,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	next := updated.(Model)
+	if cmd != nil {
+		t.Fatal("expected fullscreen cancel click to stay local")
+	}
+	if next.pendingFullscreen != nil {
+		t.Fatalf("expected fullscreen confirmation cleared, got %#v", next.pendingFullscreen)
+	}
+}
+
+func TestMouseClickFullscreenTakeControlStartsHandoff(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("sock", "sess", "%0", TakeControlKey)
+	model.width = 80
+	model.height = 24
+	model.pendingFullscreen = &fullscreenAction{
+		Kind:    fullscreenActionShellSubmit,
+		Command: "ls",
+	}
+
+	x, y := actionCardButtonPoint(t, model, 2)
+	updated, cmd := model.Update(tea.MouseMsg{
+		X:      x,
+		Y:      y,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	next := updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected fullscreen take-control click to trigger handoff")
+	}
+	if next.busy {
+		t.Fatal("expected take-control click not to leave model busy")
+	}
+}
+
+func TestMouseClickApprovalApproveDecidesApproval(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.width = 80
+	model.height = 24
+	model.pendingApproval = &controller.ApprovalRequest{
+		ID:      "approval-1",
+		Title:   "Run it?",
+		Summary: "Need approval",
+		Command: "echo hi",
+	}
+
+	x, y := actionCardButtonPoint(t, model, 0)
+	updated, cmd := model.Update(tea.MouseMsg{
+		X:      x,
+		Y:      y,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	model = updated.(Model)
+	msg := controllerEventsFromCmd(t, cmd)
+	if len(ctrl.decisions) != 1 || ctrl.decisions[0].decision != controller.DecisionApprove {
+		t.Fatalf("expected approve decision from mouse click, got %#v", ctrl.decisions)
+	}
+	updated, _ = model.Update(msg)
+	model = updated.(Model)
+	if model.pendingApproval != nil {
+		t.Fatalf("expected approval to clear after approve, got %#v", model.pendingApproval)
+	}
+}
+
+func TestMouseClickApprovalRefineBeginsRefinement(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.width = 80
+	model.height = 24
+	model.pendingApproval = &controller.ApprovalRequest{
+		ID:      "approval-1",
+		Title:   "Run it?",
+		Summary: "Need approval",
+		Command: "echo hi",
+	}
+
+	x, y := actionCardButtonPoint(t, model, 2)
+	updated, cmd := model.Update(tea.MouseMsg{
+		X:      x,
+		Y:      y,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	next := updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected approval refine click to return command")
+	}
+	if next.refiningApproval == nil || next.mode != AgentMode {
+		t.Fatalf("expected approval refine mode from mouse click, got refining=%#v mode=%s", next.refiningApproval, next.mode)
+	}
+}
+
+func TestMouseClickProposalApproveRunsCommand(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.width = 80
+	model.height = 24
+	model.pendingProposal = &controller.ProposalPayload{
+		Kind:        controller.ProposalCommand,
+		Command:     "git status",
+		Description: "Inspect the worktree.",
+	}
+
+	x, y := actionCardButtonPoint(t, model, 0)
+	updated, cmd := model.Update(tea.MouseMsg{
+		X:      x,
+		Y:      y,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	next := updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected proposal approve click to run command")
+	}
+	msg := controllerEventsFromCmd(t, cmd)
+	if len(ctrl.shellCommands) != 1 || ctrl.shellCommands[0] != "git status" {
+		t.Fatalf("expected proposal approve to run command, got %#v", ctrl.shellCommands)
+	}
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+	if next.pendingProposal != nil {
+		t.Fatalf("expected proposal to clear after approve, got %#v", next.pendingProposal)
+	}
+}
+
+func TestMouseClickProposalRejectDismissesProposal(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.width = 80
+	model.height = 24
+	model.pendingProposal = &controller.ProposalPayload{
+		Kind:        controller.ProposalCommand,
+		Command:     "git status",
+		Description: "Inspect the worktree.",
+	}
+
+	x, y := actionCardButtonPoint(t, model, 1)
+	updated, cmd := model.Update(tea.MouseMsg{
+		X:      x,
+		Y:      y,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	next := updated.(Model)
+	if cmd != nil {
+		t.Fatal("expected proposal reject click to stay local")
+	}
+	if next.pendingProposal != nil {
+		t.Fatalf("expected proposal cleared after reject, got %#v", next.pendingProposal)
+	}
+	last := next.entries[len(next.entries)-1]
+	if last.Title != "system" || !strings.Contains(last.Body, "Proposal dismissed.") {
+		t.Fatalf("expected proposal dismissal notice, got %#v", last)
+	}
+}
+
+func TestMouseClickProposalEditBeginsEditingOnWrappedButtons(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.width = 28
+	model.height = 24
+	model.pendingProposal = &controller.ProposalPayload{
+		Kind:        controller.ProposalCommand,
+		Command:     "git status",
+		Description: "Inspect the worktree.",
+	}
+
+	x, y := actionCardButtonPoint(t, model, 3)
+	updated, cmd := model.Update(tea.MouseMsg{
+		X:      x,
+		Y:      y,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	next := updated.(Model)
+	if cmd != nil {
+		t.Fatal("expected proposal edit click to stay local")
+	}
+	if next.editingProposal == nil || next.pendingProposal != nil || next.input != "git status" {
+		t.Fatalf("expected proposal editing mode from wrapped-button click, got editing=%#v pending=%#v input=%q", next.editingProposal, next.pendingProposal, next.input)
+	}
+}
+
+func TestMouseClickProposalSendKeysRunsKeySend(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("sock", "sess", "%0", TakeControlKey)
+	model.width = 80
+	model.height = 24
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "vim",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionInteractiveFullscreen,
+		StartedAt: time.Now(),
+	}
+	model.pendingProposal = &controller.ProposalPayload{
+		Kind:        controller.ProposalKeys,
+		Keys:        ":q!\n",
+		Description: "Exit the fullscreen app.",
+	}
+
+	x, y := actionCardButtonPoint(t, model, 0)
+	updated, cmd := model.Update(tea.MouseMsg{
+		X:      x,
+		Y:      y,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	next := updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected proposal send-keys click to return command")
+	}
+	if next.pendingProposal != nil {
+		t.Fatalf("expected key proposal to clear after click, got %#v", next.pendingProposal)
 	}
 }
 
@@ -70,6 +713,34 @@ func TestSpaceKeyAddsSpaceToComposer(t *testing.T) {
 
 	if next.input != "ls " {
 		t.Fatalf("expected input %q, got %q", "ls ", next.input)
+	}
+}
+
+func TestPasteStripsANSIFormattingFromComposerInput(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+
+	updated, _ := model.Update(tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Runes: []rune("\x1b[44mhello\x1b[0m\tworld\n\x1b]8;;https://example.com\x07link\x1b]8;;\x07"),
+		Paste: true,
+	})
+	next := updated.(Model)
+
+	if next.input != "hello\tworld\nlink" {
+		t.Fatalf("expected pasted ANSI formatting to be stripped, got %q", next.input)
+	}
+}
+
+func TestMultilineComposerRendersEveryLine(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.width = 80
+	model.height = 24
+	model.setInput("Hello\nmy\nname")
+
+	rendered := model.renderComposer(80)
+	lines := strings.Split(rendered, "\n")
+	if len(lines) < 3 || !strings.Contains(lines[0], "Hello") || !strings.Contains(lines[1], "my") || !strings.Contains(lines[2], "name") {
+		t.Fatalf("expected multiline composer content to render on separate lines, got %q", rendered)
 	}
 }
 
@@ -1048,7 +1719,7 @@ func TestAgentAndShellHistoryStaySeparate(t *testing.T) {
 	updated, _ = model.Update(msg)
 	model = updated.(Model)
 
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlCloseBracket})
 	model = updated.(Model)
 	model.input = "show plan"
 	updated, cmd = model.submit()
@@ -1064,7 +1735,7 @@ func TestAgentAndShellHistoryStaySeparate(t *testing.T) {
 		t.Fatalf("expected agent history entry, got %q", model.input)
 	}
 
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlCloseBracket})
 	model = updated.(Model)
 	model.input = ""
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
@@ -1147,6 +1818,16 @@ func TestTranscriptPinnedStateControlsAutoFollow(t *testing.T) {
 	model.input = "pwd"
 	updatedAny, cmd = model.submit()
 	model = updatedAny.(Model)
+	last := model.entries[len(model.entries)-1]
+	if last.Title != "shell" || last.Body != "pwd" {
+		t.Fatalf("expected optimistic shell entry, got %#v", last)
+	}
+	if !model.transcriptFollow {
+		t.Fatal("expected optimistic shell entry to keep follow mode")
+	}
+	if model.transcriptScroll != model.maxTranscriptScroll() {
+		t.Fatalf("expected optimistic shell entry at bottom, got %d", model.transcriptScroll)
+	}
 	msg = controllerEventsFromCmd(t, cmd)
 	updatedAny, _ = model.Update(msg)
 	model = updatedAny.(Model)
@@ -1155,6 +1836,15 @@ func TestTranscriptPinnedStateControlsAutoFollow(t *testing.T) {
 	}
 	if model.transcriptScroll != model.maxTranscriptScroll() {
 		t.Fatalf("expected transcript to stay at bottom, got %d", model.transcriptScroll)
+	}
+	shellCount := 0
+	for _, entry := range model.entries {
+		if entry.Title == "shell" && entry.Body == "pwd" {
+			shellCount++
+		}
+	}
+	if shellCount != 1 {
+		t.Fatalf("expected one shell entry after controller echo dedupe, got %d", shellCount)
 	}
 }
 
@@ -1169,6 +1859,39 @@ func TestMainViewDoesNotRenderHeaderOrSideRails(t *testing.T) {
 	}
 	if strings.Contains(view, "│") {
 		t.Fatalf("expected no side rails in main view, got %q", view)
+	}
+}
+
+func TestViewFitsActualTerminalSizeWhenNarrow(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.width = 24
+	model.height = 8
+
+	view := model.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) != model.height {
+		t.Fatalf("expected %d rendered lines, got %d in %q", model.height, len(lines), view)
+	}
+	for _, line := range lines {
+		if lipgloss.Width(line) > model.width {
+			t.Fatalf("expected rendered line width <= %d, got %d in %q", model.width, lipgloss.Width(line), line)
+		}
+	}
+}
+
+func TestMainFooterStaysOnBottomRow(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.width = 80
+	model.height = 12
+
+	view := model.View()
+	lines := strings.Split(view, "\n")
+	if len(lines) != model.height {
+		t.Fatalf("expected %d rendered lines, got %d", model.height, len(lines))
+	}
+	last := lines[len(lines)-1]
+	if !strings.Contains(last, "quit") {
+		t.Fatalf("expected footer on last rendered line, got %q", last)
 	}
 }
 
@@ -1344,6 +2067,9 @@ func TestRemoteShellContextRendersRemoteBadge(t *testing.T) {
 	}
 
 	view := model.View()
+	if !strings.Contains(view, "ROOT") {
+		t.Fatalf("expected root badge, got %q", view)
+	}
 	if !strings.Contains(view, "REMOTE") {
 		t.Fatalf("expected remote badge, got %q", view)
 	}
@@ -1369,6 +2095,34 @@ func TestComposerPrefixUsesAgentAndRootPrompts(t *testing.T) {
 	view = model.View()
 	if !strings.Contains(view, "#>") {
 		t.Fatalf("expected root shell prompt prefix, got %q", view)
+	}
+}
+
+func TestTranscriptUsesEmojiTagsWhenUTF8LocaleIsAvailable(t *testing.T) {
+	t.Setenv("LC_ALL", "en_US.UTF-8")
+	t.Setenv("LC_CTYPE", "")
+	t.Setenv("LANG", "")
+
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.entries = []Entry{{Title: "agent", Body: "Hello"}}
+
+	lines := model.transcriptLines(40)
+	if len(lines) == 0 || !strings.Contains(lines[0], "🤖") {
+		t.Fatalf("expected emoji transcript tag, got %#v", lines)
+	}
+}
+
+func TestTranscriptFallsBackToTextTagsWithoutUTF8Locale(t *testing.T) {
+	t.Setenv("LC_ALL", "C")
+	t.Setenv("LC_CTYPE", "")
+	t.Setenv("LANG", "C")
+
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.entries = []Entry{{Title: "agent", Body: "Hello"}}
+
+	lines := model.transcriptLines(40)
+	if len(lines) == 0 || !strings.Contains(lines[0], "AGENT") {
+		t.Fatalf("expected text transcript tag fallback, got %#v", lines)
 	}
 }
 
@@ -2652,6 +3406,114 @@ func TestSlashOnboardOpensProviderOnboarding(t *testing.T) {
 	}
 }
 
+func TestSlashProviderOpensActiveProviderSettings(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.mode = AgentMode
+	model.input = "/provider"
+	model = model.WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5", BaseURL: "https://api.openai.com/v1"},
+		func() ([]provider.OnboardingCandidate, error) {
+			return []provider.OnboardingCandidate{
+				{Profile: provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5", BaseURL: "https://api.openai.com/v1"}},
+				{Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter", Model: "openai/gpt-5", BaseURL: "https://openrouter.ai/api/v1"}},
+			}, nil
+		},
+		func(provider.Profile) ([]provider.ModelOption, error) { return nil, nil },
+		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+			return &fakeController{}, profile, nil
+		},
+		func(provider.Profile) error { return nil },
+	)
+
+	updated, cmd := model.submit()
+	next := updated.(Model)
+	if cmd != nil {
+		t.Fatal("expected /provider to open synchronously")
+	}
+	if !next.settingsOpen || next.settingsStep != settingsStepActiveProvider {
+		t.Fatalf("expected active provider settings, got open=%t step=%q", next.settingsOpen, next.settingsStep)
+	}
+}
+
+func TestSlashModelOpensScopedActiveModelSettings(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.mode = AgentMode
+	model.input = "/model"
+	model = model.WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5", BaseURL: "https://api.openai.com/v1"},
+		func() ([]provider.OnboardingCandidate, error) {
+			return []provider.OnboardingCandidate{
+				{Profile: provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5", BaseURL: "https://api.openai.com/v1"}},
+				{Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter", Model: "openai/gpt-5", BaseURL: "https://openrouter.ai/api/v1"}},
+			}, nil
+		},
+		func(profile provider.Profile) ([]provider.ModelOption, error) {
+			switch profile.Preset {
+			case provider.PresetOpenAI:
+				return []provider.ModelOption{{ID: "gpt-5"}, {ID: "gpt-5-mini"}}, nil
+			case provider.PresetOpenRouter:
+				return []provider.ModelOption{{ID: "openai/gpt-5"}}, nil
+			default:
+				return nil, nil
+			}
+		},
+		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+			return &fakeController{}, profile, nil
+		},
+		func(provider.Profile) error { return nil },
+	)
+
+	updated, cmd := model.submit()
+	next := updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected /model to load models asynchronously")
+	}
+	if !next.settingsOpen || next.settingsStep != settingsStepActiveModels {
+		t.Fatalf("expected active model settings, got open=%t step=%q", next.settingsOpen, next.settingsStep)
+	}
+	loaded := cmd().(settingsModelsLoadedMsg)
+	updated, _ = next.Update(loaded)
+	next = updated.(Model)
+	if len(next.settingsModels) != 2 {
+		t.Fatalf("expected only active-provider models, got %d", len(next.settingsModels))
+	}
+	for _, choice := range next.settingsModels {
+		if choice.profile.Preset != provider.PresetOpenAI {
+			t.Fatalf("expected active provider model scope, got %#v", choice)
+		}
+	}
+}
+
+func TestUnknownSlashCommandRendersNotice(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.mode = AgentMode
+	model.input = "/wat"
+
+	updated, cmd := model.submit()
+	next := updated.(Model)
+	if cmd != nil {
+		t.Fatal("expected unknown slash command to stay in TUI")
+	}
+	last := next.entries[len(next.entries)-1]
+	if last.Title != "system" || !strings.Contains(last.Body, "Unknown slash command: /wat") {
+		t.Fatalf("expected unknown slash command notice, got %#v", last)
+	}
+}
+
+func TestSlashQuitReturnsQuitCmd(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.mode = AgentMode
+	model.input = "/quit"
+
+	_, cmd := model.submit()
+	if cmd == nil {
+		t.Fatal("expected quit command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatal("expected /quit to return tea.Quit")
+	}
+}
+
 func TestProviderOnboardingSelectionSwitchesController(t *testing.T) {
 	initialCtrl := &fakeController{}
 	switchedCtrl := &fakeController{}
@@ -3204,6 +4066,48 @@ func fakeWorkspace() tmux.Workspace {
 			ID: "%1",
 		},
 	}
+}
+
+func transcriptLineIndexForEntry(model Model, entryIndex int) int {
+	lines := model.transcriptWindowDisplay(model.transcriptDisplayLines(model.currentTranscriptWidth()), model.currentTranscriptHeight())
+	for index, line := range lines {
+		if line.entryIndex == entryIndex {
+			return index
+		}
+	}
+	return 0
+}
+
+func actionCardButtonPoint(t *testing.T, model Model, buttonIndex int) (int, int) {
+	t.Helper()
+	spec := model.currentActionCardSpec()
+	if spec == nil {
+		t.Fatal("expected action card spec")
+	}
+	if buttonIndex < 0 || buttonIndex >= len(spec.buttons) {
+		t.Fatalf("invalid button index %d for %#v", buttonIndex, spec.buttons)
+	}
+	startY, ok := model.actionCardStartY()
+	if !ok {
+		t.Fatal("expected action card start position")
+	}
+
+	contentWidth := model.contentWidthFor(model.currentTranscriptWidth(), model.styles.actionCard)
+	bodyLines := actionCardBodyLines(spec.body, contentWidth)
+	buttonLines := layoutActionCardButtons(spec.buttons, contentWidth)
+	targetAction := spec.buttons[buttonIndex].action
+	for lineIndex, line := range buttonLines {
+		for _, hit := range line.hits {
+			if hit.action != targetAction {
+				continue
+			}
+			x := model.styles.actionCard.GetBorderLeftSize() + model.styles.actionCard.GetPaddingLeft() + hit.start + 1
+			y := startY + model.styles.actionCard.GetBorderTopSize() + 1 + len(bodyLines) + lineIndex
+			return x, y
+		}
+	}
+	t.Fatalf("no hit target for button %d (%q)", buttonIndex, spec.buttons[buttonIndex].label)
+	return 0, 0
 }
 
 func makeTranscriptEntries(count int) []Entry {
