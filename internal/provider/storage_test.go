@@ -3,6 +3,7 @@ package provider
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"aiterm/internal/config"
@@ -72,6 +73,89 @@ func TestSaveStoredProviderConfigStoresManualKeyPerPreset(t *testing.T) {
 	}
 	if keyringStore[keyringServiceName+"|"+providerKeyAccount(tempDir, PresetAnthropic)] != "manual-secret" {
 		t.Fatalf("expected secret in keyring store, got %#v", keyringStore)
+	}
+}
+
+func TestSaveStoredProviderConfigClassifiesKeyringFailure(t *testing.T) {
+	tempDir := t.TempDir()
+	previousSet := keyringSet
+	previousGet := keyringGet
+	previousDelete := keyringDelete
+	keyringSet = func(service, user, password string) error {
+		return errors.New("keyring backend unavailable")
+	}
+	keyringGet = previousGet
+	keyringDelete = func(service, user string) error { return nil }
+	t.Cleanup(func() {
+		keyringSet = previousSet
+		keyringGet = previousGet
+		keyringDelete = previousDelete
+	})
+
+	err := SaveStoredProviderConfig(tempDir, Profile{
+		Preset:     PresetAnthropic,
+		AuthMethod: AuthAPIKey,
+		BaseURL:    "https://api.anthropic.com",
+		Model:      "claude-sonnet-4-6",
+		APIKey:     "manual-secret",
+	})
+	if !errors.Is(err, ErrSecretStoreUnavailable) {
+		t.Fatalf("expected ErrSecretStoreUnavailable, got %v", err)
+	}
+}
+
+func TestSaveStoredProviderConfigFallsBackToPlaintextFileWhenAllowed(t *testing.T) {
+	tempDir := t.TempDir()
+	previousSet := keyringSet
+	previousGet := keyringGet
+	previousDelete := keyringDelete
+	keyringSet = func(service, user, password string) error {
+		return errors.New("keyring backend unavailable")
+	}
+	keyringGet = func(service, user string) (string, error) {
+		return "", errors.New("keyring backend unavailable")
+	}
+	keyringDelete = func(service, user string) error { return nil }
+	t.Cleanup(func() {
+		keyringSet = previousSet
+		keyringGet = previousGet
+		keyringDelete = previousDelete
+	})
+
+	profile := Profile{
+		Preset:     PresetAnthropic,
+		AuthMethod: AuthAPIKey,
+		BaseURL:    "https://api.anthropic.com",
+		Model:      "claude-sonnet-4-6",
+		APIKey:     "manual-secret",
+	}
+	if err := SaveStoredProviderConfigWithOptions(tempDir, profile, SecretStoreOptions{AllowPlaintextFallback: true}); err != nil {
+		t.Fatalf("SaveStoredProviderConfigWithOptions() error = %v", err)
+	}
+
+	stored, ok, err := LoadStoredProviderConfig(tempDir)
+	if err != nil {
+		t.Fatalf("LoadStoredProviderConfig() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("expected stored config")
+	}
+	if stored.APIKeyRef != localFileSourceLabel {
+		t.Fatalf("expected local file ref, got %q", stored.APIKeyRef)
+	}
+	if string(mustReadFile(t, providerSecretPath(tempDir, PresetAnthropic))) != "manual-secret" {
+		t.Fatalf("expected plaintext fallback secret file")
+	}
+
+	cfg, err := ApplyStoredProviderConfig(config.Config{StateDir: tempDir})
+	if err != nil {
+		t.Fatalf("ApplyStoredProviderConfig() error = %v", err)
+	}
+	if cfg.ProviderAPIKey != "manual-secret" {
+		t.Fatalf("expected loaded plaintext API key, got %q", cfg.ProviderAPIKey)
+	}
+	if cfg.ProviderAPIKeyEnvVar != localFileSourceLabel {
+		t.Fatalf("expected local file source label, got %q", cfg.ProviderAPIKeyEnvVar)
 	}
 }
 
@@ -196,6 +280,35 @@ func TestApplyStoredProviderConfigSkipsWhenProviderFlagsExplicit(t *testing.T) {
 
 	if cfg.ProviderType != "openai" || cfg.ProviderModel != "gpt-5.2-codex" {
 		t.Fatalf("expected explicit config to be preserved, got %#v", cfg)
+	}
+}
+
+func TestLoadStoredProviderConfigRejectsSymlinkedConfigFile(t *testing.T) {
+	tempDir := t.TempDir()
+	if err := os.MkdirAll(providersDirPath(tempDir), 0o700); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	targetPath := filepath.Join(tempDir, "outside.json")
+	if err := os.WriteFile(targetPath, []byte(`{
+  "version": 1,
+  "provider": "openai",
+  "auth_method": "api_key",
+  "base_url": "https://api.openai.com/v1",
+  "model": "gpt-5-nano-2025-08-07",
+  "api_key_ref": "OPENAI_API_KEY"
+}`), 0o600); err != nil {
+		t.Fatalf("WriteFile(target) error = %v", err)
+	}
+	if err := os.Symlink(targetPath, providerConfigPath(tempDir, PresetOpenAI)); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+	if err := os.WriteFile(selectedProviderPath(tempDir), []byte("openai\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(selected) error = %v", err)
+	}
+
+	_, _, err := LoadStoredProviderConfig(tempDir)
+	if err == nil {
+		t.Fatal("expected symlinked provider config read to fail")
 	}
 }
 

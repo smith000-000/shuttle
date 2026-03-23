@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -47,12 +46,7 @@ func readSemanticShellState(stateDir string, paneTTY string) (semanticShellState
 	}
 
 	statePath := semanticStatePath(stateDir, paneTTY)
-	info, err := os.Stat(statePath)
-	if err != nil {
-		return semanticShellState{}, false
-	}
-
-	data, err := os.ReadFile(statePath)
+	data, info, err := securefs.ReadFileNoFollow(statePath)
 	if err != nil {
 		return semanticShellState{}, false
 	}

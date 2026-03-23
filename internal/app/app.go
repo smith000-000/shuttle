@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"aiterm/internal/config"
@@ -116,7 +117,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			"auth_method", profile.AuthMethod,
 			"model", profile.Model,
 			"base_url", profile.BaseURL,
-			"api_key_env", profile.APIKeyEnvVar,
+			"auth_source", providerLogAuthSource(profile),
 		)
 		ctrl := controller.New(agent, observer, observer, controller.SessionContext{
 			SessionName:      workspace.SessionName,
@@ -163,7 +164,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			"auth_method", profile.AuthMethod,
 			"model", profile.Model,
 			"base_url", profile.BaseURL,
-			"api_key_env", profile.APIKeyEnvVar,
+			"auth_source", providerLogAuthSource(profile),
 		)
 		ctrl := controller.New(agent, observer, observer, controller.SessionContext{
 			SessionName:      workspace.SessionName,
@@ -194,7 +195,9 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			}, func(profile provider.Profile) ([]provider.ModelOption, error) {
 				return provider.ListModels(profile, nil)
 			}, switchProvider, func(profile provider.Profile) error {
-				return provider.SaveStoredProviderConfig(runtimeCfg.StateDir, profile)
+				return provider.SaveStoredProviderConfigWithOptions(runtimeCfg.StateDir, profile, provider.SecretStoreOptions{
+					AllowPlaintextFallback: a.cfg.AllowPlaintextProviderSecrets,
+				})
 			})
 		program := tea.NewProgram(model, tea.WithAltScreen())
 		_, runErr := program.Run()
@@ -257,6 +260,26 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	}
 
 	return result, nil
+}
+
+func providerLogAuthSource(profile provider.Profile) string {
+	switch strings.TrimSpace(profile.APIKeyEnvVar) {
+	case "":
+		if strings.TrimSpace(profile.APIKey) != "" {
+			return "session_only"
+		}
+	case "os_keyring":
+		return "os_keyring"
+	case "local_file":
+		return "local_file"
+	default:
+		return "env_ref"
+	}
+
+	if profile.AuthMethod == provider.AuthNone {
+		return "none"
+	}
+	return string(profile.AuthMethod)
 }
 
 func initialPromptContext(ctx context.Context, observer *shell.Observer, paneID string, startDir string) shell.PromptContext {

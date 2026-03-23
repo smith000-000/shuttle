@@ -226,3 +226,27 @@ func TestParseAcceptsSensitiveTraceMode(t *testing.T) {
 		t.Fatalf("expected trace consent to be set")
 	}
 }
+
+func TestParseAllowsPlaintextProviderSecretsFromEnv(t *testing.T) {
+	t.Setenv("SHUTTLE_ALLOW_PLAINTEXT_PROVIDER_SECRETS", "true")
+
+	cfg, err := Parse(nil)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	if !cfg.AllowPlaintextProviderSecrets {
+		t.Fatalf("expected plaintext provider secret fallback to be enabled from env")
+	}
+}
+
+func TestParseAllowsPlaintextProviderSecretsFromFlag(t *testing.T) {
+	cfg, err := Parse([]string{"--allow-plaintext-provider-secrets"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	if !cfg.AllowPlaintextProviderSecrets {
+		t.Fatalf("expected plaintext provider secret fallback to be enabled from flag")
+	}
+}

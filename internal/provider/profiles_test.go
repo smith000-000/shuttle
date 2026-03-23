@@ -150,6 +150,19 @@ func TestResolveProfileCodexCLIDefaults(t *testing.T) {
 	}
 }
 
+func TestResolveProfileCodexCLIIgnoresAPIKeyAuthSelection(t *testing.T) {
+	profile, err := ResolveProfile(config.Config{
+		ProviderType:       "codex_cli",
+		ProviderAuthMethod: "api_key",
+	})
+	if err != nil {
+		t.Fatalf("ResolveProfile() error = %v", err)
+	}
+	if profile.AuthMethod != AuthCodexLogin {
+		t.Fatalf("expected codex login auth, got %s", profile.AuthMethod)
+	}
+}
+
 func TestResolveProfileOllamaDefaults(t *testing.T) {
 	profile, err := ResolveProfile(config.Config{
 		ProviderType: "ollama",

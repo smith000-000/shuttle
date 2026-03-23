@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -66,7 +67,7 @@ func (m ModelOption) SupportsAnyParameter(names ...string) bool {
 func ListModels(profile Profile, client *http.Client) ([]ModelOption, error) {
 	switch profile.BackendFamily {
 	case BackendCLIAgent:
-		return listCodexCLIModels(profile), nil
+		return listCodexCLIModels(profile, client)
 	case BackendAnthropic:
 		return listAnthropicModels(profile, client)
 	case BackendOllama:
@@ -97,48 +98,104 @@ func lookupOpenRouterModel(profile Profile, client *http.Client) (*ModelOption, 
 	return nil, fmt.Errorf("model %q not found in OpenRouter catalog", target)
 }
 
-func listCodexCLIModels(profile Profile) []ModelOption {
-	models := []ModelOption{
+func listCodexCLIModels(profile Profile, client *http.Client) ([]ModelOption, error) {
+	models, err := listOpenAICodexSuggestions(profile, client)
+	if err != nil || len(models) == 0 {
+		models = curatedCodexCLIModels()
+	}
+	models = appendCurrentCodexModel(models, profile)
+	sortModelOptions(models)
+	return models, nil
+}
+
+func curatedCodexCLIModels() []ModelOption {
+	return []ModelOption{
 		{
 			ID:          "gpt-5.2-codex",
 			Name:        "GPT-5.2 Codex",
-			Description: "Latest Codex API model.",
+			Description: "Curated Codex suggestion. Codex CLI's own picker may differ; manual entry is still allowed.",
 		},
 		{
 			ID:          "gpt-5.1-codex-max",
 			Name:        "GPT-5.1 Codex Max",
-			Description: "Higher-capacity Codex model.",
+			Description: "Curated Codex suggestion. Codex CLI's own picker may differ; manual entry is still allowed.",
 		},
 		{
 			ID:          "gpt-5.1-codex",
 			Name:        "GPT-5.1 Codex",
-			Description: "Previous Codex generation.",
+			Description: "Curated Codex suggestion. Codex CLI's own picker may differ; manual entry is still allowed.",
 		},
 		{
 			ID:          "gpt-5-codex",
 			Name:        "GPT-5 Codex",
-			Description: "Baseline Codex model.",
+			Description: "Curated Codex suggestion. Codex CLI's own picker may differ; manual entry is still allowed.",
 		},
 	}
-	if selected := strings.TrimSpace(profile.Model); selected != "" {
-		found := false
-		for _, model := range models {
-			if model.ID == selected {
-				found = true
-				break
-			}
-		}
-		if !found {
-			models = append(models, ModelOption{
-				ID:          selected,
-				Name:        selected,
-				Description: "Model currently selected via Codex CLI profile.",
-			})
+}
+
+func appendCurrentCodexModel(models []ModelOption, profile Profile) []ModelOption {
+	if selected := strings.TrimSpace(profile.Model); selected != "" && !containsExactModelID(models, selected) {
+		models = append(models, ModelOption{
+			ID:          selected,
+			Name:        selected,
+			Description: "Currently selected Codex CLI model. Codex CLI's own picker may differ; manual entry is still allowed.",
+		})
+	}
+	return models
+}
+
+func containsExactModelID(models []ModelOption, target string) bool {
+	target = strings.TrimSpace(target)
+	for _, model := range models {
+		if strings.TrimSpace(model.ID) == target {
+			return true
 		}
 	}
+	return false
+}
 
-	sortModelOptions(models)
-	return models
+func listOpenAICodexSuggestions(profile Profile, client *http.Client) ([]ModelOption, error) {
+	apiKey := strings.TrimSpace(profile.APIKey)
+	if apiKey == "" {
+		apiKey = strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	}
+	if apiKey == "" {
+		return nil, nil
+	}
+
+	openAIProfile := Profile{
+		BackendFamily: BackendResponsesHTTP,
+		Preset:        PresetOpenAI,
+		AuthMethod:    AuthAPIKey,
+		BaseURL:       firstNonEmpty(strings.TrimSpace(profile.BaseURL), "https://api.openai.com/v1"),
+		APIKey:        apiKey,
+	}
+	models, err := listResponsesModels(openAIProfile, client)
+	if err != nil {
+		return nil, err
+	}
+
+	suggestions := make([]ModelOption, 0, len(models))
+	for _, model := range models {
+		if !isSuggestedCodexModelID(model.ID) {
+			continue
+		}
+		if strings.TrimSpace(model.Description) == "" {
+			model.Description = "Suggested from the OpenAI model catalog. Codex CLI's own picker may differ; manual entry is still allowed."
+		} else {
+			model.Description = strings.TrimSpace(model.Description) + " Suggested from the OpenAI model catalog. Codex CLI's own picker may differ; manual entry is still allowed."
+		}
+		suggestions = append(suggestions, model)
+	}
+	return suggestions, nil
+}
+
+func isSuggestedCodexModelID(id string) bool {
+	value := strings.ToLower(strings.TrimSpace(id))
+	if value == "" {
+		return false
+	}
+	return strings.Contains(value, "codex") || strings.HasPrefix(value, "gpt-5")
 }
 
 func listOllamaModels(profile Profile, client *http.Client) ([]ModelOption, error) {

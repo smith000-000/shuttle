@@ -2,6 +2,7 @@ package securefs
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -93,4 +94,22 @@ func WriteAtomicPrivate(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	return os.Chmod(path, perm)
+}
+
+func ReadFileNoFollow(path string) ([]byte, os.FileInfo, error) {
+	file, err := OpenFileNoFollow(path, syscall.O_RDONLY, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, nil, err
+	}
+	return data, info, nil
 }

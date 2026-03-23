@@ -18,6 +18,7 @@ What is working now:
 - `KEYS>` mode for sending raw terminal input
 - partial semantic shell integration for local shells
 - real OpenAI Responses API path with API-key auth
+- Codex CLI model suggestions sourced from the OpenAI models catalog when available, with free-text entry still allowed
 
 What is still in progress:
 - provider onboarding and saved profiles
@@ -83,6 +84,7 @@ Important variables:
 - `SHUTTLE_TMUX_SOCKET`: optional tmux socket/server name override
 - `SHUTTLE_STATE_DIR`: optional persistent state directory for logs and shell history
 - `SHUTTLE_RUNTIME_DIR`: optional private runtime directory for staged shell scripts and semantic shell state
+- `SHUTTLE_ALLOW_PLAINTEXT_PROVIDER_SECRETS`: allow an explicit less-secure local file fallback if OS keyring storage is unavailable
 - `SHUTTLE_TRACE`: `off`, `safe`, or `sensitive`
 - `SHUTTLE_TRACE_CONSENT`: must be true or passed as `--trace-consent` when using sensitive trace
 
@@ -144,7 +146,24 @@ Trace modes:
 - `safe`: redacts raw commands, terminal contents, key input, and provider bodies
 - `sensitive`: keeps full raw trace data, but Shuttle requires explicit consent before launch
 
+Important:
+- trace mode only controls what Shuttle writes to its trace log
+- it does not disable normal runtime context sent to the active provider, such as shell output or recovery snapshots needed for agent reasoning
+
 Persistent logs and shell history now default to XDG state space instead of the repo-local `.shuttle/` directory. Ephemeral staged command scripts and semantic shell state now live in a separate private runtime directory.
+
+Provider secret storage policy:
+- preferred: OS keyring
+- also supported: env var references
+- if secure persistence is unavailable, Shuttle can still use a manually entered key for the current session
+- optional fallback: plaintext local file storage, but only when explicitly enabled
+- if the active provider is using the plaintext local fallback, the TUI shows a startup warning before normal composer interaction
+
+Codex CLI model selection:
+- Shuttle does not have an authoritative machine-readable Codex CLI picker feed
+- when OpenAI model listing is available, Shuttle uses that catalog as a suggestions source for Codex-related models
+- the settings UI labels those entries as suggestions; the live Codex CLI picker may differ
+- manual model entry is still allowed for Codex CLI profiles
 
 ## TUI Notes
 
@@ -162,6 +181,7 @@ The TUI is intentionally keyboard-first. Current behavior is still evolving, so 
 ## Important Docs
 
 - [implementation-plan.md](implementation-plan.md)
+- [provider-auth-guide.md](provider-auth-guide.md)
 - [shell-execution-strategy.md](shell-execution-strategy.md)
 - [provider-integration-plan.md](provider-integration-plan.md)
 - [agent-runtime-design.md](agent-runtime-design.md)
