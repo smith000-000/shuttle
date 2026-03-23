@@ -39,6 +39,10 @@ func TestBuildTurnContextDeduplicatesRepeatedShellOutput(t *testing.T) {
 		Prompt: "summarize the last command",
 		Session: controller.SessionContext{
 			RecentShellOutput: shared,
+			TrackedShell: controller.TrackedShellTarget{
+				SessionName: "shuttle-test",
+				PaneID:      "%9",
+			},
 		},
 		Task: controller.TaskContext{
 			LastCommandResult: &controller.CommandResultSummary{
@@ -56,6 +60,9 @@ func TestBuildTurnContextDeduplicatesRepeatedShellOutput(t *testing.T) {
 
 	if !strings.Contains(context, "Recent shell output:\n") {
 		t.Fatalf("expected recent shell output section, got %q", context)
+	}
+	if !strings.Contains(context, "tracked_session=shuttle-test") || !strings.Contains(context, "tracked_pane=%9") {
+		t.Fatalf("expected tracked shell metadata, got %q", context)
 	}
 	if !strings.Contains(context, "Last command result:\n") {
 		t.Fatalf("expected last command result section, got %q", context)

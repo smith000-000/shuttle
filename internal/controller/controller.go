@@ -79,11 +79,36 @@ func New(agent Agent, runner ShellRunner, reader ShellContextReader, session Ses
 		agent:   agent,
 		runner:  runner,
 		reader:  reader,
-		session: session,
+		session: normalizeSessionContext(session),
 		task: TaskContext{
 			TaskID: "task-1",
 		},
 	}
+}
+
+func normalizeSessionContext(session SessionContext) SessionContext {
+	session.SessionName = strings.TrimSpace(session.SessionName)
+	session.TopPaneID = strings.TrimSpace(session.TopPaneID)
+	session.BottomPaneID = strings.TrimSpace(session.BottomPaneID)
+	session.WorkingDirectory = strings.TrimSpace(session.WorkingDirectory)
+	session.RecentShellOutput = strings.TrimSpace(session.RecentShellOutput)
+	session.TrackedShell.SessionName = strings.TrimSpace(session.TrackedShell.SessionName)
+	session.TrackedShell.PaneID = strings.TrimSpace(session.TrackedShell.PaneID)
+
+	if session.TrackedShell.SessionName == "" {
+		session.TrackedShell.SessionName = session.SessionName
+	}
+	if session.TrackedShell.PaneID == "" {
+		session.TrackedShell.PaneID = session.TopPaneID
+	}
+	if session.SessionName == "" {
+		session.SessionName = session.TrackedShell.SessionName
+	}
+	if session.TopPaneID == "" {
+		session.TopPaneID = session.TrackedShell.PaneID
+	}
+
+	return session
 }
 
 func (c *LocalController) SubmitAgentPrompt(ctx context.Context, prompt string) ([]TranscriptEvent, error) {
@@ -179,8 +204,8 @@ func (c *LocalController) ResumeAfterTakeControl(ctx context.Context) ([]Transcr
 }
 
 func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context) ([]TranscriptEvent, bool, bool, error) {
-	topPaneID := c.syncTopPaneID(ctx)
-	if c.reader == nil || topPaneID == "" {
+	trackedShell := c.syncTrackedShellTarget(ctx)
+	if c.reader == nil || trackedShell.PaneID == "" {
 		return nil, false, false, nil
 	}
 
@@ -192,16 +217,18 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 	execution := *c.task.CurrentExecution
 	c.mu.Unlock()
 
-	promptContext, err := c.reader.CaptureShellContext(ctx, topPaneID)
+	promptContext, err := c.reader.CaptureShellContext(ctx, trackedShell.PaneID)
 	if err != nil {
 		return nil, false, false, err
 	}
 	if promptContext.PromptLine() == "" || promptContext.LastExitCode == nil {
-		return nil, false, false, nil
+		if promptContext.PromptLine() == "" {
+			return nil, false, false, nil
+		}
 	}
 
 	recentOutput := ""
-	if captured, captureErr := c.reader.CaptureRecentOutput(ctx, topPaneID, 120); captureErr == nil {
+	if captured, captureErr := c.reader.CaptureRecentOutput(ctx, trackedShell.PaneID, 120); captureErr == nil {
 		recentOutput = strings.TrimSpace(captured)
 	}
 	if recentOutput == "" {
@@ -211,16 +238,7 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 		recentOutput = shell.TrimTrailingPromptLine(recentOutput, promptContext)
 	}
 
-	exitCode := *promptContext.LastExitCode
-	state := CommandExecutionCompleted
-	switch exitCode {
-	case shell.InterruptedExitCode:
-		state = CommandExecutionCanceled
-	case 0:
-		state = CommandExecutionCompleted
-	default:
-		state = CommandExecutionFailed
-	}
+	exitCode, state, confidence, semanticShell, semanticSource, inferred := inferHandoffPromptReturnResult(promptContext, execution, recentOutput)
 
 	summary := CommandResultSummary{
 		ExecutionID:    execution.ID,
@@ -229,9 +247,9 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 		Origin:         execution.Origin,
 		State:          state,
 		Cause:          shell.CompletionCausePromptReturn,
-		Confidence:     shell.ConfidenceStrong,
-		SemanticShell:  true,
-		SemanticSource: "state_file",
+		Confidence:     confidence,
+		SemanticShell:  semanticShell,
+		SemanticSource: semanticSource,
 		ExitCode:       exitCode,
 		Summary:        recentOutput,
 	}
@@ -258,14 +276,60 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 		"command", execution.Command,
 		"state", state,
 		"exit_code", exitCode,
+		"inferred_exit", inferred,
+		"confidence", confidence,
+		"semantic_shell", semanticShell,
+		"semantic_source", semanticSource,
 		"tail_preview", logging.Preview(recentOutput, 1000),
 	)
 	return []TranscriptEvent{resultEvent}, isAgentOwnedExecution(execution.Origin), true, nil
 }
 
+func inferHandoffPromptReturnResult(promptContext shell.PromptContext, execution CommandExecution, recentOutput string) (int, CommandExecutionState, shell.SignalConfidence, bool, string, bool) {
+	inferred := false
+	confidence := shell.ConfidenceStrong
+	semanticShell := false
+	semanticSource := ""
+	exitCode := 0
+
+	switch {
+	case promptContext.LastExitCode != nil:
+		exitCode = *promptContext.LastExitCode
+		confidence = shell.ConfidenceStrong
+		semanticShell = true
+		semanticSource = "state_file"
+	case execution.ExitCode != nil:
+		exitCode = *execution.ExitCode
+		confidence = shell.ConfidenceMedium
+		semanticShell = execution.SemanticShell
+		semanticSource = execution.SemanticSource
+		inferred = true
+	case strings.Contains(recentOutput, "^C"):
+		exitCode = shell.InterruptedExitCode
+		confidence = shell.ConfidenceMedium
+		inferred = true
+	default:
+		exitCode = 0
+		confidence = shell.ConfidenceLow
+		inferred = true
+	}
+
+	state := CommandExecutionCompleted
+	switch exitCode {
+	case shell.InterruptedExitCode:
+		state = CommandExecutionCanceled
+	case 0:
+		state = CommandExecutionCompleted
+	default:
+		state = CommandExecutionFailed
+	}
+
+	return exitCode, state, confidence, semanticShell, strings.TrimSpace(semanticSource), inferred
+}
+
 func (c *LocalController) attachForegroundExecution(ctx context.Context) ([]TranscriptEvent, bool, error) {
-	topPaneID := c.syncTopPaneID(ctx)
-	if topPaneID == "" {
+	trackedShell := c.syncTrackedShellTarget(ctx)
+	if trackedShell.PaneID == "" {
 		return nil, false, nil
 	}
 
@@ -281,7 +345,7 @@ func (c *LocalController) attachForegroundExecution(ctx context.Context) ([]Tran
 	}
 	c.mu.Unlock()
 
-	monitor, err := monitorRunner.AttachForegroundCommand(ctx, topPaneID)
+	monitor, err := monitorRunner.AttachForegroundCommand(ctx, trackedShell.PaneID)
 	if err != nil || monitor == nil {
 		return nil, false, err
 	}
@@ -340,18 +404,22 @@ func (c *LocalController) CheckActiveExecution(ctx context.Context) ([]Transcrip
 	task := c.task
 	recentOutput := strings.TrimSpace(c.task.CurrentExecution.LatestOutputTail)
 	c.mu.Unlock()
-	topPaneID := c.syncTopPaneID(ctx)
-	if topPaneID != "" {
-		session.TopPaneID = topPaneID
+	trackedShell := c.syncTrackedShellTarget(ctx)
+	session.TrackedShell = trackedShell
+	if trackedShell.SessionName != "" {
+		session.SessionName = trackedShell.SessionName
+	}
+	if trackedShell.PaneID != "" {
+		session.TopPaneID = trackedShell.PaneID
 	}
 
-	if recentOutput == "" && c.reader != nil && topPaneID != "" {
-		captured, err := c.reader.CaptureRecentOutput(ctx, topPaneID, 120)
+	if recentOutput == "" && c.reader != nil && trackedShell.PaneID != "" {
+		captured, err := c.reader.CaptureRecentOutput(ctx, trackedShell.PaneID, 120)
 		if err == nil {
 			recentOutput = captured
 		}
 	}
-	recoverySnapshot := c.captureRecoverySnapshot(ctx, topPaneID, task.CurrentExecution)
+	recoverySnapshot := c.captureRecoverySnapshot(ctx, trackedShell.PaneID, task.CurrentExecution)
 
 	c.mu.Lock()
 	if c.task.CurrentExecution == nil || !isAgentOwnedExecution(c.task.CurrentExecution.Origin) {
@@ -432,15 +500,15 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 		"emit_user_message", emitUserMessage,
 		"has_refinement", refinement != nil,
 	)
+	trackedShell := c.syncTrackedShellTarget(ctx)
+
 	recentOutput := ""
-	if c.reader != nil && c.session.TopPaneID != "" {
-		captured, err := c.reader.CaptureRecentOutput(ctx, c.session.TopPaneID, 120)
+	if c.reader != nil && trackedShell.PaneID != "" {
+		captured, err := c.reader.CaptureRecentOutput(ctx, trackedShell.PaneID, 120)
 		if err == nil {
 			recentOutput = captured
 		}
 	}
-
-	topPaneID := c.syncTopPaneID(ctx)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -458,15 +526,19 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 	}
 
 	session := c.session
-	if topPaneID != "" {
-		session.TopPaneID = topPaneID
+	session.TrackedShell = trackedShell
+	if trackedShell.SessionName != "" {
+		session.SessionName = trackedShell.SessionName
+	}
+	if trackedShell.PaneID != "" {
+		session.TopPaneID = trackedShell.PaneID
 	}
 	if recentOutput != "" {
 		session.RecentShellOutput = recentOutput
 		c.session.RecentShellOutput = recentOutput
 	}
 	task := c.task
-	task.RecoverySnapshot = c.captureRecoverySnapshot(ctx, topPaneID, task.CurrentExecution)
+	task.RecoverySnapshot = c.captureRecoverySnapshot(ctx, trackedShell.PaneID, task.CurrentExecution)
 
 	input := AgentInput{
 		Session: session,
@@ -887,16 +959,20 @@ func (c *LocalController) submitLostExecutionRecovery(ctx context.Context, execu
 	session := c.session
 	task := c.task
 	c.mu.Unlock()
-	topPaneID := c.syncTopPaneID(ctx)
-	if topPaneID != "" {
-		session.TopPaneID = topPaneID
+	trackedShell := c.syncTrackedShellTarget(ctx)
+	session.TrackedShell = trackedShell
+	if trackedShell.SessionName != "" {
+		session.SessionName = trackedShell.SessionName
+	}
+	if trackedShell.PaneID != "" {
+		session.TopPaneID = trackedShell.PaneID
 	}
 
 	if strings.TrimSpace(execution.LatestOutputTail) != "" {
 		session.RecentShellOutput = execution.LatestOutputTail
 	}
 	task.CurrentExecution = &execution
-	task.RecoverySnapshot = c.captureRecoverySnapshot(ctx, topPaneID, &execution)
+	task.RecoverySnapshot = c.captureRecoverySnapshot(ctx, trackedShell.PaneID, &execution)
 
 	input := AgentInput{
 		Session: session,
@@ -965,9 +1041,9 @@ func (c *LocalController) appendRecoveryError(err error) *TranscriptEvent {
 
 func (c *LocalController) runTrackedCommand(ctx context.Context, executionID string, command string) (shell.TrackedExecution, error) {
 	timeout := shell.CommandTimeout(command)
-	topPaneID := c.syncTopPaneID(ctx)
+	trackedShell := c.syncTrackedShellTarget(ctx)
 	if monitorRunner, ok := c.runner.(MonitoringShellRunner); ok {
-		monitor, err := monitorRunner.StartTrackedCommand(ctx, topPaneID, command, timeout)
+		monitor, err := monitorRunner.StartTrackedCommand(ctx, trackedShell.PaneID, command, timeout)
 		if err != nil {
 			return shell.TrackedExecution{}, err
 		}
@@ -975,7 +1051,7 @@ func (c *LocalController) runTrackedCommand(ctx context.Context, executionID str
 		return monitor.Wait()
 	}
 
-	return c.runner.RunTrackedCommand(ctx, topPaneID, command, timeout)
+	return c.runner.RunTrackedCommand(ctx, trackedShell.PaneID, command, timeout)
 }
 
 func (c *LocalController) consumeMonitorSnapshots(executionID string, monitor shell.CommandMonitor) {
@@ -1206,12 +1282,12 @@ func (c *LocalController) AbandonActiveExecution(reason string) *CommandExecutio
 }
 
 func (c *LocalController) RefreshShellContext(ctx context.Context) (*shell.PromptContext, error) {
-	topPaneID := c.syncTopPaneID(ctx)
-	if c.reader == nil || topPaneID == "" {
+	trackedShell := c.syncTrackedShellTarget(ctx)
+	if c.reader == nil || trackedShell.PaneID == "" {
 		return nil, nil
 	}
 
-	promptContext, err := c.reader.CaptureShellContext(ctx, topPaneID)
+	promptContext, err := c.reader.CaptureShellContext(ctx, trackedShell.PaneID)
 	if err != nil {
 		return nil, err
 	}
@@ -1232,12 +1308,12 @@ func (c *LocalController) RefreshShellContext(ctx context.Context) (*shell.Promp
 }
 
 func (c *LocalController) PeekShellTail(ctx context.Context, lines int) (string, error) {
-	topPaneID := c.syncTopPaneID(ctx)
-	if c.reader == nil || topPaneID == "" {
+	trackedShell := c.syncTrackedShellTarget(ctx)
+	if c.reader == nil || trackedShell.PaneID == "" {
 		return "", nil
 	}
 
-	return c.reader.CaptureRecentOutput(ctx, topPaneID, lines)
+	return c.reader.CaptureRecentOutput(ctx, trackedShell.PaneID, lines)
 }
 
 func (c *LocalController) captureRecoverySnapshot(ctx context.Context, topPaneID string, execution *CommandExecution) string {
@@ -1282,11 +1358,15 @@ func (c *LocalController) newExecutionLocked(command string, origin CommandOrigi
 }
 
 func (c *LocalController) bestEffortRecentOutputLocked() string {
-	if c.reader == nil || c.session.TopPaneID == "" {
+	paneID := strings.TrimSpace(c.session.TrackedShell.PaneID)
+	if paneID == "" {
+		paneID = strings.TrimSpace(c.session.TopPaneID)
+	}
+	if c.reader == nil || paneID == "" {
 		return ""
 	}
 
-	output, err := c.reader.CaptureRecentOutput(context.Background(), c.session.TopPaneID, 20)
+	output, err := c.reader.CaptureRecentOutput(context.Background(), paneID, 20)
 	if err != nil {
 		return ""
 	}
@@ -1295,20 +1375,26 @@ func (c *LocalController) bestEffortRecentOutputLocked() string {
 }
 
 func (c *LocalController) TopPaneID() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.session.TopPaneID
+	return c.TrackedShellTarget().PaneID
 }
 
-func (c *LocalController) syncTopPaneID(ctx context.Context) string {
+func (c *LocalController) TrackedShellTarget() TrackedShellTarget {
 	c.mu.Lock()
-	current := strings.TrimSpace(c.session.TopPaneID)
+	defer c.mu.Unlock()
+	c.session = normalizeSessionContext(c.session)
+	return c.session.TrackedShell
+}
+
+func (c *LocalController) syncTrackedShellTarget(ctx context.Context) TrackedShellTarget {
+	c.mu.Lock()
+	c.session = normalizeSessionContext(c.session)
+	current := c.session.TrackedShell
 	reader := c.reader
 	runner := c.runner
 	c.mu.Unlock()
 
-	if current == "" {
-		return ""
+	if current.PaneID == "" {
+		return current
 	}
 
 	var resolver TrackedPaneResolver
@@ -1322,15 +1408,31 @@ func (c *LocalController) syncTopPaneID(ctx context.Context) string {
 		return current
 	}
 
-	resolved, err := resolver.ResolveTrackedPane(ctx, current)
+	resolved, err := resolver.ResolveTrackedPane(ctx, current.PaneID)
 	if err != nil || strings.TrimSpace(resolved) == "" {
 		return current
 	}
+	resolved = strings.TrimSpace(resolved)
 
 	c.mu.Lock()
+	previous := c.session.TrackedShell
+	c.session.TrackedShell.SessionName = current.SessionName
 	c.session.TopPaneID = resolved
+	c.session.TrackedShell.PaneID = resolved
+	c.session = normalizeSessionContext(c.session)
+	updated := c.session.TrackedShell
 	c.mu.Unlock()
-	return resolved
+
+	if previous.PaneID != updated.PaneID || previous.SessionName != updated.SessionName {
+		logging.Trace(
+			"controller.tracked_shell.updated",
+			"session", updated.SessionName,
+			"previous_pane", previous.PaneID,
+			"current_pane", updated.PaneID,
+		)
+	}
+
+	return updated
 }
 
 func shouldCaptureRecoverySnapshot(execution *CommandExecution) bool {

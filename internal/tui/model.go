@@ -285,10 +285,10 @@ func (m Model) WithShellContext(promptContext shell.PromptContext) Model {
 
 func (m Model) WithTakeControl(socketName string, sessionName string, topPaneID string, detachKey string) Model {
 	m.takeControl = takeControlConfig{
-		SocketName:  socketName,
-		SessionName: sessionName,
-		TopPaneID:   topPaneID,
-		DetachKey:   detachKey,
+		SocketName:    socketName,
+		SessionName:   sessionName,
+		TrackedPaneID: topPaneID,
+		DetachKey:     detachKey,
 	}
 
 	return m
@@ -397,7 +397,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}, tickBusy(), m.pollShellTailCmd())
 		}
-		m.syncTrackedTopPane()
+		m.syncTrackedShellTarget()
 		return m, m.pollShellTailCmd()
 	case takeControlFinishedMsg:
 		logging.Trace(
@@ -417,7 +417,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.handoffVisible = false
-		m.syncTrackedTopPane()
+		m.syncTrackedShellTarget()
 		if m.activeExecution != nil && m.activeExecution.State == controller.CommandExecutionHandoffActive {
 			updated := *m.activeExecution
 			if m.handoffPriorState != "" {
@@ -457,7 +457,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.context != nil {
 			m.shellContext = *msg.context
 		}
-		m.syncTrackedTopPane()
+		m.syncTrackedShellTarget()
 		return m, nil
 	case shellTailMsg:
 		if msg.err == nil {
@@ -471,7 +471,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case activeExecutionMsg:
 		m.syncActiveExecution(msg.execution)
-		m.syncTrackedTopPane()
+		m.syncTrackedShellTarget()
 		return m, nil
 	case activeExecutionCheckInMsg:
 		m.checkInInFlight = false
@@ -1556,7 +1556,7 @@ func interruptShellCmd(config takeControlConfig) tea.Cmd {
 		if err != nil {
 			return shellInterruptMsg{err: err}
 		}
-		err = client.SendKeys(ctx, config.TopPaneID, "C-c", false)
+		err = client.SendKeys(ctx, config.TrackedPaneID, "C-c", false)
 		return shellInterruptMsg{err: err}
 	}
 }
@@ -1578,12 +1578,12 @@ func sendFullscreenKeysCmd(config takeControlConfig, keys string) tea.Cmd {
 		parts := strings.Split(strings.ReplaceAll(keys, "\r\n", "\n"), "\n")
 		for index, part := range parts {
 			if part != "" {
-				if err := client.SendLiteralKeys(ctx, config.TopPaneID, part); err != nil {
+				if err := client.SendLiteralKeys(ctx, config.TrackedPaneID, part); err != nil {
 					return fullscreenKeysSentMsg{keys: keys, err: err}
 				}
 			}
 			if index < len(parts)-1 {
-				if err := client.SendKeys(ctx, config.TopPaneID, "Enter", false); err != nil {
+				if err := client.SendKeys(ctx, config.TrackedPaneID, "Enter", false); err != nil {
 					return fullscreenKeysSentMsg{keys: keys, err: err}
 				}
 			}
@@ -1767,18 +1767,36 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 	}
 }
 
-func (m *Model) syncTrackedTopPane() {
+func (m *Model) syncTrackedShellTarget() {
 	if m.ctrl == nil {
 		return
 	}
 
-	topPaneID := strings.TrimSpace(m.ctrl.TopPaneID())
-	if topPaneID == "" {
+	previousSession := m.workspace.SessionName
+	previousPane := m.workspace.TopPane.ID
+	target := m.ctrl.TrackedShellTarget()
+	sessionName := strings.TrimSpace(target.SessionName)
+	paneID := strings.TrimSpace(target.PaneID)
+	if paneID == "" {
 		return
 	}
 
-	m.workspace.TopPane.ID = topPaneID
-	m.takeControl.TopPaneID = topPaneID
+	if sessionName != "" {
+		m.workspace.SessionName = sessionName
+		m.takeControl.SessionName = sessionName
+	}
+	m.workspace.TopPane.ID = paneID
+	m.takeControl.TrackedPaneID = paneID
+
+	if previousSession != m.workspace.SessionName || previousPane != m.workspace.TopPane.ID {
+		logging.Trace(
+			"tui.tracked_shell.synced",
+			"previous_session", previousSession,
+			"previous_pane", previousPane,
+			"session", m.workspace.SessionName,
+			"pane", m.workspace.TopPane.ID,
+		)
+	}
 }
 
 func (m Model) formatShellError(err error) string {

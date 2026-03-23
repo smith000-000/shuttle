@@ -141,6 +141,7 @@ This is a recommended direction, not a hard product requirement. It aligns with 
 # 6. Notes
 
 - Detailed shell command lifecycle behavior is specified in [protocol-shell-observation.md](protocol-shell-observation.md).
+- Current implementation-facing shell tracking structure, ownership, semantic-source precedence, and recovery behavior are described in [shell-tracking-architecture.md](shell-tracking-architecture.md).
 - Detailed product acceptance criteria are specified in [requirements-mvp.md](requirements-mvp.md).
 - Agent runtime boundaries and integration guidance are specified in [agent-runtime-design.md](agent-runtime-design.md).
 - Provider onboarding and multi-backend integration guidance are specified in [provider-integration-design.md](provider-integration-design.md) and [provider-integration-plan.md](provider-integration-plan.md).

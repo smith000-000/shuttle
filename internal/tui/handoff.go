@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"aiterm/internal/logging"
 	"aiterm/internal/tmux"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -18,15 +19,15 @@ import (
 const TakeControlKey = "F2"
 
 type takeControlConfig struct {
-	SocketName  string
-	SessionName string
-	TopPaneID   string
-	StartDir    string
-	DetachKey   string
+	SocketName    string
+	SessionName   string
+	TrackedPaneID string
+	StartDir      string
+	DetachKey     string
 }
 
 func (c takeControlConfig) enabled() bool {
-	return c.SessionName != "" && c.TopPaneID != "" && c.DetachKey != ""
+	return c.SessionName != "" && c.TrackedPaneID != "" && c.DetachKey != ""
 }
 
 type takeControlFinishedMsg struct {
@@ -63,10 +64,16 @@ func (c *tmuxTakeControlCommand) SetStderr(w io.Writer) {
 }
 
 func (c *tmuxTakeControlCommand) Run() error {
-	targetPaneID, err := c.resolveTopPaneID(c.config.TopPaneID)
+	targetPaneID, err := c.resolveTopPaneID(c.config.TrackedPaneID)
 	if err != nil {
 		return err
 	}
+	logging.Trace(
+		"tui.take_control.target_resolved",
+		"session", c.config.SessionName,
+		"requested_pane", c.config.TrackedPaneID,
+		"resolved_pane", targetPaneID,
+	)
 
 	if err := c.runTmux("select-pane", "-t", targetPaneID); err != nil {
 		return fmt.Errorf("select shell pane: %w", err)
@@ -113,6 +120,12 @@ func (c *tmuxTakeControlCommand) resolveTopPaneID(paneID string) (string, error)
 	if err := c.runTmux("select-pane", "-t", paneID); err == nil {
 		return paneID, nil
 	} else if shouldRecoverTakeControlSession(err) {
+		logging.Trace(
+			"tui.take_control.recovery_begin",
+			"session", c.config.SessionName,
+			"requested_pane", paneID,
+			"reason", err.Error(),
+		)
 		return c.recoverTopPaneID()
 	} else if !strings.Contains(strings.ToLower(err.Error()), "can't find pane") {
 		return "", fmt.Errorf("select shell pane: %w", err)
@@ -130,6 +143,12 @@ func (c *tmuxTakeControlCommand) resolveTopPaneID(paneID string) (string, error)
 	if bestID == "" {
 		return "", fmt.Errorf("select shell pane: can't find pane: %s", paneID)
 	}
+	logging.Trace(
+		"tui.take_control.replacement_pane",
+		"session", c.config.SessionName,
+		"requested_pane", paneID,
+		"replacement_pane", bestID,
+	)
 	return bestID, nil
 }
 
@@ -147,6 +166,11 @@ func (c *tmuxTakeControlCommand) recoverTopPaneID() (string, error) {
 	if bestID == "" {
 		return "", fmt.Errorf("select shell pane: can't find pane in session %s", c.config.SessionName)
 	}
+	logging.Trace(
+		"tui.take_control.recovery_complete",
+		"session", c.config.SessionName,
+		"recovered_pane", bestID,
+	)
 	return bestID, nil
 }
 
@@ -166,18 +190,30 @@ func (c *tmuxTakeControlCommand) ensureWorkspace() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	logging.Trace(
+		"tui.take_control.ensure_session_begin",
+		"session", c.config.SessionName,
+		"start_dir", c.config.StartDir,
+	)
 	_, _, err = tmux.BootstrapShellSession(ctx, client, tmux.ShellSessionOptions{
 		SessionName: c.config.SessionName,
 		StartDir:    c.config.StartDir,
 	})
 	if err != nil {
+		logging.TraceError("tui.take_control.ensure_session_error", err, "session", c.config.SessionName)
 		return err
 	}
 	if strings.TrimSpace(c.config.DetachKey) != "" {
 		if err := client.BindNoPrefixKey(ctx, c.config.DetachKey, "detach-client"); err != nil {
+			logging.TraceError("tui.take_control.bind_detach_error", err, "session", c.config.SessionName, "detach_key", c.config.DetachKey)
 			return err
 		}
 	}
+	logging.Trace(
+		"tui.take_control.ensure_session_complete",
+		"session", c.config.SessionName,
+		"detach_key", c.config.DetachKey,
+	)
 	return nil
 }
 

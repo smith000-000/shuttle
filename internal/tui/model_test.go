@@ -269,7 +269,7 @@ func TestSendKeysModeBypassesComposerLockOnEnter(t *testing.T) {
 		StartedAt: time.Now(),
 	}
 	model.setInput("hello")
-	model.takeControl = takeControlConfig{SocketName: "sock", SessionName: "sess", TopPaneID: "%0", DetachKey: TakeControlKey}
+	model.takeControl = takeControlConfig{SocketName: "sock", SessionName: "sess", TrackedPaneID: "%0", DetachKey: TakeControlKey}
 
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next := updated.(Model)
@@ -412,17 +412,23 @@ func TestF2DoesNotCancelActiveShellExecution(t *testing.T) {
 }
 
 func TestTakeControlFinishedSyncsTrackedTopPane(t *testing.T) {
-	ctrl := &fakeController{topPaneID: "%7"}
+	ctrl := &fakeController{sessionName: "shuttle-recovered", topPaneID: "%7"}
 	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
 
 	updated, _ := model.Update(takeControlFinishedMsg{})
 	next := updated.(Model)
 
+	if next.workspace.SessionName != "shuttle-recovered" {
+		t.Fatalf("expected workspace session shuttle-recovered, got %q", next.workspace.SessionName)
+	}
 	if next.workspace.TopPane.ID != "%7" {
 		t.Fatalf("expected workspace top pane %%7, got %q", next.workspace.TopPane.ID)
 	}
-	if next.takeControl.TopPaneID != "%7" {
-		t.Fatalf("expected take-control top pane %%7, got %q", next.takeControl.TopPaneID)
+	if next.takeControl.SessionName != "shuttle-recovered" {
+		t.Fatalf("expected take-control session shuttle-recovered, got %q", next.takeControl.SessionName)
+	}
+	if next.takeControl.TrackedPaneID != "%7" {
+		t.Fatalf("expected take-control tracked pane %%7, got %q", next.takeControl.TrackedPaneID)
 	}
 }
 
@@ -436,8 +442,8 @@ func TestRefreshedShellContextSyncsTrackedTopPane(t *testing.T) {
 	if next.workspace.TopPane.ID != "%8" {
 		t.Fatalf("expected workspace top pane %%8, got %q", next.workspace.TopPane.ID)
 	}
-	if next.takeControl.TopPaneID != "%8" {
-		t.Fatalf("expected take-control top pane %%8, got %q", next.takeControl.TopPaneID)
+	if next.takeControl.TrackedPaneID != "%8" {
+		t.Fatalf("expected take-control tracked pane %%8, got %q", next.takeControl.TrackedPaneID)
 	}
 }
 
@@ -1782,10 +1788,10 @@ func TestAgentModeKeysProposalBecomesPendingProposal(t *testing.T) {
 func TestPrimaryActionRunsEnterOnlyKeysProposal(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.takeControl = takeControlConfig{
-		SocketName:  "shuttle-test",
-		SessionName: "shuttle-test",
-		TopPaneID:   "%0",
-		DetachKey:   TakeControlKey,
+		SocketName:    "shuttle-test",
+		SessionName:   "shuttle-test",
+		TrackedPaneID: "%0",
+		DetachKey:     TakeControlKey,
 	}
 	model.activeExecution = &controller.CommandExecution{
 		ID:        "cmd-1",
@@ -3271,6 +3277,7 @@ type fakeController struct {
 	activeExecution *controller.CommandExecution
 	abandonReason   string
 	peekShellTail   string
+	sessionName     string
 	topPaneID       string
 }
 
@@ -3433,10 +3440,18 @@ func (f *fakeController) AbandonActiveExecution(reason string) *controller.Comma
 }
 
 func (f *fakeController) TopPaneID() string {
-	if strings.TrimSpace(f.topPaneID) != "" {
-		return f.topPaneID
+	return f.TrackedShellTarget().PaneID
+}
+
+func (f *fakeController) TrackedShellTarget() controller.TrackedShellTarget {
+	sessionName := strings.TrimSpace(f.sessionName)
+	if sessionName == "" {
+		sessionName = "shuttle-test"
 	}
-	return "%0"
+	if strings.TrimSpace(f.topPaneID) != "" {
+		return controller.TrackedShellTarget{SessionName: sessionName, PaneID: f.topPaneID}
+	}
+	return controller.TrackedShellTarget{SessionName: sessionName, PaneID: "%0"}
 }
 
 type approvalDecisionCall struct {

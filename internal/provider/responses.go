@@ -509,11 +509,17 @@ func buildTurnContext(input controller.AgentInput) string {
 	if input.Session.SessionName != "" {
 		sessionLines = append(sessionLines, "session="+input.Session.SessionName)
 	}
+	if input.Session.TrackedShell.SessionName != "" {
+		sessionLines = append(sessionLines, "tracked_session="+input.Session.TrackedShell.SessionName)
+	}
 	if input.Session.WorkingDirectory != "" {
 		sessionLines = append(sessionLines, "cwd="+input.Session.WorkingDirectory)
 	}
 	if input.Session.TopPaneID != "" {
 		sessionLines = append(sessionLines, "top_pane="+input.Session.TopPaneID)
+	}
+	if input.Session.TrackedShell.PaneID != "" {
+		sessionLines = append(sessionLines, "tracked_pane="+input.Session.TrackedShell.PaneID)
 	}
 	if input.Session.BottomPaneID != "" {
 		sessionLines = append(sessionLines, "bottom_pane="+input.Session.BottomPaneID)

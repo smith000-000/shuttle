@@ -141,6 +141,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			SessionName:      workspace.SessionName,
 			TopPaneID:        workspace.TopPane.ID,
 			BottomPaneID:     workspace.BottomPane.ID,
+			TrackedShell:     controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
 			WorkingDirectory: runtimeCfg.StartDir,
 			CurrentShell:     initialShellContextPtr(initialShellContext),
 		})
@@ -190,6 +191,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			SessionName:      workspace.SessionName,
 			TopPaneID:        workspace.TopPane.ID,
 			BottomPaneID:     workspace.BottomPane.ID,
+			TrackedShell:     controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
 			WorkingDirectory: runtimeCfg.StartDir,
 			CurrentShell:     initialShellContextPtr(initialShellContext),
 		})
@@ -203,6 +205,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 				SessionName:      workspace.SessionName,
 				TopPaneID:        workspace.TopPane.ID,
 				BottomPaneID:     workspace.BottomPane.ID,
+				TrackedShell:     controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
 				WorkingDirectory: runtimeCfg.StartDir,
 				CurrentShell:     shellContext,
 			}), profile, nil

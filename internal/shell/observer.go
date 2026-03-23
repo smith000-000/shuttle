@@ -193,7 +193,16 @@ func (o *Observer) ResolveTrackedPane(ctx context.Context, paneID string) (strin
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(info.ID), nil
+	resolved := strings.TrimSpace(info.ID)
+	if trimmed := strings.TrimSpace(paneID); trimmed != "" && resolved != "" && trimmed != resolved {
+		logging.Trace(
+			"shell.tracked_pane.resolved",
+			"requested_pane", trimmed,
+			"resolved_pane", resolved,
+			"session", o.sessionName,
+		)
+	}
+	return resolved, nil
 }
 
 func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedCommandMonitor, paneID string, command string, transportCommand string, timeout time.Duration, beforeCapture string, markers protocol.Markers, cleanup func()) {
@@ -1049,6 +1058,12 @@ func (o *Observer) PipePaneOutput(ctx context.Context, paneID string, shellComma
 func (o *Observer) resolvePaneID(ctx context.Context, paneID string) (string, error) {
 	if alias := o.paneAlias(paneID); alias != "" {
 		if _, err := o.client.PaneInfo(ctx, alias); err == nil {
+			logging.Trace(
+				"shell.tracked_pane.alias_hit",
+				"requested_pane", strings.TrimSpace(paneID),
+				"alias_pane", alias,
+				"session", o.sessionName,
+			)
 			return alias, nil
 		}
 	}
@@ -1061,16 +1076,33 @@ func (o *Observer) recoverPaneID(ctx context.Context, paneID string) (string, er
 		return "", fmt.Errorf("pane %s no longer exists and no replacement pane was found", paneID)
 	}
 	o.setPaneAlias(paneID, replacement)
+	logging.Trace(
+		"shell.tracked_pane.recovered",
+		"previous_pane", strings.TrimSpace(paneID),
+		"replacement_pane", replacement,
+		"session", o.sessionName,
+	)
 	return replacement, nil
 }
 
 func (o *Observer) recoverActionTarget(ctx context.Context, paneID string, cause error) (string, error) {
+	logging.Trace(
+		"shell.tracked_pane.recovery_begin",
+		"pane", strings.TrimSpace(paneID),
+		"session", o.sessionName,
+		"cause", errString(cause),
+	)
 	if shouldRecoverObserverSession(cause) {
 		if err := o.ensureSessionAvailable(ctx); err != nil {
 			return "", err
 		}
 		if target := strings.TrimSpace(paneID); target != "" {
 			if _, err := o.client.PaneInfo(ctx, target); err == nil {
+				logging.Trace(
+					"shell.tracked_pane.recovery_reused_original",
+					"pane", target,
+					"session", o.sessionName,
+				)
 				return target, nil
 			}
 		}
@@ -1102,12 +1134,33 @@ func (o *Observer) findReplacementPaneID(ctx context.Context) (string, bool) {
 			best = pane
 		}
 	}
-	return strings.TrimSpace(best.ID), strings.TrimSpace(best.ID) != ""
+	replacement := strings.TrimSpace(best.ID)
+	if replacement != "" {
+		logging.Trace(
+			"shell.tracked_pane.replacement_candidate",
+			"session", o.sessionName,
+			"replacement_pane", replacement,
+			"pane_count", len(panes),
+		)
+	}
+	return replacement, replacement != ""
 }
 
 func (o *Observer) ensureSessionAvailable(ctx context.Context) error {
 	if o.sessionEnsurer != nil {
-		return o.sessionEnsurer(ctx)
+		logging.Trace(
+			"shell.session.ensure_begin",
+			"session", o.sessionName,
+			"start_dir", strings.TrimSpace(o.startDir),
+			"mode", "callback",
+		)
+		err := o.sessionEnsurer(ctx)
+		if err != nil {
+			logging.TraceError("shell.session.ensure_error", err, "session", o.sessionName, "mode", "callback")
+			return err
+		}
+		logging.Trace("shell.session.ensure_complete", "session", o.sessionName, "mode", "callback")
+		return nil
 	}
 	if o.tmuxClient == nil {
 		return fmt.Errorf("tmux client is not available for workspace recovery")
@@ -1122,12 +1175,30 @@ func (o *Observer) ensureSessionAvailable(ctx context.Context) error {
 	if startDir == "" {
 		startDir = "."
 	}
+	logging.Trace(
+		"shell.session.ensure_begin",
+		"session", o.sessionName,
+		"start_dir", startDir,
+		"mode", "bootstrap_workspace",
+	)
 	_, _, err := tmux.BootstrapWorkspace(ctx, o.tmuxClient, tmux.BootstrapOptions{
 		SessionName:       o.sessionName,
 		StartDir:          startDir,
 		BottomPanePercent: 30,
 	})
+	if err != nil {
+		logging.TraceError("shell.session.ensure_error", err, "session", o.sessionName, "mode", "bootstrap_workspace")
+		return err
+	}
+	logging.Trace("shell.session.ensure_complete", "session", o.sessionName, "mode", "bootstrap_workspace")
 	return err
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func shouldRecoverObserverSession(err error) bool {

@@ -17,10 +17,16 @@ type AgentInput struct {
 	Prompt  string
 }
 
+type TrackedShellTarget struct {
+	SessionName string
+	PaneID      string
+}
+
 type SessionContext struct {
 	SessionName       string
 	TopPaneID         string
 	BottomPaneID      string
+	TrackedShell      TrackedShellTarget
 	WorkingDirectory  string
 	RecentShellOutput string
 	CurrentShell      *shell.PromptContext
@@ -219,4 +225,5 @@ type Controller interface {
 	ActiveExecution() *CommandExecution
 	AbandonActiveExecution(reason string) *CommandExecution
 	TopPaneID() string
+	TrackedShellTarget() TrackedShellTarget
 }

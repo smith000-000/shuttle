@@ -132,6 +132,22 @@ func TestLocalControllerSubmitShellCommandUsesResolvedTopPaneID(t *testing.T) {
 	if controller.TopPaneID() != "%5" {
 		t.Fatalf("expected controller to retain resolved top pane %%5, got %q", controller.TopPaneID())
 	}
+	target := controller.TrackedShellTarget()
+	if target.PaneID != "%5" {
+		t.Fatalf("expected tracked shell pane %%5, got %#v", target)
+	}
+}
+
+func TestNewNormalizesTrackedShellTargetFromLegacySessionFields(t *testing.T) {
+	controller := New(nil, nil, nil, SessionContext{
+		SessionName: "shuttle-test",
+		TopPaneID:   "%0",
+	})
+
+	target := controller.TrackedShellTarget()
+	if target.SessionName != "shuttle-test" || target.PaneID != "%0" {
+		t.Fatalf("expected normalized tracked shell target, got %#v", target)
+	}
 }
 
 func TestLocalControllerSubmitShellCommandCanceledReturnsResultEvent(t *testing.T) {
@@ -221,6 +237,51 @@ func TestLocalControllerResumeAfterTakeControlReconcilesUserShellPromptReturn(t 
 	}
 	if controller.ActiveExecution() != nil {
 		t.Fatal("expected active execution to clear after handoff reconcile")
+	}
+}
+
+func TestLocalControllerResumeAfterTakeControlInfersCanceledWhenPromptReturnedWithoutExitCode(t *testing.T) {
+	reader := &stubContextReader{
+		snapshot: "^C\njsmith@linuxdesktop ~/source/repos/aiterm %",
+		context: shell.PromptContext{
+			User:         "jsmith",
+			Host:         "linuxdesktop",
+			Directory:    "/home/jsmith/source/repos/aiterm",
+			PromptSymbol: "%",
+			RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+		},
+	}
+	controller := New(nil, nil, reader, SessionContext{TopPaneID: "%0"})
+	controller.task.CurrentExecution = &CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 10",
+		Origin:    CommandOriginUserShell,
+		State:     CommandExecutionRunning,
+		StartedAt: time.Now().Add(-10 * time.Second),
+	}
+
+	events, err := controller.ResumeAfterTakeControl(context.Background())
+	if err != nil {
+		t.Fatalf("ResumeAfterTakeControl() error = %v", err)
+	}
+	if len(events) != 1 || events[0].Kind != EventCommandResult {
+		t.Fatalf("expected one command result event, got %#v", events)
+	}
+	result, ok := events[0].Payload.(CommandResultSummary)
+	if !ok {
+		t.Fatalf("expected command result payload, got %#v", events[0].Payload)
+	}
+	if result.State != CommandExecutionCanceled {
+		t.Fatalf("expected canceled reconcile result, got %#v", result)
+	}
+	if result.ExitCode != shell.InterruptedExitCode {
+		t.Fatalf("expected interrupted exit code, got %#v", result)
+	}
+	if result.Confidence != shell.ConfidenceMedium {
+		t.Fatalf("expected medium confidence, got %#v", result)
+	}
+	if controller.ActiveExecution() != nil {
+		t.Fatal("expected active execution to clear after inferred handoff reconcile")
 	}
 }
 
