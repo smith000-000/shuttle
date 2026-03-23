@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -62,6 +63,22 @@ func TestWorkspaceFromPanesRejectsUnexpectedPaneCount(t *testing.T) {
 	}
 }
 
+func TestTopPaneFromPanesSortsByVerticalPosition(t *testing.T) {
+	panes := []Pane{
+		{ID: "%2", Top: 20, Left: 0},
+		{ID: "%1", Top: 0, Left: 10},
+		{ID: "%0", Top: 0, Left: 0},
+	}
+
+	top, err := topPaneFromPanes("shuttle", panes)
+	if err != nil {
+		t.Fatalf("topPaneFromPanes() error = %v", err)
+	}
+	if top.ID != "%0" {
+		t.Fatalf("expected top pane %%0, got %s", top.ID)
+	}
+}
+
 func TestEnvironmentArgsSortsKeys(t *testing.T) {
 	args := environmentArgs(map[string]string{
 		"ZETA":  "z",
@@ -87,5 +104,39 @@ func TestShellHistoryEnvironment(t *testing.T) {
 	}
 	if env["SHUTTLE_HISTFILE"] != "/tmp/shuttle-history" {
 		t.Fatalf("expected SHUTTLE_HISTFILE to be set, got %#v", env)
+	}
+}
+
+func TestResolveSocketTargetPrefersConfiguredValue(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/tmux-1000/default,123,0")
+
+	target := ResolveSocketTarget("shuttle-test")
+	if target != "shuttle-test" {
+		t.Fatalf("expected configured socket target, got %q", target)
+	}
+}
+
+func TestResolveSocketTargetFallsBackToTMUXEnvPath(t *testing.T) {
+	t.Setenv("TMUX", "/tmp/tmux-1000/custom,123,0")
+
+	target := ResolveSocketTarget("")
+	if target != "/tmp/tmux-1000/custom" {
+		t.Fatalf("expected TMUX-derived socket path, got %q", target)
+	}
+}
+
+func TestSocketFlagArgsUsesSocketName(t *testing.T) {
+	args := SocketFlagArgs("shuttle-test")
+	expected := []string{"-L", "shuttle-test"}
+	if !reflect.DeepEqual(args, expected) {
+		t.Fatalf("expected %v, got %v", expected, args)
+	}
+}
+
+func TestSocketFlagArgsUsesSocketPath(t *testing.T) {
+	args := SocketFlagArgs("/tmp/tmux-1000/custom")
+	expected := []string{"-S", "/tmp/tmux-1000/custom"}
+	if !reflect.DeepEqual(args, expected) {
+		t.Fatalf("expected %v, got %v", expected, args)
 	}
 }

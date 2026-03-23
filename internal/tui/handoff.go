@@ -1,11 +1,16 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+	"time"
+
+	"aiterm/internal/tmux"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -16,6 +21,7 @@ type takeControlConfig struct {
 	SocketName  string
 	SessionName string
 	TopPaneID   string
+	StartDir    string
 	DetachKey   string
 }
 
@@ -57,24 +63,29 @@ func (c *tmuxTakeControlCommand) SetStderr(w io.Writer) {
 }
 
 func (c *tmuxTakeControlCommand) Run() error {
-	if err := c.runTmux("select-pane", "-t", c.config.TopPaneID); err != nil {
+	targetPaneID, err := c.resolveTopPaneID(c.config.TopPaneID)
+	if err != nil {
+		return err
+	}
+
+	if err := c.runTmux("select-pane", "-t", targetPaneID); err != nil {
 		return fmt.Errorf("select shell pane: %w", err)
 	}
 
-	zoomed, err := c.captureTmux("display-message", "-p", "-t", c.config.TopPaneID, "#{window_zoomed_flag}")
+	zoomed, err := c.captureTmux("display-message", "-p", "-t", targetPaneID, "#{window_zoomed_flag}")
 	if err != nil {
 		return fmt.Errorf("inspect tmux zoom state: %w", err)
 	}
 	zoomedHere := false
 	if strings.TrimSpace(zoomed) != "1" {
-		if err := c.runTmux("resize-pane", "-Z", "-t", c.config.TopPaneID); err != nil {
+		if err := c.runTmux("resize-pane", "-Z", "-t", targetPaneID); err != nil {
 			return fmt.Errorf("zoom shell pane: %w", err)
 		}
 		zoomedHere = true
 	}
 	if zoomedHere {
 		defer func() {
-			_ = c.runTmux("resize-pane", "-Z", "-t", c.config.TopPaneID)
+			_ = c.runTmux("resize-pane", "-Z", "-t", targetPaneID)
 		}()
 	}
 
@@ -98,13 +109,113 @@ func (c *tmuxTakeControlCommand) Run() error {
 	return command.Run()
 }
 
-func (c *tmuxTakeControlCommand) tmuxArgs(args ...string) []string {
-	if c.config.SocketName == "" {
-		return args
+func (c *tmuxTakeControlCommand) resolveTopPaneID(paneID string) (string, error) {
+	if err := c.runTmux("select-pane", "-t", paneID); err == nil {
+		return paneID, nil
+	} else if shouldRecoverTakeControlSession(err) {
+		return c.recoverTopPaneID()
+	} else if !strings.Contains(strings.ToLower(err.Error()), "can't find pane") {
+		return "", fmt.Errorf("select shell pane: %w", err)
 	}
 
+	output, err := c.captureTmux("list-panes", "-t", c.config.SessionName, "-F", "#{pane_id}\t#{pane_top}\t#{pane_left}")
+	if err != nil {
+		if shouldRecoverTakeControlSession(err) {
+			return c.recoverTopPaneID()
+		}
+		return "", fmt.Errorf("resolve replacement shell pane: %w", err)
+	}
+
+	bestID := pickTopPaneID(output)
+	if bestID == "" {
+		return "", fmt.Errorf("select shell pane: can't find pane: %s", paneID)
+	}
+	return bestID, nil
+}
+
+func (c *tmuxTakeControlCommand) recoverTopPaneID() (string, error) {
+	if err := c.ensureWorkspace(); err != nil {
+		return "", fmt.Errorf("recover shell workspace: %w", err)
+	}
+
+	output, err := c.captureTmux("list-panes", "-t", c.config.SessionName, "-F", "#{pane_id}\t#{pane_top}\t#{pane_left}")
+	if err != nil {
+		return "", fmt.Errorf("resolve recovered shell pane: %w", err)
+	}
+
+	bestID := pickTopPaneID(output)
+	if bestID == "" {
+		return "", fmt.Errorf("select shell pane: can't find pane in session %s", c.config.SessionName)
+	}
+	return bestID, nil
+}
+
+func (c *tmuxTakeControlCommand) ensureWorkspace() error {
+	if strings.TrimSpace(c.config.SessionName) == "" {
+		return fmt.Errorf("session name is required")
+	}
+	if strings.TrimSpace(c.config.StartDir) == "" {
+		return fmt.Errorf("start directory is required")
+	}
+
+	client, err := tmux.NewClient(c.config.SocketName)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, _, err = tmux.BootstrapShellSession(ctx, client, tmux.ShellSessionOptions{
+		SessionName: c.config.SessionName,
+		StartDir:    c.config.StartDir,
+	})
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(c.config.DetachKey) != "" {
+		if err := client.BindNoPrefixKey(ctx, c.config.DetachKey, "detach-client"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func pickTopPaneID(output string) string {
+	bestID := ""
+	bestTop := 0
+	bestLeft := 0
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Split(strings.TrimSpace(line), "\t")
+		if len(fields) != 3 || strings.TrimSpace(fields[0]) == "" {
+			continue
+		}
+		top, topErr := strconv.Atoi(strings.TrimSpace(fields[1]))
+		left, leftErr := strconv.Atoi(strings.TrimSpace(fields[2]))
+		if topErr != nil || leftErr != nil {
+			continue
+		}
+		if bestID == "" || top < bestTop || (top == bestTop && left < bestLeft) {
+			bestID = strings.TrimSpace(fields[0])
+			bestTop = top
+			bestLeft = left
+		}
+	}
+	return bestID
+}
+
+func shouldRecoverTakeControlSession(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "no server running") || strings.Contains(text, "can't find session")
+}
+
+func (c *tmuxTakeControlCommand) tmuxArgs(args ...string) []string {
 	commandArgs := make([]string, 0, len(args)+2)
-	commandArgs = append(commandArgs, "-L", c.config.SocketName)
+	commandArgs = append(commandArgs, tmux.SocketFlagArgs(c.config.SocketName)...)
 	commandArgs = append(commandArgs, args...)
 	return commandArgs
 }

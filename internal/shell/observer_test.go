@@ -2,9 +2,12 @@ package shell
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"aiterm/internal/protocol"
 	"aiterm/internal/tmux"
@@ -26,6 +29,26 @@ func TestSanitizeCapturedBodyStripsSemanticBootstrapNoise(t *testing.T) {
 
 	got := sanitizeCapturedBody(body)
 	want := "1\n2\n^C"
+
+	if got != want {
+		t.Fatalf("sanitizeCapturedBody() = %q, want %q", got, want)
+	}
+}
+
+func TestSanitizeCapturedBodyStripsWrappedShuttleProtocolNoise(t *testing.T) {
+	body := `.sh'"'"' >/dev/null 2>&1')"; __shuttle_status=$?; printf '%s%s\n' '__SHUTTLE_E__
+:abc123:' "$__shuttle_status"
+jsmith@linuxdesktop ~/source/repos/aiterm % bas
+h
+ull || id -un 2>/dev/null)"' 'printf '"'"'__SHUTTLE_CTX_HOST__=%s\n'"'"' "$(hostname 2>/dev/null || uname -n 2>/dev/null)"'
+__SHUTTLE_CTX_EXIT__=0
+__SHUTTLE_CTX_USER__=jsmith
+1
+2
+^C`
+
+	got := sanitizeCapturedBody(body)
+	want := "jsmith@linuxdesktop ~/source/repos/aiterm % bas\nh\n1\n2\n^C"
 
 	if got != want {
 		t.Fatalf("sanitizeCapturedBody() = %q, want %q", got, want)
@@ -84,9 +107,12 @@ func TestIsContextTransitionCommand(t *testing.T) {
 		"ssh prod":                   true,
 		"telnet 10.0.0.5":            true,
 		"sudo -i":                    true,
+		"bash":                       true,
+		"zsh -i":                     true,
 		"docker exec -it app sh":     true,
 		"kubectl exec -it pod -- sh": true,
 		"exit":                       true,
+		"bash -lc 'echo hi'":         false,
 		"ls -lah":                    false,
 		"git status":                 false,
 		"sudo ls":                    false,
@@ -158,14 +184,20 @@ func TestAllowPromptReturnInferenceAllowsRemoteTransportPaneCommands(t *testing.
 }
 
 func TestShouldIgnoreLocalSemanticStateForRemotePromptContext(t *testing.T) {
-	if !shouldIgnoreLocalSemanticState("zsh", PromptContext{Remote: true}) {
+	if !shouldIgnoreLocalSemanticState("", "zsh", PromptContext{Remote: true}, shellTransitionNone) {
 		t.Fatal("expected remote prompt context to suppress local semantic state")
 	}
 }
 
 func TestShouldIgnoreLocalSemanticStateForSSHPaneCommand(t *testing.T) {
-	if !shouldIgnoreLocalSemanticState("ssh", PromptContext{}) {
+	if !shouldIgnoreLocalSemanticState("", "ssh", PromptContext{}, shellTransitionNone) {
 		t.Fatal("expected ssh pane command to suppress local semantic state")
+	}
+}
+
+func TestShouldIgnoreLocalSemanticStateForRememberedNestedShell(t *testing.T) {
+	if !shouldIgnoreLocalSemanticState("", "bash", PromptContext{}, shellTransitionLocal) {
+		t.Fatal("expected remembered nested shell to suppress local semantic state")
 	}
 }
 
@@ -185,7 +217,7 @@ func TestCaptureSemanticShellStatePrefersOSCCaptureOverStateFile(t *testing.T) {
 	}
 
 	observer := (&Observer{client: client}).WithStateDir(dir)
-	state, source, ok := observer.captureSemanticShellState(context.Background(), "%0", client.pane.TTY, client.pane.CurrentCommand, PromptContext{})
+	state, source, ok := observer.captureSemanticShellState(context.Background(), "%0", client.pane.TTY, "", client.pane.CurrentCommand, PromptContext{})
 	if !ok {
 		t.Fatal("expected semantic shell state")
 	}
@@ -197,6 +229,248 @@ func TestCaptureSemanticShellStatePrefersOSCCaptureOverStateFile(t *testing.T) {
 	}
 	if state.Directory != "/home/jsmith/source/repos/aiterm" {
 		t.Fatalf("expected osc capture cwd, got %#v", state)
+	}
+}
+
+func TestCaptureSemanticShellStatePrefersStreamOverOSCCaptureAndStateFile(t *testing.T) {
+	dir := t.TempDir()
+	client := &fakeSemanticPaneClient{
+		pane:    tmux.Pane{ID: "%0", CurrentCommand: "zsh", TTY: "/dev/pts/14"},
+		escaped: "\x1b]133;C\x1b\\\x1b]7;file://linuxdesktop/tmp/capture-fallback\x1b\\",
+		stream:  "\x1b]133;B\x1b\\\x1b]133;C\x1b\\\x1b]7;file://localhost/tmp/stream-primary\x1b\\\x1b]133;D;7\x1b\\\x1b]133;A\x1b\\",
+	}
+	statePath := semanticStatePath(dir, client.pane.TTY)
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(statePath, []byte("{\"event\":\"prompt\",\"exit\":0,\"cwd\":\"/tmp/state-fallback\",\"shell\":\"zsh\"}\n"), 0o644); err != nil {
+		t.Fatalf("write state file: %v", err)
+	}
+
+	observer := (&Observer{client: client}).WithStateDir(dir)
+	state, source, ok := observer.captureSemanticShellState(context.Background(), "%0", client.pane.TTY, "", client.pane.CurrentCommand, PromptContext{})
+	if !ok {
+		t.Fatal("expected semantic shell state")
+	}
+	if source != semanticSourceStream {
+		t.Fatalf("expected stream source, got %q", source)
+	}
+	if state.Event != semanticEventPrompt {
+		t.Fatalf("expected prompt event, got %#v", state)
+	}
+	if state.Directory != "/tmp/stream-primary" {
+		t.Fatalf("expected stream cwd, got %#v", state)
+	}
+	if state.ExitCode == nil || *state.ExitCode != 7 {
+		t.Fatalf("expected stream exit code 7, got %#v", state.ExitCode)
+	}
+	if len(client.piped) != 1 {
+		t.Fatalf("expected one pipe-pane start, got %#v", client.piped)
+	}
+
+	state, source, ok = observer.captureSemanticShellState(context.Background(), "%0", client.pane.TTY, "", client.pane.CurrentCommand, PromptContext{})
+	if !ok {
+		t.Fatal("expected semantic shell state on repeated capture")
+	}
+	if source != semanticSourceStream {
+		t.Fatalf("expected repeated stream source, got %q", source)
+	}
+	if len(client.piped) != 1 {
+		t.Fatalf("expected stream collector to reuse existing pipe-pane, got %#v", client.piped)
+	}
+}
+
+func TestStartTrackedCommandEnsuresLocalShellIntegrationBeforeLaunching(t *testing.T) {
+	client := &fakeSemanticPaneClient{
+		pane:    tmux.Pane{ID: "%0", CurrentCommand: "bash", TTY: "/dev/pts/22"},
+		capture: "jsmith@linuxdesktop ~/source/repos/aiterm %",
+	}
+	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	monitor, err := observer.StartTrackedCommand(ctx, "%0", "printf 'hi\\n'", 250*time.Millisecond)
+	if err != nil {
+		t.Fatalf("StartTrackedCommand() error = %v", err)
+	}
+	cancel()
+	_, _ = monitor.Wait()
+
+	if len(client.sent) < 2 {
+		t.Fatalf("expected semantic bootstrap and tracked command send, got %#v", client.sent)
+	}
+	if !strings.Contains(client.sent[0], "SHUTTLE_SEMANTIC_SHELL_V1_PID") {
+		t.Fatalf("expected first send to be semantic bootstrap, got %q", client.sent[0])
+	}
+	if strings.Contains(client.sent[1], "SHUTTLE_SEMANTIC_SHELL_V1_PID") {
+		t.Fatalf("expected second send to be tracked command transport, got %#v", client.sent)
+	}
+}
+
+func TestAttachForegroundCommandAttachesToManualForegroundProcess(t *testing.T) {
+	client := &fakeSemanticPaneClient{
+		pane: tmux.Pane{ID: "%0", CurrentCommand: "sleep", TTY: "/dev/pts/23"},
+		panes: []tmux.Pane{
+			{ID: "%0", CurrentCommand: "sleep", TTY: "/dev/pts/23"},
+			{ID: "%0", CurrentCommand: "sleep", TTY: "/dev/pts/23"},
+			{ID: "%0", CurrentCommand: "zsh", TTY: "/dev/pts/23"},
+		},
+		captures: []string{
+			"sleep 30\nworking",
+			"sleep 30\nworking",
+			"jsmith@linuxdesktop ~/source/repos/aiterm %",
+		},
+	}
+	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	monitor, err := observer.AttachForegroundCommand(ctx, "%0")
+	if err != nil {
+		t.Fatalf("AttachForegroundCommand() error = %v", err)
+	}
+	if monitor == nil {
+		t.Fatal("expected active foreground monitor")
+	}
+	result, err := monitor.Wait()
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if result.State != MonitorStateCompleted {
+		t.Fatalf("expected completed attached command, got %#v", result)
+	}
+	if result.Command != "sleep" {
+		t.Fatalf("expected foreground command label sleep, got %#v", result)
+	}
+}
+
+func TestAttachForegroundCommandSkipsIdleRemotePrompt(t *testing.T) {
+	client := &fakeSemanticPaneClient{
+		pane:    tmux.Pane{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/24"},
+		capture: "root@web01:/srv/app#",
+	}
+	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
+
+	monitor, err := observer.AttachForegroundCommand(context.Background(), "%0")
+	if err != nil {
+		t.Fatalf("AttachForegroundCommand() error = %v", err)
+	}
+	if monitor != nil {
+		t.Fatalf("expected idle remote prompt not to attach, got %#v", monitor.Snapshot())
+	}
+}
+
+func TestCaptureRecentOutputRecoversFromRespawnedTopPane(t *testing.T) {
+	client := &fakeSemanticPaneClient{
+		captureErrByTarget: map[string]error{
+			"%0": fmt.Errorf("tmux capture-pane -p -t %%0 -S -20: exit status 1: can't find pane: %%0"),
+		},
+		capturesByTarget: map[string]string{
+			"%2": "new pane output",
+		},
+		panesByTarget: map[string]tmux.Pane{
+			"%2": {ID: "%2", CurrentCommand: "zsh", TTY: "/dev/pts/30", Top: 0, Left: 0},
+		},
+		listPanes: []tmux.Pane{
+			{ID: "%2", CurrentCommand: "zsh", TTY: "/dev/pts/30", Top: 0, Left: 0},
+			{ID: "%3", CurrentCommand: "shuttle", TTY: "/dev/pts/31", Top: 20, Left: 0},
+		},
+	}
+	observer := (&Observer{client: client}).WithSessionName("shuttle")
+
+	got, err := observer.CaptureRecentOutput(context.Background(), "%0", 20)
+	if err != nil {
+		t.Fatalf("CaptureRecentOutput() error = %v", err)
+	}
+	if got != "new pane output" {
+		t.Fatalf("CaptureRecentOutput() = %q, want %q", got, "new pane output")
+	}
+	if alias := observer.paneAlias("%0"); alias != "%2" {
+		t.Fatalf("expected respawned pane alias %%2, got %q", alias)
+	}
+}
+
+func TestCaptureRecentOutputRecreatesMissingSession(t *testing.T) {
+	client := &fakeSemanticPaneClient{
+		captureErrByTarget: map[string]error{
+			"%0": fmt.Errorf("tmux capture-pane -p -t %%0 -S -20: exit status 1: no server running on /tmp/tmux-1000/default"),
+		},
+		paneErrByTarget: map[string]error{
+			"%0": fmt.Errorf("tmux list-panes -t %%0: exit status 1: can't find pane: %%0"),
+		},
+		listPanesErr: fmt.Errorf("tmux list-panes -t shuttle: exit status 1: can't find session: shuttle"),
+	}
+	observer := (&Observer{
+		client:      client,
+		sessionName: "shuttle",
+		sessionEnsurer: func(context.Context) error {
+			client.captureErrByTarget = map[string]error{}
+			client.paneErrByTarget = map[string]error{
+				"%0": fmt.Errorf("tmux list-panes -t %%0: exit status 1: can't find pane: %%0"),
+			}
+			client.listPanesErr = nil
+			client.listPanes = []tmux.Pane{
+				{ID: "%4", CurrentCommand: "zsh", TTY: "/dev/pts/44", Top: 0, Left: 0},
+			}
+			client.panesByTarget = map[string]tmux.Pane{
+				"%4": {ID: "%4", CurrentCommand: "zsh", TTY: "/dev/pts/44", Top: 0, Left: 0},
+			}
+			client.capturesByTarget = map[string]string{
+				"%4": "recreated session output",
+			}
+			return nil
+		},
+	}).WithSessionName("shuttle").WithStartDir(t.TempDir())
+
+	got, err := observer.CaptureRecentOutput(context.Background(), "%0", 20)
+	if err != nil {
+		t.Fatalf("CaptureRecentOutput() error = %v", err)
+	}
+	if got != "recreated session output" {
+		t.Fatalf("CaptureRecentOutput() = %q, want %q", got, "recreated session output")
+	}
+	if alias := observer.paneAlias("%0"); alias != "%4" {
+		t.Fatalf("expected recovered pane alias %%4, got %q", alias)
+	}
+}
+
+func TestPipePaneOutputRecreatesMissingSession(t *testing.T) {
+	client := &fakeSemanticPaneClient{
+		pipeErrByTarget: map[string]error{
+			"%0": fmt.Errorf("tmux pipe-pane -O -t %%0: exit status 1: no server running on /tmp/tmux-1000/default"),
+		},
+		paneErrByTarget: map[string]error{
+			"%0": fmt.Errorf("tmux list-panes -t %%0: exit status 1: can't find pane: %%0"),
+		},
+		listPanesErr: fmt.Errorf("tmux list-panes -t shuttle: exit status 1: can't find session: shuttle"),
+	}
+	observer := (&Observer{
+		client:      client,
+		sessionName: "shuttle",
+		sessionEnsurer: func(context.Context) error {
+			client.pipeErrByTarget = map[string]error{}
+			client.paneErrByTarget = map[string]error{
+				"%0": fmt.Errorf("tmux list-panes -t %%0: exit status 1: can't find pane: %%0"),
+			}
+			client.listPanesErr = nil
+			client.listPanes = []tmux.Pane{
+				{ID: "%5", CurrentCommand: "zsh", TTY: "/dev/pts/45", Top: 0, Left: 0},
+			}
+			client.panesByTarget = map[string]tmux.Pane{
+				"%5": {ID: "%5", CurrentCommand: "zsh", TTY: "/dev/pts/45", Top: 0, Left: 0},
+			}
+			return nil
+		},
+	}).WithSessionName("shuttle").WithStartDir(t.TempDir())
+
+	if err := observer.PipePaneOutput(context.Background(), "%0", "cat > /tmp/demo"); err != nil {
+		t.Fatalf("PipePaneOutput() error = %v", err)
+	}
+	if len(client.pipeTargets) != 1 || client.pipeTargets[0] != "%5" {
+		t.Fatalf("expected pipe-pane recovery to target %%5, got %#v", client.pipeTargets)
+	}
+	if alias := observer.paneAlias("%0"); alias != "%5" {
+		t.Fatalf("expected recovered pane alias %%5, got %q", alias)
 	}
 }
 

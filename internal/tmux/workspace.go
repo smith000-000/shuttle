@@ -26,6 +26,12 @@ type Workspace struct {
 	BottomPane  Pane
 }
 
+type ShellSessionOptions struct {
+	SessionName string
+	StartDir    string
+	HistoryFile string
+}
+
 func BootstrapWorkspace(ctx context.Context, client *Client, options BootstrapOptions) (Workspace, bool, error) {
 	if client == nil {
 		return Workspace{}, false, errors.New("tmux client is required")
@@ -83,6 +89,15 @@ func BootstrapWorkspace(ctx context.Context, client *Client, options BootstrapOp
 	if err != nil {
 		return Workspace{}, false, fmt.Errorf("list panes for workspace: %w", err)
 	}
+	if len(panes) == 1 {
+		if err := client.SplitBottom(ctx, panes[0].ID, options.BottomPanePercent, options.StartDir); err != nil {
+			return Workspace{}, false, fmt.Errorf("split bottom pane for existing session: %w", err)
+		}
+		panes, err = client.ListPanes(ctx, options.SessionName)
+		if err != nil {
+			return Workspace{}, false, fmt.Errorf("list panes after session repair: %w", err)
+		}
+	}
 
 	workspace, err := workspaceFromPanes(options.SessionName, panes)
 	if err != nil {
@@ -116,6 +131,64 @@ func workspaceFromPanes(sessionName string, panes []Pane) (Workspace, error) {
 		TopPane:     sorted[0],
 		BottomPane:  sorted[1],
 	}, nil
+}
+
+func BootstrapShellSession(ctx context.Context, client *Client, options ShellSessionOptions) (Pane, bool, error) {
+	if client == nil {
+		return Pane{}, false, errors.New("tmux client is required")
+	}
+	if options.SessionName == "" {
+		return Pane{}, false, errors.New("session name is required")
+	}
+	if options.StartDir == "" {
+		return Pane{}, false, errors.New("start directory is required")
+	}
+
+	sessionEnv := shellHistoryEnvironment(options.HistoryFile)
+	if err := ensureSessionFiles(sessionEnv); err != nil {
+		return Pane{}, false, err
+	}
+
+	created := false
+	exists, err := client.HasSession(ctx, options.SessionName)
+	if err != nil {
+		return Pane{}, false, err
+	}
+	if !exists {
+		if err := client.NewDetachedSession(ctx, options.SessionName, options.StartDir, sessionEnv); err != nil {
+			return Pane{}, false, fmt.Errorf("create session: %w", err)
+		}
+		created = true
+	}
+
+	if err := client.SetGlobalOption(ctx, "history-limit", fmt.Sprintf("%d", shuttleHistoryLimit)); err != nil {
+		return Pane{}, false, fmt.Errorf("set tmux history limit: %w", err)
+	}
+
+	panes, err := client.ListPanes(ctx, options.SessionName)
+	if err != nil {
+		return Pane{}, false, fmt.Errorf("list panes for session: %w", err)
+	}
+	topPane, err := topPaneFromPanes(options.SessionName, panes)
+	if err != nil {
+		return Pane{}, false, err
+	}
+	return topPane, created, nil
+}
+
+func topPaneFromPanes(sessionName string, panes []Pane) (Pane, error) {
+	if len(panes) == 0 {
+		return Pane{}, fmt.Errorf("session %q has no panes", sessionName)
+	}
+
+	sorted := append([]Pane(nil), panes...)
+	sort.Slice(sorted, func(i int, j int) bool {
+		if sorted[i].Top == sorted[j].Top {
+			return sorted[i].Left < sorted[j].Left
+		}
+		return sorted[i].Top < sorted[j].Top
+	})
+	return sorted[0], nil
 }
 
 func shellHistoryEnvironment(historyFile string) map[string]string {

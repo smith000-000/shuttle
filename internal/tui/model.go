@@ -294,6 +294,11 @@ func (m Model) WithTakeControl(socketName string, sessionName string, topPaneID 
 	return m
 }
 
+func (m Model) WithTakeControlStartDir(startDir string) Model {
+	m.takeControl.StartDir = strings.TrimSpace(startDir)
+	return m
+}
+
 func (m Model) WithProviderOnboarding(
 	active provider.Profile,
 	load func() ([]provider.OnboardingCandidate, error),
@@ -392,6 +397,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}, tickBusy(), m.pollShellTailCmd())
 		}
+		m.syncTrackedTopPane()
 		return m, m.pollShellTailCmd()
 	case takeControlFinishedMsg:
 		logging.Trace(
@@ -411,6 +417,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.handoffVisible = false
+		m.syncTrackedTopPane()
 		if m.activeExecution != nil && m.activeExecution.State == controller.CommandExecutionHandoffActive {
 			updated := *m.activeExecution
 			if m.handoffPriorState != "" {
@@ -450,6 +457,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.context != nil {
 			m.shellContext = *msg.context
 		}
+		m.syncTrackedTopPane()
 		return m, nil
 	case shellTailMsg:
 		if msg.err == nil {
@@ -463,6 +471,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case activeExecutionMsg:
 		m.syncActiveExecution(msg.execution)
+		m.syncTrackedTopPane()
 		return m, nil
 	case activeExecutionCheckInMsg:
 		m.checkInInFlight = false
@@ -1756,6 +1765,20 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 		m.lastFullscreenKeys = ""
 		m.lastFullscreenKeysAt = time.Time{}
 	}
+}
+
+func (m *Model) syncTrackedTopPane() {
+	if m.ctrl == nil {
+		return
+	}
+
+	topPaneID := strings.TrimSpace(m.ctrl.TopPaneID())
+	if topPaneID == "" {
+		return
+	}
+
+	m.workspace.TopPane.ID = topPaneID
+	m.takeControl.TopPaneID = topPaneID
 }
 
 func (m Model) formatShellError(err error) string {

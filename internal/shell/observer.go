@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"aiterm/internal/logging"
@@ -39,9 +40,19 @@ type escapedPaneClient interface {
 }
 
 type Observer struct {
-	client     paneClient
-	stateDir   string
-	promptHint PromptContext
+	client          paneClient
+	tmuxClient      *tmux.Client
+	stateDir        string
+	sessionName     string
+	startDir        string
+	promptHint      PromptContext
+	semanticMu      sync.Mutex
+	streamCollector *streamSemanticCollector
+	transitionMu    sync.Mutex
+	transitions     map[string]shellTransitionKind
+	paneAliasMu     sync.Mutex
+	paneAliases     map[string]string
+	sessionEnsurer  func(context.Context) error
 }
 
 var wrappedSentinelSuffixPattern = regexp.MustCompile(`^[a-z0-9]{1,16}:\$\?$`)
@@ -59,11 +70,26 @@ const (
 )
 
 func NewObserver(client *tmux.Client) *Observer {
-	return &Observer{client: client}
+	return &Observer{client: client, tmuxClient: client}
 }
 
 func (o *Observer) WithStateDir(stateDir string) *Observer {
 	o.stateDir = strings.TrimSpace(stateDir)
+	return o
+}
+
+func (o *Observer) WithSessionName(sessionName string) *Observer {
+	o.sessionName = strings.TrimSpace(sessionName)
+	return o
+}
+
+func (o *Observer) WithStartDir(startDir string) *Observer {
+	o.startDir = strings.TrimSpace(startDir)
+	return o
+}
+
+func (o *Observer) WithSessionEnsurer(sessionEnsurer func(context.Context) error) *Observer {
+	o.sessionEnsurer = sessionEnsurer
 	return o
 }
 
@@ -88,7 +114,11 @@ func (o *Observer) StartTrackedCommand(ctx context.Context, paneID string, comma
 		return monitor, nil
 	}
 
-	beforeCapture, err := o.client.CapturePane(ctx, paneID, -trackedCaptureLines)
+	if err := o.EnsureLocalShellIntegration(ctx, paneID); err != nil {
+		logging.TraceError("shell.semantic_bootstrap.prelaunch_error", err, "pane", paneID, "command", command)
+	}
+
+	beforeCapture, err := o.capturePane(ctx, paneID, -trackedCaptureLines)
 	if err != nil {
 		return nil, fmt.Errorf("capture pane before tracked command: %w", err)
 	}
@@ -99,7 +129,7 @@ func (o *Observer) StartTrackedCommand(ctx context.Context, paneID string, comma
 		return nil, err
 	}
 
-	if err := o.client.SendKeys(ctx, paneID, transportCommand, true); err != nil {
+	if err := o.sendKeys(ctx, paneID, transportCommand, true); err != nil {
 		cleanup()
 		return nil, fmt.Errorf("send tracked command: %w", err)
 	}
@@ -114,7 +144,7 @@ func (o *Observer) CaptureRecentOutput(ctx context.Context, paneID string, lines
 		lines = 200
 	}
 
-	captured, err := o.client.CapturePane(ctx, paneID, -lines)
+	captured, err := o.capturePane(ctx, paneID, -lines)
 	if err != nil {
 		return "", fmt.Errorf("capture recent output: %w", err)
 	}
@@ -123,15 +153,15 @@ func (o *Observer) CaptureRecentOutput(ctx context.Context, paneID string, lines
 }
 
 func (o *Observer) CaptureShellContext(ctx context.Context, paneID string) (PromptContext, error) {
-	captured, err := o.client.CapturePane(ctx, paneID, -80)
+	captured, err := o.capturePane(ctx, paneID, -80)
 	if err != nil {
 		return PromptContext{}, fmt.Errorf("capture shell context: %w", err)
 	}
 
 	context, ok := ParsePromptContextFromCapture(captured)
 	if ok {
-		if paneInfo, paneErr := o.client.PaneInfo(ctx, paneID); paneErr == nil {
-			if semanticState, _, semanticOK := o.captureSemanticShellState(ctx, paneID, paneInfo.TTY, strings.TrimSpace(paneInfo.CurrentCommand), context); semanticOK {
+		if paneInfo, paneErr := o.paneInfo(ctx, paneID); paneErr == nil {
+			if semanticState, _, semanticOK := o.captureSemanticShellState(ctx, paneID, paneInfo.TTY, "", strings.TrimSpace(paneInfo.CurrentCommand), context); semanticOK {
 				context = synthesizePromptContext(context, semanticState)
 			}
 		}
@@ -139,8 +169,8 @@ func (o *Observer) CaptureShellContext(ctx context.Context, paneID string) (Prom
 		return context, nil
 	}
 
-	if paneInfo, paneErr := o.client.PaneInfo(ctx, paneID); paneErr == nil {
-		if semanticState, _, semanticOK := o.captureSemanticShellState(ctx, paneID, paneInfo.TTY, strings.TrimSpace(paneInfo.CurrentCommand), o.promptHint); semanticOK {
+	if paneInfo, paneErr := o.paneInfo(ctx, paneID); paneErr == nil {
+		if semanticState, _, semanticOK := o.captureSemanticShellState(ctx, paneID, paneInfo.TTY, "", strings.TrimSpace(paneInfo.CurrentCommand), o.promptHint); semanticOK {
 			context = synthesizePromptContext(o.promptHint, semanticState)
 			o.promptHint = context
 			return context, nil
@@ -156,6 +186,14 @@ func (o *Observer) RunTrackedCommand(ctx context.Context, paneID string, command
 		return TrackedExecution{}, err
 	}
 	return monitor.Wait()
+}
+
+func (o *Observer) ResolveTrackedPane(ctx context.Context, paneID string) (string, error) {
+	info, err := o.paneInfo(ctx, paneID)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(info.ID), nil
 }
 
 func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedCommandMonitor, paneID string, command string, transportCommand string, timeout time.Duration, beforeCapture string, markers protocol.Markers, cleanup func()) {
@@ -176,7 +214,7 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 	paneTTY := ""
 	commandSentAt := time.Now()
 	for {
-		captured, err := o.client.CapturePane(ctx, paneID, -trackedCaptureLines)
+		captured, err := o.capturePane(ctx, paneID, -trackedCaptureLines)
 		if err != nil {
 			logging.TraceError(
 				"shell.tracked.capture_error",
@@ -206,7 +244,7 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 		}
 		if lastPaneInfoCheck.IsZero() || time.Since(lastPaneInfoCheck) >= 200*time.Millisecond {
 			lastPaneInfoCheck = time.Now()
-			if paneInfo, paneErr := o.client.PaneInfo(ctx, paneID); paneErr == nil {
+			if paneInfo, paneErr := o.paneInfo(ctx, paneID); paneErr == nil {
 				alternateOn = paneInfo.AlternateOn
 				currentPaneCommand = strings.TrimSpace(paneInfo.CurrentCommand)
 				paneTTY = strings.TrimSpace(paneInfo.TTY)
@@ -220,7 +258,7 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 		if hasParsedShellContext {
 			semanticBaseContext = parsedShellContext
 		}
-		semanticState, semanticSource, hasSemanticState := o.captureSemanticShellState(ctx, paneID, paneTTY, currentPaneCommand, semanticBaseContext)
+		semanticState, semanticSource, hasSemanticState := o.captureSemanticShellState(ctx, paneID, paneTTY, command, currentPaneCommand, semanticBaseContext)
 		if hasSemanticState {
 			monitor.updateSemanticMetadata(true, semanticSource)
 			monitor.updateShellContext(synthesizePromptContext(semanticBaseContext, semanticState))
@@ -492,7 +530,8 @@ func classifyActiveMonitorState(command string, tail string, alternateOn bool, c
 }
 
 func allowPromptReturnInference(command string, alternateOn bool, currentPaneCommand string) bool {
-	return !alternateOn && !IsInteractiveCommand(command) && paneCommandAllowsPromptInference(currentPaneCommand)
+	transition := detectShellTransition(command, currentPaneCommand, PromptContext{}, shellTransitionNone)
+	return !alternateOn && !IsInteractiveCommand(command) && (transition.Kind == shellTransitionNone || transition.Kind == shellTransitionRemote) && paneCommandAllowsPromptInference(currentPaneCommand)
 }
 
 func monitorStateFromError(err error) MonitorState {
@@ -647,14 +686,14 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID strin
 		effectiveTimeout = 45 * time.Second
 	}
 
-	beforeCapture, err := o.client.CapturePane(ctx, paneID, -200)
+	beforeCapture, err := o.capturePane(ctx, paneID, -200)
 	if err != nil {
 		logging.TraceError("shell.context_transition.capture_before_error", err, "pane", paneID, "command", command)
 		return TrackedExecution{}, fmt.Errorf("capture pane before context transition: %w", err)
 	}
 
 	baselineContext, _ := ParsePromptContextFromCapture(beforeCapture)
-	if err := o.client.SendKeys(ctx, paneID, command, true); err != nil {
+	if err := o.sendKeys(ctx, paneID, command, true); err != nil {
 		logging.TraceError("shell.context_transition.send_error", err, "pane", paneID, "command", command)
 		return TrackedExecution{}, fmt.Errorf("send context transition command: %w", err)
 	}
@@ -663,7 +702,7 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID strin
 	promptCapture := beforeCapture
 	promptContext := baselineContext
 	for {
-		captured, err := o.client.CapturePane(ctx, paneID, -200)
+		captured, err := o.capturePane(ctx, paneID, -200)
 		if err != nil {
 			logging.TraceError("shell.context_transition.capture_after_error", err, "pane", paneID, "command", command)
 			return TrackedExecution{}, fmt.Errorf("capture pane after context transition: %w", err)
@@ -703,6 +742,7 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID strin
 
 	probeResult, err := o.runProbeCommand(ctx, paneID, 10*time.Second)
 	delta := sanitizeCapturedBody(capturePaneDelta(beforeCapture, promptCapture))
+	delta = stripEchoedCommand(delta, command)
 	delta = stripTrailingPromptLine(delta, promptContext)
 	delta = strings.TrimSpace(delta)
 	if delta == "" {
@@ -730,6 +770,12 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID strin
 		logging.TraceError("shell.context_transition.probe_error", err, "pane", paneID, "command", command)
 	}
 
+	currentPaneCommand := ""
+	if paneInfo, paneErr := o.paneInfo(ctx, paneID); paneErr == nil {
+		currentPaneCommand = strings.TrimSpace(paneInfo.CurrentCommand)
+	}
+	o.finalizeTransitionState(ctx, paneID, command, currentPaneCommand, promptContext)
+
 	logging.Trace(
 		"shell.context_transition.complete",
 		"pane", paneID,
@@ -751,6 +797,20 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID strin
 	}, nil
 }
 
+func (o *Observer) finalizeTransitionState(ctx context.Context, paneID string, submittedCommand string, currentPaneCommand string, promptContext PromptContext) {
+	kind := settledShellTransition(submittedCommand, currentPaneCommand, promptContext, o.rememberedTransition(paneID))
+	if kind == shellTransitionLocal {
+		installed, err := o.ensureLocalShellIntegration(ctx, paneID)
+		if err != nil {
+			logging.TraceError("shell.semantic_bootstrap.error", err, "pane", paneID, "command", submittedCommand, "pane_command", currentPaneCommand)
+		}
+		if installed {
+			kind = shellTransitionNone
+		}
+	}
+	o.rememberTransition(paneID, kind)
+}
+
 func (o *Observer) runProbeCommand(ctx context.Context, paneID string, timeout time.Duration) (TrackedExecution, error) {
 	logging.Trace(
 		"shell.probe.start",
@@ -760,7 +820,7 @@ func (o *Observer) runProbeCommand(ctx context.Context, paneID string, timeout t
 	markers := protocol.NewMarkers()
 	wrapped := protocol.WrapCommand(shellContextProbeCommand, markers)
 
-	if err := o.client.SendKeys(ctx, paneID, wrapped, true); err != nil {
+	if err := o.sendKeys(ctx, paneID, wrapped, true); err != nil {
 		logging.TraceError("shell.probe.send_error", err, "pane", paneID, "command_id", markers.CommandID)
 		return TrackedExecution{}, fmt.Errorf("send shell context probe: %w", err)
 	}
@@ -768,7 +828,7 @@ func (o *Observer) runProbeCommand(ctx context.Context, paneID string, timeout t
 	deadline := time.Now().Add(timeout)
 	lastCapture := ""
 	for {
-		captured, err := o.client.CapturePane(ctx, paneID, -trackedCaptureLines)
+		captured, err := o.capturePane(ctx, paneID, -trackedCaptureLines)
 		if err != nil {
 			logging.TraceError("shell.probe.capture_error", err, "pane", paneID, "command_id", markers.CommandID)
 			return TrackedExecution{}, fmt.Errorf("capture pane for shell context probe: %w", err)
@@ -865,8 +925,8 @@ func sanitizeCapturedBody(body string) string {
 	return strings.TrimSpace(strings.Join(stripShuttlePlumbingLines(filtered), "\n"))
 }
 
-func (o *Observer) captureSemanticShellState(ctx context.Context, paneID string, paneTTY string, currentPaneCommand string, promptContext PromptContext) (semanticShellState, string, bool) {
-	if shouldIgnoreLocalSemanticState(currentPaneCommand, promptContext) {
+func (o *Observer) captureSemanticShellState(ctx context.Context, paneID string, paneTTY string, submittedCommand string, currentPaneCommand string, promptContext PromptContext) (semanticShellState, string, bool) {
+	if shouldIgnoreLocalSemanticState(submittedCommand, currentPaneCommand, promptContext, o.rememberedTransition(paneID)) {
 		return semanticShellState{}, semanticSourceNone, false
 	}
 	for _, collector := range o.semanticCollectors() {
@@ -878,16 +938,226 @@ func (o *Observer) captureSemanticShellState(ctx context.Context, paneID string,
 	return semanticShellState{}, semanticSourceNone, false
 }
 
-func shouldIgnoreLocalSemanticState(currentPaneCommand string, promptContext PromptContext) bool {
-	if promptContext.Remote {
-		return true
-	}
-	switch strings.TrimSpace(strings.ToLower(currentPaneCommand)) {
-	case "ssh", "mosh", "mosh-client", "slogin", "telnet":
+func shouldIgnoreLocalSemanticState(submittedCommand string, currentPaneCommand string, promptContext PromptContext, remembered shellTransitionKind) bool {
+	switch detectShellTransition(submittedCommand, currentPaneCommand, promptContext, remembered).Kind {
+	case shellTransitionRemote, shellTransitionExec, shellTransitionLocal, shellTransitionUnknown:
 		return true
 	default:
 		return false
 	}
+}
+
+func (o *Observer) rememberedTransition(paneID string) shellTransitionKind {
+	o.transitionMu.Lock()
+	defer o.transitionMu.Unlock()
+	if o.transitions == nil {
+		return shellTransitionNone
+	}
+	return o.transitions[paneID]
+}
+
+func (o *Observer) rememberTransition(paneID string, kind shellTransitionKind) {
+	o.transitionMu.Lock()
+	defer o.transitionMu.Unlock()
+	if o.transitions == nil {
+		o.transitions = make(map[string]shellTransitionKind)
+	}
+	if kind == shellTransitionNone {
+		delete(o.transitions, paneID)
+		return
+	}
+	o.transitions[paneID] = kind
+}
+
+type paneListClient interface {
+	ListPanes(ctx context.Context, target string) ([]tmux.Pane, error)
+}
+
+type pipePaneClient interface {
+	PipePaneOutput(ctx context.Context, target string, shellCommand string) error
+}
+
+func (o *Observer) capturePane(ctx context.Context, paneID string, startLine int) (string, error) {
+	target, err := o.resolvePaneID(ctx, paneID)
+	if err != nil {
+		return "", err
+	}
+	captured, err := o.client.CapturePane(ctx, target, startLine)
+	if err == nil || (!isPaneNotFoundError(err) && !shouldRecoverObserverSession(err)) {
+		return captured, err
+	}
+	target, err = o.recoverActionTarget(ctx, paneID, err)
+	if err != nil {
+		return "", err
+	}
+	return o.client.CapturePane(ctx, target, startLine)
+}
+
+func (o *Observer) sendKeys(ctx context.Context, paneID string, command string, pressEnter bool) error {
+	target, err := o.resolvePaneID(ctx, paneID)
+	if err != nil {
+		return err
+	}
+	err = o.client.SendKeys(ctx, target, command, pressEnter)
+	if err == nil || (!isPaneNotFoundError(err) && !shouldRecoverObserverSession(err)) {
+		return err
+	}
+	target, err = o.recoverActionTarget(ctx, paneID, err)
+	if err != nil {
+		return err
+	}
+	return o.client.SendKeys(ctx, target, command, pressEnter)
+}
+
+func (o *Observer) paneInfo(ctx context.Context, paneID string) (tmux.Pane, error) {
+	target, err := o.resolvePaneID(ctx, paneID)
+	if err != nil {
+		return tmux.Pane{}, err
+	}
+	info, err := o.client.PaneInfo(ctx, target)
+	if err == nil || (!isPaneNotFoundError(err) && !shouldRecoverObserverSession(err)) {
+		return info, err
+	}
+	target, err = o.recoverActionTarget(ctx, paneID, err)
+	if err != nil {
+		return tmux.Pane{}, err
+	}
+	return o.client.PaneInfo(ctx, target)
+}
+
+func (o *Observer) PipePaneOutput(ctx context.Context, paneID string, shellCommand string) error {
+	client, ok := o.client.(pipePaneClient)
+	if !ok {
+		return fmt.Errorf("pipe-pane output is not supported by the tmux client")
+	}
+
+	target, err := o.resolvePaneID(ctx, paneID)
+	if err != nil {
+		return err
+	}
+	err = client.PipePaneOutput(ctx, target, shellCommand)
+	if err == nil || (!isPaneNotFoundError(err) && !shouldRecoverObserverSession(err)) {
+		return err
+	}
+	target, err = o.recoverActionTarget(ctx, paneID, err)
+	if err != nil {
+		return err
+	}
+	return client.PipePaneOutput(ctx, target, shellCommand)
+}
+
+func (o *Observer) resolvePaneID(ctx context.Context, paneID string) (string, error) {
+	if alias := o.paneAlias(paneID); alias != "" {
+		if _, err := o.client.PaneInfo(ctx, alias); err == nil {
+			return alias, nil
+		}
+	}
+	return strings.TrimSpace(paneID), nil
+}
+
+func (o *Observer) recoverPaneID(ctx context.Context, paneID string) (string, error) {
+	replacement, ok := o.findReplacementPaneID(ctx)
+	if !ok {
+		return "", fmt.Errorf("pane %s no longer exists and no replacement pane was found", paneID)
+	}
+	o.setPaneAlias(paneID, replacement)
+	return replacement, nil
+}
+
+func (o *Observer) recoverActionTarget(ctx context.Context, paneID string, cause error) (string, error) {
+	if shouldRecoverObserverSession(cause) {
+		if err := o.ensureSessionAvailable(ctx); err != nil {
+			return "", err
+		}
+		if target := strings.TrimSpace(paneID); target != "" {
+			if _, err := o.client.PaneInfo(ctx, target); err == nil {
+				return target, nil
+			}
+		}
+	}
+	return o.recoverPaneID(ctx, paneID)
+}
+
+func (o *Observer) findReplacementPaneID(ctx context.Context) (string, bool) {
+	if strings.TrimSpace(o.sessionName) == "" {
+		return "", false
+	}
+	listClient, ok := o.client.(paneListClient)
+	if !ok {
+		return "", false
+	}
+	panes, err := listClient.ListPanes(ctx, o.sessionName)
+	if err != nil && shouldRecoverObserverSession(err) {
+		if ensureErr := o.ensureSessionAvailable(ctx); ensureErr == nil {
+			panes, err = listClient.ListPanes(ctx, o.sessionName)
+		}
+	}
+	if err != nil || len(panes) == 0 {
+		return "", false
+	}
+
+	best := panes[0]
+	for _, pane := range panes[1:] {
+		if pane.Top < best.Top || (pane.Top == best.Top && pane.Left < best.Left) {
+			best = pane
+		}
+	}
+	return strings.TrimSpace(best.ID), strings.TrimSpace(best.ID) != ""
+}
+
+func (o *Observer) ensureSessionAvailable(ctx context.Context) error {
+	if o.sessionEnsurer != nil {
+		return o.sessionEnsurer(ctx)
+	}
+	if o.tmuxClient == nil {
+		return fmt.Errorf("tmux client is not available for workspace recovery")
+	}
+	if strings.TrimSpace(o.sessionName) == "" {
+		return fmt.Errorf("session name is required for workspace recovery")
+	}
+	startDir := strings.TrimSpace(o.startDir)
+	if startDir == "" {
+		startDir = strings.TrimSpace(o.promptHint.Directory)
+	}
+	if startDir == "" {
+		startDir = "."
+	}
+	_, _, err := tmux.BootstrapWorkspace(ctx, o.tmuxClient, tmux.BootstrapOptions{
+		SessionName:       o.sessionName,
+		StartDir:          startDir,
+		BottomPanePercent: 30,
+	})
+	return err
+}
+
+func shouldRecoverObserverSession(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "no server running") || strings.Contains(text, "can't find session")
+}
+
+func (o *Observer) paneAlias(paneID string) string {
+	o.paneAliasMu.Lock()
+	defer o.paneAliasMu.Unlock()
+	if o.paneAliases == nil {
+		return ""
+	}
+	return o.paneAliases[paneID]
+}
+
+func (o *Observer) setPaneAlias(paneID string, replacement string) {
+	o.paneAliasMu.Lock()
+	defer o.paneAliasMu.Unlock()
+	if o.paneAliases == nil {
+		o.paneAliases = make(map[string]string)
+	}
+	o.paneAliases[paneID] = replacement
+}
+
+func isPaneNotFoundError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "can't find pane")
 }
 
 func stripShuttlePlumbingLines(lines []string) []string {
@@ -925,14 +1195,24 @@ func stripShuttlePlumbingLines(lines []string) []string {
 }
 
 func isShuttlePlumbingLine(line string) bool {
-	return strings.Contains(line, "SHUTTLE_SEMANTIC_SHELL_V1") ||
+	return strings.Contains(line, "__SHUTTLE_") ||
+		strings.Contains(line, "__shuttle_status") ||
+		strings.Contains(line, "eval \"$(printf") ||
+		strings.Contains(line, "SHUTTLE_SEMANTIC_SHELL_V1") ||
 		strings.Contains(line, "/shell-integration/") ||
 		strings.Contains(line, "/commands/")
 }
 
 func isShuttleContinuationLine(line string) bool {
-	return strings.HasPrefix(line, "|| ") ||
+	return strings.Contains(line, "__SHUTTLE_") ||
+		strings.Contains(line, "__shuttle_status") ||
+		strings.Contains(line, "eval \"$(printf") ||
+		strings.HasPrefix(line, "|| ") ||
 		strings.HasPrefix(line, "| . ") ||
+		strings.Contains(line, "$(whoami") ||
+		strings.Contains(line, "$(hostname") ||
+		strings.Contains(line, "$(uname") ||
+		strings.Contains(line, "\"$PWD\"") ||
 		strings.HasPrefix(line, ">/dev/null") ||
 		strings.HasSuffix(line, "2>&1") ||
 		strings.HasSuffix(line, "2>&1;")
@@ -1031,37 +1311,7 @@ func lineLooksLikePrompt(line string) bool {
 }
 
 func isContextTransitionCommand(command string) bool {
-	fields := strings.Fields(strings.TrimSpace(command))
-	if len(fields) == 0 {
-		return false
-	}
-
-	index := 0
-	for index < len(fields) && strings.Contains(fields[index], "=") && !strings.HasPrefix(fields[index], "-") {
-		index++
-	}
-	if index >= len(fields) {
-		return false
-	}
-
-	commandName := fields[index]
-	args := fields[index+1:]
-	switch commandName {
-	case "ssh", "slogin", "telnet", "mosh", "su", "exit", "logout":
-		return true
-	case "sudo":
-		return hasAnyArg(args, "-i", "-s", "su")
-	case "docker", "podman":
-		return len(args) > 0 && args[0] == "exec" && hasAnyArg(args[1:], "-it", "-ti", "-i", "-t")
-	case "kubectl":
-		return len(args) > 0 && args[0] == "exec" && hasAnyArg(args[1:], "-it", "-ti", "-i", "-t")
-	case "machinectl":
-		return len(args) > 0 && args[0] == "shell"
-	case "nsenter":
-		return true
-	default:
-		return false
-	}
+	return detectCommandTransition(command) != shellTransitionNone
 }
 
 func hasAnyArg(args []string, candidates ...string) bool {

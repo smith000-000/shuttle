@@ -411,6 +411,36 @@ func TestF2DoesNotCancelActiveShellExecution(t *testing.T) {
 	}
 }
 
+func TestTakeControlFinishedSyncsTrackedTopPane(t *testing.T) {
+	ctrl := &fakeController{topPaneID: "%7"}
+	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+
+	updated, _ := model.Update(takeControlFinishedMsg{})
+	next := updated.(Model)
+
+	if next.workspace.TopPane.ID != "%7" {
+		t.Fatalf("expected workspace top pane %%7, got %q", next.workspace.TopPane.ID)
+	}
+	if next.takeControl.TopPaneID != "%7" {
+		t.Fatalf("expected take-control top pane %%7, got %q", next.takeControl.TopPaneID)
+	}
+}
+
+func TestRefreshedShellContextSyncsTrackedTopPane(t *testing.T) {
+	ctrl := &fakeController{topPaneID: "%8"}
+	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+
+	updated, _ := model.Update(refreshedShellContextMsg{context: &shell.PromptContext{Directory: "/tmp"}})
+	next := updated.(Model)
+
+	if next.workspace.TopPane.ID != "%8" {
+		t.Fatalf("expected workspace top pane %%8, got %q", next.workspace.TopPane.ID)
+	}
+	if next.takeControl.TopPaneID != "%8" {
+		t.Fatalf("expected take-control top pane %%8, got %q", next.takeControl.TopPaneID)
+	}
+}
+
 func TestShellInterruptClearsControllerActiveExecution(t *testing.T) {
 	ctrl := &fakeController{
 		activeExecution: &controller.CommandExecution{
@@ -3241,6 +3271,7 @@ type fakeController struct {
 	activeExecution *controller.CommandExecution
 	abandonReason   string
 	peekShellTail   string
+	topPaneID       string
 }
 
 func (f *fakeController) SubmitAgentPrompt(_ context.Context, _ string) ([]controller.TranscriptEvent, error) {
@@ -3399,6 +3430,13 @@ func (f *fakeController) AbandonActiveExecution(reason string) *controller.Comma
 	execution := *f.activeExecution
 	f.activeExecution = nil
 	return &execution
+}
+
+func (f *fakeController) TopPaneID() string {
+	if strings.TrimSpace(f.topPaneID) != "" {
+		return f.topPaneID
+	}
+	return "%0"
 }
 
 type approvalDecisionCall struct {

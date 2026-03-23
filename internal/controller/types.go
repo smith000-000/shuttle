@@ -218,4 +218,5 @@ type Controller interface {
 	PeekShellTail(ctx context.Context, lines int) (string, error)
 	ActiveExecution() *CommandExecution
 	AbandonActiveExecution(reason string) *CommandExecution
+	TopPaneID() string
 }

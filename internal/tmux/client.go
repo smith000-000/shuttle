@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,6 +38,33 @@ type Pane struct {
 type Client struct {
 	binary     string
 	socketName string
+}
+
+func ResolveSocketTarget(configured string) string {
+	configured = strings.TrimSpace(configured)
+	if configured != "" {
+		return configured
+	}
+
+	tmuxEnv := strings.TrimSpace(os.Getenv("TMUX"))
+	if tmuxEnv == "" {
+		return ""
+	}
+	if comma := strings.Index(tmuxEnv, ","); comma >= 0 {
+		tmuxEnv = tmuxEnv[:comma]
+	}
+	return strings.TrimSpace(tmuxEnv)
+}
+
+func SocketFlagArgs(socketTarget string) []string {
+	socketTarget = strings.TrimSpace(socketTarget)
+	if socketTarget == "" {
+		return nil
+	}
+	if filepath.IsAbs(socketTarget) {
+		return []string{"-S", socketTarget}
+	}
+	return []string{"-L", socketTarget}
 }
 
 func NewClient(socketName string) (*Client, error) {
@@ -190,9 +219,7 @@ func (c *Client) SetGlobalOption(ctx context.Context, name string, value string)
 func (c *Client) run(ctx context.Context, args ...string) (string, error) {
 	startedAt := time.Now()
 	commandArgs := make([]string, 0, len(args)+2)
-	if c.socketName != "" {
-		commandArgs = append(commandArgs, "-L", c.socketName)
-	}
+	commandArgs = append(commandArgs, SocketFlagArgs(c.socketName)...)
 	commandArgs = append(commandArgs, args...)
 
 	logging.Trace(

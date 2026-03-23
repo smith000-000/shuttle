@@ -116,6 +116,24 @@ func TestLocalControllerSubmitShellCommand(t *testing.T) {
 	}
 }
 
+func TestLocalControllerSubmitShellCommandUsesResolvedTopPaneID(t *testing.T) {
+	runner := &stubRunner{
+		result:         shell.TrackedExecution{CommandID: "cmd-1", Command: "ls", ExitCode: 0},
+		resolvedPaneID: "%5",
+	}
+	controller := New(nil, runner, nil, SessionContext{TopPaneID: "%0"})
+
+	if _, err := controller.SubmitShellCommand(context.Background(), "ls"); err != nil {
+		t.Fatalf("SubmitShellCommand() error = %v", err)
+	}
+	if len(runner.paneIDs) != 1 || runner.paneIDs[0] != "%5" {
+		t.Fatalf("expected tracked command to use resolved pane %%5, got %#v", runner.paneIDs)
+	}
+	if controller.TopPaneID() != "%5" {
+		t.Fatalf("expected controller to retain resolved top pane %%5, got %q", controller.TopPaneID())
+	}
+}
+
 func TestLocalControllerSubmitShellCommandCanceledReturnsResultEvent(t *testing.T) {
 	controller := New(nil, &stubRunner{
 		result: shell.TrackedExecution{
@@ -895,13 +913,16 @@ func (s *stubAgent) Respond(_ context.Context, input AgentInput) (AgentResponse,
 }
 
 type stubRunner struct {
-	result   shell.TrackedExecution
-	err      error
-	commands []string
+	result         shell.TrackedExecution
+	err            error
+	commands       []string
+	paneIDs        []string
+	resolvedPaneID string
 }
 
-func (s *stubRunner) RunTrackedCommand(_ context.Context, _ string, command string, _ time.Duration) (shell.TrackedExecution, error) {
+func (s *stubRunner) RunTrackedCommand(_ context.Context, paneID string, command string, _ time.Duration) (shell.TrackedExecution, error) {
 	s.commands = append(s.commands, command)
+	s.paneIDs = append(s.paneIDs, paneID)
 	if s.result.Command == "" {
 		s.result.Command = command
 	}
@@ -909,6 +930,13 @@ func (s *stubRunner) RunTrackedCommand(_ context.Context, _ string, command stri
 		return s.result, s.err
 	}
 	return s.result, nil
+}
+
+func (s *stubRunner) ResolveTrackedPane(_ context.Context, paneID string) (string, error) {
+	if strings.TrimSpace(s.resolvedPaneID) != "" {
+		return s.resolvedPaneID, nil
+	}
+	return paneID, nil
 }
 
 type blockingRunner struct {
@@ -1194,10 +1222,11 @@ func TestLocalControllerContinueActivePlanUsesActivePlanContext(t *testing.T) {
 }
 
 type stubContextReader struct {
-	output   string
-	snapshot string
-	context  shell.PromptContext
-	err      error
+	output         string
+	snapshot       string
+	context        shell.PromptContext
+	err            error
+	resolvedPaneID string
 }
 
 func (s *stubContextReader) CaptureRecentOutput(context.Context, string, int) (string, error) {
@@ -1224,4 +1253,11 @@ func (s *stubContextReader) CaptureShellContext(context.Context, string) (shell.
 		Host:      "linuxdesktop",
 		Directory: "/home/jsmith/source/repos/aiterm",
 	}, nil
+}
+
+func (s *stubContextReader) ResolveTrackedPane(_ context.Context, paneID string) (string, error) {
+	if strings.TrimSpace(s.resolvedPaneID) != "" {
+		return s.resolvedPaneID, nil
+	}
+	return paneID, nil
 }
