@@ -18,13 +18,26 @@ What is working now:
 - `KEYS>` mode for sending raw terminal input
 - partial semantic shell integration for local shells
 - real OpenAI Responses API path with API-key auth
+- provider settings UI with:
+  - active provider switching
+  - active model switching
+  - provider detail editing
+  - `F8` save-and-activate from provider details
+- saved provider profiles and startup reloading
+- provider secret handling with:
+  - OS keyring persistence
+  - session-only fallback
+  - explicit plaintext local fallback with warning
+- safer runtime state and trace defaults
+- Codex CLI login-based provider support
 - Codex CLI model suggestions sourced from the OpenAI models catalog when available, with free-text entry still allowed
 
 What is still in progress:
-- provider onboarding and saved profiles
 - patch application and file creation flow
 - more execution-monitor confidence hardening
 - broader semantic shell integration (`OSC 133` / `OSC 7`) consumption and subshell/bootstrap support
+- provider onboarding polish and provider-auth validation
+- provider registry/plugin architecture instead of static first-class wiring
 - any richer shell bootstrap/helper mode beyond those standards
 - release packaging
 
