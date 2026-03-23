@@ -181,7 +181,10 @@ Codex CLI model selection:
 ## TUI Notes
 
 Core controls:
-- `Tab`: switch Agent/Shell mode
+- `F1`: open the in-app help view
+- `Ctrl+]`: switch Agent/Shell mode
+- `Tab`: cycle composer completions, or insert a literal tab when no completion is available
+- `Right Arrow`: accept the current ghost-text completion
 - `Enter`: submit composer input
 - `Ctrl+J`: insert newline in the composer
 - `Esc`: clear composer or interrupt active work, depending on state
