@@ -76,6 +76,31 @@ func TestLocalControllerSubmitAgentPromptCreatesActivePlan(t *testing.T) {
 	}
 }
 
+func TestLocalControllerSubmitAgentPromptIgnoresAnswerProposal(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "The selection is complete.",
+			Proposal: &Proposal{
+				Kind:        ProposalAnswer,
+				Description: "No further action is needed.",
+			},
+		},
+	}
+	controller := New(agent, nil, nil, SessionContext{TopPaneID: "%0"})
+
+	events, err := controller.SubmitAgentPrompt(context.Background(), "continue")
+	if err != nil {
+		t.Fatalf("SubmitAgentPrompt() error = %v", err)
+	}
+
+	if len(events) != 2 {
+		t.Fatalf("expected user and agent events only, got %#v", events)
+	}
+	if events[0].Kind != EventUserMessage || events[1].Kind != EventAgentMessage {
+		t.Fatalf("unexpected event sequence: %#v", events)
+	}
+}
+
 func TestLocalControllerSubmitShellCommand(t *testing.T) {
 	controller := New(nil, &stubRunner{
 		result: shell.TrackedExecution{
@@ -687,6 +712,17 @@ func TestLocalControllerMonitorUpdatesActiveExecutionTail(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
+	controller.mu.Lock()
+	if controller.task.PrimaryExecutionID == "" || len(controller.task.ExecutionRegistry) != 1 {
+		controller.mu.Unlock()
+		t.Fatalf("expected one active execution in registry, got primary=%q registry=%#v", controller.task.PrimaryExecutionID, controller.task.ExecutionRegistry)
+	}
+	registryExecution := controller.task.ExecutionRegistry[0]
+	controller.mu.Unlock()
+	if registryExecution.Command != "sleep 60" || registryExecution.TrackedShell.PaneID != "%0" || registryExecution.OwnershipMode != CommandOwnershipExclusive {
+		t.Fatalf("unexpected registry execution %#v", registryExecution)
+	}
+
 	monitor.finish(shell.TrackedExecution{
 		CommandID: "cmd-monitor",
 		Command:   "sleep 60",
@@ -698,6 +734,79 @@ func TestLocalControllerMonitorUpdatesActiveExecutionTail(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for monitored command to finish")
+	}
+}
+
+func TestLocalControllerRejectsSecondShellCommandWhileExecutionIsActive(t *testing.T) {
+	runner := &blockingRunner{
+		started: make(chan struct{}, 2),
+		release: make(chan struct{}),
+		result:  shell.TrackedExecution{CommandID: "cmd-1", Command: "sleep 30", ExitCode: 0},
+	}
+	controller := New(nil, runner, nil, SessionContext{TopPaneID: "%0"})
+
+	firstDone := make(chan []TranscriptEvent, 1)
+	go func() {
+		events, _ := controller.SubmitShellCommand(context.Background(), "sleep 30")
+		firstDone <- events
+	}()
+	select {
+	case <-runner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first command to start")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		controller.mu.Lock()
+		registry := append([]CommandExecution(nil), controller.task.ExecutionRegistry...)
+		primary := controller.task.PrimaryExecutionID
+		controller.mu.Unlock()
+		if len(registry) == 1 && primary != "" {
+			if active := controller.ActiveExecution(); active == nil || active.Command != "sleep 30" {
+				t.Fatalf("expected first command to remain the primary active execution, got %#v", active)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected one active execution in registry, got %#v", registry)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	events, err := controller.SubmitShellCommand(context.Background(), "sleep 60")
+	if err != nil {
+		t.Fatalf("SubmitShellCommand(second) error = %v", err)
+	}
+	if len(events) != 1 || events[0].Kind != EventError {
+		t.Fatalf("expected single error event for overlapping command, got %#v", events)
+	}
+	payload, ok := events[0].Payload.(TextPayload)
+	if !ok || !strings.Contains(payload.Text, `"sleep 30"`) {
+		t.Fatalf("expected overlapping-command error to mention the active command, got %#v", events[0].Payload)
+	}
+
+	select {
+	case <-runner.started:
+		t.Fatal("expected second command to be rejected before runner execution")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(runner.release)
+
+	select {
+	case events := <-firstDone:
+		if len(events) != 2 || events[1].Kind != EventCommandResult {
+			t.Fatalf("unexpected first command events %#v", events)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first command to finish")
+	}
+
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if len(controller.task.ExecutionRegistry) != 0 || controller.task.CurrentExecution != nil || controller.task.PrimaryExecutionID != "" {
+		t.Fatalf("expected execution registry to be empty after serial completion, got primary=%q current=%#v registry=%#v", controller.task.PrimaryExecutionID, controller.task.CurrentExecution, controller.task.ExecutionRegistry)
 	}
 }
 
@@ -1192,7 +1301,7 @@ func TestLocalControllerContinueAfterCommandUsesLastResultWithoutUserEvent(t *te
 		t.Fatalf("expected agent message, got %#v", events)
 	}
 
-	if agent.lastInput.Prompt != autoContinuePrompt {
+	if agent.lastInput.Prompt != buildAutoContinuePrompt(controller.task) {
 		t.Fatalf("expected auto-continue prompt, got %q", agent.lastInput.Prompt)
 	}
 
@@ -1201,10 +1310,51 @@ func TestLocalControllerContinueAfterCommandUsesLastResultWithoutUserEvent(t *te
 	}
 }
 
+func TestLocalControllerContinueAfterCommandPrefersSerialFollowUpPrompt(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "Step 1 is complete.",
+		},
+	}
+	controller := New(agent, &stubRunner{
+		result: shell.TrackedExecution{
+			CommandID: "cmd-1",
+			Command:   "find . -maxdepth 1 -name '*.md'",
+			ExitCode:  0,
+			Captured:  "a.md\nb.md",
+		},
+	}, &stubContextReader{
+		output: "a.md\nb.md",
+	}, SessionContext{TopPaneID: "%0"})
+	controller.task.PriorTranscript = append(controller.task.PriorTranscript, TranscriptEvent{
+		Kind:    EventUserMessage,
+		Payload: TextPayload{Text: "list all the markdown files in this directory. Then when you see the list, give me a tail of the last 20 lines of the shortest one. I want to do this in serial commands, don't lump them together."},
+	})
+
+	if _, err := controller.SubmitShellCommand(context.Background(), "find . -maxdepth 1 -name '*.md'"); err != nil {
+		t.Fatalf("SubmitShellCommand() error = %v", err)
+	}
+
+	if _, err := controller.ContinueAfterCommand(context.Background()); err != nil {
+		t.Fatalf("ContinueAfterCommand() error = %v", err)
+	}
+
+	if !strings.Contains(agent.lastInput.Prompt, "propose exactly one next command now") {
+		t.Fatalf("expected serial continuation prompt, got %q", agent.lastInput.Prompt)
+	}
+}
+
 func TestLocalControllerContinueAfterCommandAdvancesActivePlan(t *testing.T) {
 	agent := &stubAgent{
 		response: AgentResponse{
 			Message: "Continuing the plan.",
+			Plan: &Plan{
+				Summary: "Stale replacement plan.",
+				Steps: []string{
+					"Start over from the beginning.",
+					"Redo the same shell work.",
+				},
+			},
 		},
 	}
 	controller := New(agent, &stubRunner{
@@ -1239,7 +1389,7 @@ func TestLocalControllerContinueAfterCommandAdvancesActivePlan(t *testing.T) {
 	}
 
 	if len(events) != 2 {
-		t.Fatalf("expected plan progress event plus continuation, got %#v", events)
+		t.Fatalf("expected plan progress event plus continuation without replacement plan, got %#v", events)
 	}
 
 	planEvent, ok := events[0].Payload.(PlanPayload)
@@ -1249,12 +1399,21 @@ func TestLocalControllerContinueAfterCommandAdvancesActivePlan(t *testing.T) {
 	if planEvent.Steps[0].Status != PlanStepDone || planEvent.Steps[1].Status != PlanStepInProgress {
 		t.Fatalf("expected plan advancement, got %#v", planEvent.Steps)
 	}
+	if controller.task.ActivePlan == nil || controller.task.ActivePlan.Summary != "Inspect and repair the workspace." {
+		t.Fatalf("expected existing active plan to be preserved, got %#v", controller.task.ActivePlan)
+	}
 }
 
 func TestLocalControllerContinueActivePlanUsesActivePlanContext(t *testing.T) {
 	agent := &stubAgent{
 		response: AgentResponse{
 			Message: "Continuing the active plan.",
+			Plan: &Plan{
+				Summary: "A replacement plan that should be ignored.",
+				Steps: []string{
+					"Start over.",
+				},
+			},
 		},
 	}
 	controller := New(agent, nil, nil, SessionContext{TopPaneID: "%0"})
@@ -1279,6 +1438,90 @@ func TestLocalControllerContinueActivePlanUsesActivePlanContext(t *testing.T) {
 	}
 	if agent.lastInput.Prompt != continuePlanPrompt {
 		t.Fatalf("expected continue-plan prompt, got %q", agent.lastInput.Prompt)
+	}
+	if controller.task.ActivePlan == nil || controller.task.ActivePlan.Summary != "Inspect and repair the workspace." {
+		t.Fatalf("expected existing active plan to survive continuation, got %#v", controller.task.ActivePlan)
+	}
+}
+
+func TestLocalControllerContinueAfterCommandClearsPlanWhenAgentDeclaresCompletion(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "The active plan is complete: Markdown files were listed and each last line was printed.",
+		},
+	}
+	controller := New(agent, &stubRunner{
+		result: shell.TrackedExecution{
+			CommandID: "cmd-1",
+			Command:   "find . -type f -name '*.md'",
+			ExitCode:  0,
+			Captured:  "./a.md: tail",
+		},
+	}, &stubContextReader{
+		output: "./a.md: tail",
+	}, SessionContext{TopPaneID: "%0"})
+	controller.task.ActivePlan = &ActivePlan{
+		Summary: "List every Markdown file and display the last line of each.",
+		Steps: []PlanStep{
+			{Text: "Find all Markdown files.", Status: PlanStepDone},
+			{Text: "Read the last line of each file.", Status: PlanStepInProgress},
+			{Text: "Print results clearly.", Status: PlanStepPending},
+		},
+	}
+
+	if _, err := controller.SubmitShellCommand(context.Background(), "find . -type f -name '*.md'"); err != nil {
+		t.Fatalf("SubmitShellCommand() error = %v", err)
+	}
+
+	events, err := controller.ContinueAfterCommand(context.Background())
+	if err != nil {
+		t.Fatalf("ContinueAfterCommand() error = %v", err)
+	}
+
+	if len(events) != 3 {
+		t.Fatalf("expected progress event, completed-plan event, and agent message, got %#v", events)
+	}
+	var completedPlan PlanPayload
+	foundCompletedPlan := false
+	for _, event := range events {
+		payload, ok := event.Payload.(PlanPayload)
+		if !ok {
+			continue
+		}
+		completedPlan = payload
+		foundCompletedPlan = true
+	}
+	if !foundCompletedPlan {
+		t.Fatalf("expected completed plan payload in %#v", events)
+	}
+	for _, step := range completedPlan.Steps {
+		if step.Status != PlanStepDone {
+			t.Fatalf("expected completed plan event, got %#v", completedPlan)
+		}
+	}
+	if controller.task.ActivePlan != nil {
+		t.Fatalf("expected active plan to clear after completion, got %#v", controller.task.ActivePlan)
+	}
+}
+
+func TestBuildActivePlanStripsModelStatusPrefixesFromStepText(t *testing.T) {
+	plan := buildActivePlan(Plan{
+		Summary: "Serial shell workflow",
+		Steps: []string{
+			"[done] List all Markdown files.",
+			"[in_progress] Review the file list output.",
+			"pending: Select one Markdown file at random.",
+		},
+	})
+
+	if plan.Steps[0].Text != "List all Markdown files." {
+		t.Fatalf("expected normalized first step text, got %#v", plan.Steps[0])
+	}
+	if plan.Steps[1].Text != "Review the file list output." {
+		t.Fatalf("expected normalized second step text, got %#v", plan.Steps[1])
+	}
+	if plan.Steps[2].Text != "Select one Markdown file at random." {
+		t.Fatalf("expected normalized third step text, got %#v", plan.Steps[2])
 	}
 }
 

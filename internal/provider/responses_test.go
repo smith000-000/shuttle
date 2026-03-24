@@ -124,6 +124,22 @@ func TestResponsesAgentRespondMapsStructuredOutput(t *testing.T) {
 	}
 }
 
+func TestStructuredResponsesRequestIncludesSerialContinuationGuidance(t *testing.T) {
+	request, err := newStructuredResponsesRequest("gpt-5-test", controller.AgentInput{
+		Prompt: "continue",
+	})
+	if err != nil {
+		t.Fatalf("newStructuredResponsesRequest() error = %v", err)
+	}
+	if len(request.Input) < 1 || len(request.Input[0].Content) < 1 {
+		t.Fatalf("expected system prompt content, got %#v", request.Input)
+	}
+	systemPrompt := request.Input[0].Content[0].Text
+	if !strings.Contains(systemPrompt, "propose exactly one next command now") {
+		t.Fatalf("expected serial continuation guidance in system prompt, got %q", systemPrompt)
+	}
+}
+
 func TestResponsesAgentCustomBaseURLSmoke(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/custom/v1/responses" {

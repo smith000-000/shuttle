@@ -1605,6 +1605,41 @@ func TestPlanEventUpdatesActivePlanCard(t *testing.T) {
 	if !strings.Contains(view, "Plan 2/3") {
 		t.Fatalf("expected progress summary, got %q", view)
 	}
+	if !strings.Contains(view, "Informational only. Ctrl+G continues the plan.") {
+		t.Fatalf("expected informational plan footer, got %q", view)
+	}
+	if strings.Contains(view, "Y continue") {
+		t.Fatalf("did not expect approval-style Y affordance in plan card, got %q", view)
+	}
+}
+
+func TestCompletedPlanEventClearsActivePlanCard(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.activePlan = &controller.ActivePlan{
+		Summary: "Inspect and repair the workspace.",
+		Steps: []controller.PlanStep{
+			{Text: "Review the current files.", Status: controller.PlanStepInProgress},
+		},
+	}
+
+	updated, _ := model.Update(controllerEventsMsg{
+		events: []controller.TranscriptEvent{
+			{
+				Kind: controller.EventPlan,
+				Payload: controller.PlanPayload{
+					Summary: "Inspect and repair the workspace.",
+					Steps: []controller.PlanStep{
+						{Text: "Review the current files.", Status: controller.PlanStepDone},
+					},
+				},
+			},
+		},
+	})
+	next := updated.(Model)
+
+	if next.activePlan != nil {
+		t.Fatalf("expected completed plan to clear, got %#v", next.activePlan)
+	}
 }
 
 func TestProposalEntryIsCollapsedInTranscriptButPreservedInDetail(t *testing.T) {
@@ -1782,6 +1817,41 @@ func TestAgentModeKeysProposalBecomesPendingProposal(t *testing.T) {
 	}
 	if next.pendingProposal.Keys != "\n" {
 		t.Fatalf("expected enter key payload, got %#v", next.pendingProposal.Keys)
+	}
+}
+
+func TestAgentModeAnswerProposalDoesNotBecomePendingProposal(t *testing.T) {
+	ctrl := &fakeController{
+		agentEvents: []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventUserMessage,
+				Payload: controller.TextPayload{Text: "continue"},
+			},
+			{
+				Kind:    controller.EventAgentMessage,
+				Payload: controller.TextPayload{Text: "Selection is complete."},
+			},
+			{
+				Kind: controller.EventProposal,
+				Payload: controller.ProposalPayload{
+					Kind:        controller.ProposalAnswer,
+					Description: "No further action is needed.",
+				},
+			},
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.mode = AgentMode
+	model.input = "continue"
+
+	updated, cmd := model.submit()
+	next := updated.(Model)
+	msg := controllerEventsFromCmd(t, cmd)
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+
+	if next.pendingProposal != nil {
+		t.Fatalf("expected answer proposal to stay out of pending action state, got %#v", next.pendingProposal)
 	}
 }
 

@@ -33,13 +33,15 @@ type SessionContext struct {
 }
 
 type TaskContext struct {
-	TaskID            string
-	PriorTranscript   []TranscriptEvent
-	PendingApproval   *ApprovalRequest
-	LastCommandResult *CommandResultSummary
-	ActivePlan        *ActivePlan
-	CurrentExecution  *CommandExecution
-	RecoverySnapshot  string
+	TaskID             string
+	PriorTranscript    []TranscriptEvent
+	PendingApproval    *ApprovalRequest
+	LastCommandResult  *CommandResultSummary
+	ActivePlan         *ActivePlan
+	PrimaryExecutionID string
+	ExecutionRegistry  []CommandExecution
+	CurrentExecution   *CommandExecution
+	RecoverySnapshot   string
 }
 
 type AgentResponse struct {
@@ -177,10 +179,20 @@ const (
 	CommandExecutionLost                  CommandExecutionState = "lost"
 )
 
+type CommandOwnershipMode string
+
+const (
+	CommandOwnershipExclusive      CommandOwnershipMode = "exclusive"
+	CommandOwnershipSharedObserver CommandOwnershipMode = "shared_observer"
+	CommandOwnershipHandoff        CommandOwnershipMode = "handoff"
+)
+
 type CommandExecution struct {
 	ID                 string
 	Command            string
 	Origin             CommandOrigin
+	TrackedShell       TrackedShellTarget
+	OwnershipMode      CommandOwnershipMode
 	State              CommandExecutionState
 	StartedAt          time.Time
 	CompletedAt        *time.Time

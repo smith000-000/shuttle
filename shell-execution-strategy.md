@@ -61,8 +61,14 @@ The real problem is not just timeout values.
 
 The real problem is that Shuttle currently models shell execution as a blocking function call, when it should model it as a job with state transitions.
 
+That diagnosis still holds after the recent hardening work:
+- the shell substrate is much stronger now
+- serial agentic looping is workable
+- but execution state is still mutated in too many places without one explicit transition table
+- the next hardening slice should fix that before any richer overlap or multi-card UI work
+
 ## Current Branch Status
-On `command-execution-redesign`, Shuttle now has a usable first pass of the redesigned execution stack:
+On `semantic-shell-bootstrap`, Shuttle now has a usable first pass of the redesigned execution stack:
 - first-class monitored executions for tracked shell commands
 - local managed transport using sourced temp scripts instead of giant inline wrappers where possible
 - active execution states including `awaiting_input`, `interactive_fullscreen`, `background_monitoring`, `canceled`, and `lost`
@@ -70,6 +76,9 @@ On `command-execution-redesign`, Shuttle now has a usable first pass of the rede
 - raw `KEYS>` input for active prompts and fullscreen apps
 - agent-side recovery guidance informed by a larger recovery snapshot
 - first-class agent `keys` proposals so the model can ask Shuttle to send small raw key sequences instead of only narrating them
+- serial execution ownership enforcement plus an internal execution registry so future multi-card work has a stable base without allowing overlap yet
+- serial auto-continue hardening so ordered one-command-at-a-time workflows can keep progressing without an extra user "go"
+- plan cards demoted to informational state instead of approval-like control flow, with continuation turns now suppressing stale replacement plans and emitting explicit plan-complete state when needed
 
 What is still not done:
 - monitor-side confidence is still too heuristic in some quiet or ambiguous takeovers
@@ -77,6 +86,7 @@ What is still not done:
 - noisy transport/script echoes still need occasional cleanup in tails and recovery snapshots
 - the agent still needs tighter guardrails around when it should propose raw keys versus when it should simply tell the user to take control
 - semantic shell integration is only partially implemented; local shells now have a first-pass semantic shim, but Shuttle still needs broader raw-marker consumption and subshell/bootstrap support
+- execution lifecycle transitions are still too ad hoc in the controller; state and ownership rules need to become first-class before parallel execution is revisited
 
 ## Recommended Direction
 

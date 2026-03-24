@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,7 +14,8 @@ import (
 	"aiterm/internal/shell"
 )
 
-const autoContinuePrompt = "The previously approved or proposed command has completed. First summarize the result briefly. If there is an active plan, continue it from the current step. If there is no active plan, do not propose another command unless the user's request clearly still requires more shell work. For one-off commands, demos, or tests, prefer stopping after reporting the outcome. If another action is truly needed, propose it. If risky, request approval."
+const autoContinuePrompt = "The previously approved or proposed command has completed. First summarize the result briefly. If there is an active plan, continue it from the current step. If there is no active plan, only stop after reporting the outcome when the user's request is already satisfied. If the user's request clearly still requires more shell work, propose the next action. If risky, request approval."
+const autoContinuePromptSerialSuffix = "The recent transcript indicates the user asked for serial or ordered shell work. If the completed command only unlocked the next step, propose exactly one next command now instead of waiting for another nudge. Do not lump multiple shell actions together, and do not wait for the user to say 'go' unless they explicitly asked to approve each step separately."
 const continuePlanPrompt = "Continue the active plan from the current step. Propose the next safe action if one is needed. If the next action is risky, request approval. If the plan is complete, answer briefly."
 const resumeAfterTakeControlPrompt = "The user temporarily took control of the shell to handle an interactive step such as a password prompt, remote login, or fullscreen terminal app. Reassess the latest shell state and continue the task. If another action is needed, propose it. If risky, request approval. If the task is complete, answer briefly."
 const activeExecutionCheckInPrompt = "An agent-started shell command is still active. Use the execution state and latest shell output to decide whether it is running normally or merely quiet. If there is no new output, say that no new shell output has appeared yet. Do not claim the command has completed or that the shell returned to a prompt unless the context shows that. Do not propose a new command, plan, or approval unless the shell is clearly blocked and needs user intervention; if so, say that the user should press F2 to take control."
@@ -69,13 +71,15 @@ type LocalController struct {
 	reader  ShellContextReader
 	session SessionContext
 
-	mu      sync.Mutex
-	counter atomic.Uint64
-	task    TaskContext
+	mu               sync.Mutex
+	counter          atomic.Uint64
+	task             TaskContext
+	executions       map[string]*CommandExecution
+	primaryExecution string
 }
 
 func New(agent Agent, runner ShellRunner, reader ShellContextReader, session SessionContext) *LocalController {
-	return &LocalController{
+	controller := &LocalController{
 		agent:   agent,
 		runner:  runner,
 		reader:  reader,
@@ -84,6 +88,8 @@ func New(agent Agent, runner ShellRunner, reader ShellContextReader, session Ses
 			TaskID: "task-1",
 		},
 	}
+	controller.syncTaskExecutionViewsLocked()
+	return controller
 }
 
 func normalizeSessionContext(session SessionContext) SessionContext {
@@ -161,8 +167,9 @@ func (c *LocalController) ContinueAfterCommand(ctx context.Context) ([]Transcrip
 	}
 	c.mu.Unlock()
 
+	prompt := buildAutoContinuePrompt(c.task)
 	logging.Trace("controller.continue_after_command")
-	events, err := c.submitAgentTurn(ctx, "", autoContinuePrompt, nil, false)
+	events, err := c.submitAgentTurn(ctx, "", prompt, nil, false)
 	if planEvent != nil {
 		events = append([]TranscriptEvent{*planEvent}, events...)
 	}
@@ -195,7 +202,8 @@ func (c *LocalController) ResumeAfterTakeControl(ctx context.Context) ([]Transcr
 	}
 
 	c.mu.Lock()
-	agentOwned := c.task.CurrentExecution != nil && isAgentOwnedExecution(c.task.CurrentExecution.Origin)
+	primary := c.primaryExecutionLocked()
+	agentOwned := primary != nil && isAgentOwnedExecution(primary.Origin)
 	c.mu.Unlock()
 	if !agentOwned {
 		return nil, nil
@@ -210,11 +218,12 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 	}
 
 	c.mu.Lock()
-	if c.task.CurrentExecution == nil {
+	executionPtr := c.primaryExecutionLocked()
+	if executionPtr == nil {
 		c.mu.Unlock()
 		return nil, false, false, nil
 	}
-	execution := *c.task.CurrentExecution
+	execution := *executionPtr
 	c.mu.Unlock()
 
 	promptContext, err := c.reader.CaptureShellContext(ctx, trackedShell.PaneID)
@@ -258,7 +267,8 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.task.CurrentExecution == nil || c.task.CurrentExecution.ID != execution.ID {
+	current := c.executionLocked(execution.ID)
+	if current == nil {
 		return nil, false, false, nil
 	}
 	c.session.CurrentShell = &contextCopy
@@ -267,7 +277,7 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 	}
 	c.session.RecentShellOutput = recentOutput
 	c.task.LastCommandResult = &summary
-	c.task.CurrentExecution = nil
+	c.removeExecutionLocked(execution.ID)
 	resultEvent := c.newEvent(EventCommandResult, summary)
 	c.appendEvents(resultEvent)
 	logging.Trace(
@@ -339,7 +349,7 @@ func (c *LocalController) attachForegroundExecution(ctx context.Context) ([]Tran
 	}
 
 	c.mu.Lock()
-	if c.task.CurrentExecution != nil {
+	if c.primaryExecutionLocked() != nil {
 		c.mu.Unlock()
 		return nil, false, nil
 	}
@@ -358,12 +368,13 @@ func (c *LocalController) attachForegroundExecution(ctx context.Context) ([]Tran
 
 	c.mu.Lock()
 	execution := c.newExecutionLocked(command, CommandOriginUserShell)
+	execution.OwnershipMode = CommandOwnershipSharedObserver
 	if !snapshot.StartedAt.IsZero() {
 		execution.StartedAt = snapshot.StartedAt
 	}
-	c.task.CurrentExecution = &execution
-	c.applyMonitorSnapshot(execution.ID, snapshot)
-	current := *c.task.CurrentExecution
+	registered := c.registerExecutionLocked(execution)
+	c.applyMonitorSnapshot(registered.ID, snapshot)
+	current := *c.executionLocked(registered.ID)
 	startEvent := c.newEvent(EventCommandStart, CommandStartPayload{
 		Command:   current.Command,
 		Execution: current,
@@ -390,19 +401,20 @@ func (c *LocalController) CheckActiveExecution(ctx context.Context) ([]Transcrip
 	}
 
 	c.mu.Lock()
-	if c.task.CurrentExecution == nil || !isAgentOwnedExecution(c.task.CurrentExecution.Origin) {
+	execution := c.primaryExecutionLocked()
+	if execution == nil || !isAgentOwnedExecution(execution.Origin) {
 		c.mu.Unlock()
 		return nil, nil
 	}
 
-	if c.task.CurrentExecution.State != CommandExecutionAwaitingInput &&
-		c.task.CurrentExecution.State != CommandExecutionInteractiveFullscreen &&
-		c.task.CurrentExecution.State != CommandExecutionLost {
-		c.task.CurrentExecution.State = CommandExecutionBackgroundMonitor
+	if execution.State != CommandExecutionAwaitingInput &&
+		execution.State != CommandExecutionInteractiveFullscreen &&
+		execution.State != CommandExecutionLost {
+		execution.State = CommandExecutionBackgroundMonitor
 	}
 	session := c.session
 	task := c.task
-	recentOutput := strings.TrimSpace(c.task.CurrentExecution.LatestOutputTail)
+	recentOutput := strings.TrimSpace(execution.LatestOutputTail)
 	c.mu.Unlock()
 	trackedShell := c.syncTrackedShellTarget(ctx)
 	session.TrackedShell = trackedShell
@@ -422,20 +434,22 @@ func (c *LocalController) CheckActiveExecution(ctx context.Context) ([]Transcrip
 	recoverySnapshot := c.captureRecoverySnapshot(ctx, trackedShell.PaneID, task.CurrentExecution)
 
 	c.mu.Lock()
-	if c.task.CurrentExecution == nil || !isAgentOwnedExecution(c.task.CurrentExecution.Origin) {
+	execution = c.primaryExecutionLocked()
+	if execution == nil || !isAgentOwnedExecution(execution.Origin) {
 		c.mu.Unlock()
 		return nil, nil
 	}
-	if c.task.CurrentExecution.State != CommandExecutionAwaitingInput &&
-		c.task.CurrentExecution.State != CommandExecutionInteractiveFullscreen &&
-		c.task.CurrentExecution.State != CommandExecutionLost {
-		c.task.CurrentExecution.State = CommandExecutionBackgroundMonitor
+	if execution.State != CommandExecutionAwaitingInput &&
+		execution.State != CommandExecutionInteractiveFullscreen &&
+		execution.State != CommandExecutionLost {
+		execution.State = CommandExecutionBackgroundMonitor
 	}
 	if strings.TrimSpace(recentOutput) != "" {
-		c.task.CurrentExecution.LatestOutputTail = recentOutput
+		execution.LatestOutputTail = recentOutput
 		c.session.RecentShellOutput = recentOutput
 	}
 	c.task.RecoverySnapshot = recoverySnapshot
+	c.syncTaskExecutionViewsLocked()
 	session = c.session
 	task = c.task
 	c.mu.Unlock()
@@ -456,7 +470,7 @@ func (c *LocalController) CheckActiveExecution(ctx context.Context) ([]Transcrip
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.task.CurrentExecution == nil {
+	if c.primaryExecutionLocked() == nil {
 		return nil, nil
 	}
 
@@ -568,6 +582,10 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 		return append(append([]TranscriptEvent(nil), events...), errEvent), nil
 	}
 	response = normalizeAgentResponse(response)
+	if shouldSuppressReturnedPlan(response.Plan, emitUserMessage, userPrompt, c.task.ActivePlan) {
+		response.Plan = nil
+	}
+	completedPlan := completionPlanFromContinuation(response, emitUserMessage, c.task.ActivePlan)
 
 	newEvents := append([]TranscriptEvent(nil), events...)
 
@@ -578,6 +596,11 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 	if response.ModelInfo != nil {
 		modelInfo := *response.ModelInfo
 		newEvents = append(newEvents, c.newEvent(EventModelInfo, modelInfo))
+	}
+
+	if completedPlan != nil {
+		c.task.ActivePlan = nil
+		newEvents = append(newEvents, c.newEvent(EventPlan, *completedPlan))
 	}
 
 	if response.Plan != nil {
@@ -617,7 +640,7 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 func buildActivePlan(plan Plan) ActivePlan {
 	steps := make([]PlanStep, 0, len(plan.Steps))
 	for _, step := range plan.Steps {
-		step = strings.TrimSpace(step)
+		step = normalizePlanStepText(step)
 		if step == "" {
 			continue
 		}
@@ -639,6 +662,13 @@ func buildActivePlan(plan Plan) ActivePlan {
 }
 
 func normalizeAgentResponse(response AgentResponse) AgentResponse {
+	if response.Proposal != nil && !isActionableProposal(*response.Proposal) {
+		if strings.TrimSpace(response.Message) == "" && strings.TrimSpace(response.Proposal.Description) != "" {
+			response.Message = strings.TrimSpace(response.Proposal.Description)
+		}
+		response.Proposal = nil
+	}
+
 	if response.Approval == nil || response.Proposal == nil {
 		return response
 	}
@@ -655,6 +685,86 @@ func normalizeAgentResponse(response AgentResponse) AgentResponse {
 
 	response.Approval = &approval
 	return response
+}
+
+func isActionableProposal(proposal Proposal) bool {
+	return strings.TrimSpace(proposal.Command) != "" ||
+		proposal.Keys != "" ||
+		strings.TrimSpace(proposal.Patch) != ""
+}
+
+func completionPlanFromContinuation(response AgentResponse, emitUserMessage bool, activePlan *ActivePlan) *ActivePlan {
+	if emitUserMessage || activePlan == nil {
+		return nil
+	}
+	if response.Plan != nil || response.Proposal != nil || response.Approval != nil {
+		return nil
+	}
+	if !messageIndicatesPlanCompletion(response.Message) {
+		return nil
+	}
+
+	completed := completePlan(*activePlan)
+	return &completed
+}
+
+func shouldSuppressReturnedPlan(plan *Plan, emitUserMessage bool, userPrompt string, existing *ActivePlan) bool {
+	if plan == nil {
+		return false
+	}
+	if !emitUserMessage {
+		return true
+	}
+	if existing != nil && !isExplicitPlanRequest(userPrompt) {
+		return true
+	}
+	return false
+}
+
+func messageIndicatesPlanCompletion(message string) bool {
+	message = strings.ToLower(strings.TrimSpace(message))
+	if message == "" {
+		return false
+	}
+	return containsAnySubstring(
+		message,
+		"plan is complete",
+		"active plan is complete",
+		"workflow is complete",
+		"workflow completed",
+		"workflow fully completed",
+		"no further action is needed",
+		"no further shell work is needed",
+		"task is complete",
+	)
+}
+
+func completePlan(plan ActivePlan) ActivePlan {
+	completed := ActivePlan{
+		Summary: plan.Summary,
+		Steps:   append([]PlanStep(nil), plan.Steps...),
+	}
+	for index := range completed.Steps {
+		completed.Steps[index].Status = PlanStepDone
+	}
+	return completed
+}
+
+func isExplicitPlanRequest(prompt string) bool {
+	prompt = strings.ToLower(strings.TrimSpace(prompt))
+	if prompt == "" {
+		return false
+	}
+	return containsAnySubstring(
+		prompt,
+		"plan",
+		"next step",
+		"next steps",
+		"strategy",
+		"approach",
+		"checklist",
+		"troubleshoot",
+	)
 }
 
 func (c *LocalController) advanceActivePlanLocked() *TranscriptEvent {
@@ -698,7 +808,11 @@ func (c *LocalController) advanceActivePlanLocked() *TranscriptEvent {
 		}
 	}
 
-	c.task.ActivePlan = &plan
+	if isPlanComplete(plan) {
+		c.task.ActivePlan = nil
+	} else {
+		c.task.ActivePlan = &plan
+	}
 	event := c.newEvent(EventPlan, plan)
 	return &event
 }
@@ -709,12 +823,33 @@ func (c *LocalController) SubmitShellCommand(ctx context.Context, command string
 }
 
 func (c *LocalController) submitShellCommand(ctx context.Context, command string, origin CommandOrigin) ([]TranscriptEvent, error) {
+	trackedShell := c.syncTrackedShellTarget(ctx)
+
 	c.mu.Lock()
+	if active := c.primaryExecutionLocked(); blocksSerialShellSubmission(active) {
+		message := "another shell execution is already active; wait for it to finish or press F2 to take control"
+		if active != nil && strings.TrimSpace(active.Command) != "" {
+			message = fmt.Sprintf("shell command %q is still active; wait for it to finish or press F2 to take control", active.Command)
+		}
+		errEvent := c.newEvent(EventError, TextPayload{Text: message})
+		c.appendEvents(errEvent)
+		c.mu.Unlock()
+		logging.Trace(
+			"controller.shell_command.rejected_active_execution",
+			"command", command,
+			"origin", origin,
+			"active_execution_id", active.ID,
+			"active_command", active.Command,
+			"active_state", active.State,
+		)
+		return []TranscriptEvent{errEvent}, nil
+	}
 	execution := c.newExecutionLocked(command, origin)
-	c.task.CurrentExecution = &execution
+	execution.TrackedShell = trackedShell
+	registered := c.registerExecutionLocked(execution)
 	startEvent := c.newEvent(EventCommandStart, CommandStartPayload{
 		Command:   command,
-		Execution: execution,
+		Execution: *registered,
 	})
 	c.appendEvents(startEvent)
 	c.mu.Unlock()
@@ -733,7 +868,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 		failedExecution := execution
 		failedExecution.State = CommandExecutionFailed
 		failedExecution.Error = "shell command runner is not configured"
-		c.task.CurrentExecution = nil
+		c.removeExecutionLocked(execution.ID)
 		errEvent := c.newEvent(EventError, TextPayload{Text: "shell command runner is not configured"})
 		c.appendEvents(errEvent)
 		logging.Trace("controller.shell_command.runner_missing", "execution_id", execution.ID, "command", command)
@@ -744,7 +879,8 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 
 	c.mu.Lock()
 
-	if c.task.CurrentExecution == nil || c.task.CurrentExecution.ID != execution.ID {
+	current := c.executionLocked(execution.ID)
+	if current == nil {
 		c.mu.Unlock()
 		logging.Trace(
 			"controller.shell_command.stale_completion",
@@ -758,13 +894,13 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			c.task.CurrentExecution = nil
+			c.removeExecutionLocked(execution.ID)
 			c.mu.Unlock()
 			logging.Trace("controller.shell_command.canceled", "execution_id", execution.ID, "command", command, "origin", origin)
 			return []TranscriptEvent{startEvent}, err
 		}
 		if result.State == shell.MonitorStateLost {
-			lostExecution := execution
+			lostExecution := *current
 			lostExecution.State = CommandExecutionLost
 			lostExecution.Error = err.Error()
 			if strings.TrimSpace(result.Captured) != "" {
@@ -802,7 +938,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 			}
 			c.session.RecentShellOutput = lostExecution.LatestOutputTail
 			c.task.LastCommandResult = &summary
-			c.task.CurrentExecution = nil
+			c.removeExecutionLocked(execution.ID)
 			resultEvent := c.newEvent(EventCommandResult, summary)
 			c.appendEvents(resultEvent)
 			c.mu.Unlock()
@@ -831,13 +967,13 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 			}
 			return events, nil
 		}
-		failedExecution := execution
+		failedExecution := *current
 		failedExecution.State = CommandExecutionFailed
 		failedExecution.Error = err.Error()
 		failedExecution.LatestOutputTail = c.bestEffortRecentOutputLocked()
 		completedAt := time.Now()
 		failedExecution.CompletedAt = &completedAt
-		c.task.CurrentExecution = nil
+		c.removeExecutionLocked(execution.ID)
 		errEvent := c.newEvent(EventError, TextPayload{Text: err.Error()})
 		c.appendEvents(errEvent)
 		c.mu.Unlock()
@@ -853,7 +989,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 	}
 
 	if result.State == shell.MonitorStateCanceled {
-		canceledExecution := execution
+		canceledExecution := *current
 		canceledExecution.State = CommandExecutionCanceled
 		canceledExecution.LatestOutputTail = result.Captured
 		completedAt := time.Now()
@@ -885,7 +1021,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 		}
 		c.session.RecentShellOutput = result.Captured
 		c.task.LastCommandResult = &summary
-		c.task.CurrentExecution = nil
+		c.removeExecutionLocked(execution.ID)
 		resultEvent := c.newEvent(EventCommandResult, summary)
 		c.appendEvents(resultEvent)
 		c.mu.Unlock()
@@ -901,7 +1037,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 		return []TranscriptEvent{startEvent, resultEvent}, nil
 	}
 
-	completedExecution := execution
+	completedExecution := *current
 	completedExecution.State = CommandExecutionCompleted
 	completedExecution.LatestOutputTail = result.Captured
 	completedAt := time.Now()
@@ -933,7 +1069,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 	}
 	c.session.RecentShellOutput = result.Captured
 	c.task.LastCommandResult = &summary
-	c.task.CurrentExecution = nil
+	c.removeExecutionLocked(execution.ID)
 	resultEvent := c.newEvent(EventCommandResult, summary)
 	c.appendEvents(resultEvent)
 	c.mu.Unlock()
@@ -972,6 +1108,8 @@ func (c *LocalController) submitLostExecutionRecovery(ctx context.Context, execu
 		session.RecentShellOutput = execution.LatestOutputTail
 	}
 	task.CurrentExecution = &execution
+	task.PrimaryExecutionID = execution.ID
+	task.ExecutionRegistry = []CommandExecution{execution}
 	task.RecoverySnapshot = c.captureRecoverySnapshot(ctx, trackedShell.PaneID, &execution)
 
 	input := AgentInput{
@@ -1066,11 +1204,11 @@ func (c *LocalController) awaitAttachedMonitor(executionID string, monitor shell
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.task.CurrentExecution == nil || c.task.CurrentExecution.ID != executionID {
+	execution := c.executionLocked(executionID)
+	if execution == nil {
 		return
 	}
 
-	execution := c.task.CurrentExecution
 	completedAt := time.Now()
 	execution.CompletedAt = &completedAt
 	if result.ShellContext.PromptLine() != "" {
@@ -1112,7 +1250,7 @@ func (c *LocalController) awaitAttachedMonitor(executionID string, monitor shell
 		summary.ShellContext = &contextCopy
 	}
 	c.task.LastCommandResult = &summary
-	c.task.CurrentExecution = nil
+	c.removeExecutionLocked(executionID)
 }
 
 func commandExecutionStateFromMonitorState(state shell.MonitorState) CommandExecutionState {
@@ -1140,11 +1278,11 @@ func (c *LocalController) applyMonitorSnapshot(executionID string, snapshot shel
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.task.CurrentExecution == nil || c.task.CurrentExecution.ID != executionID {
+	execution := c.executionLocked(executionID)
+	if execution == nil {
 		return
 	}
 
-	execution := c.task.CurrentExecution
 	switch snapshot.State {
 	case shell.MonitorStateQueued:
 		if execution.State == CommandExecutionQueued {
@@ -1196,6 +1334,7 @@ func (c *LocalController) applyMonitorSnapshot(executionID string, snapshot shel
 	if snapshot.Error != "" {
 		execution.Error = snapshot.Error
 	}
+	c.syncTaskExecutionViewsLocked()
 }
 
 func (c *LocalController) DecideApproval(ctx context.Context, approvalID string, decision ApprovalDecision, refineText string) ([]TranscriptEvent, error) {
@@ -1246,39 +1385,34 @@ func (c *LocalController) DecideApproval(ctx context.Context, approvalID string,
 func (c *LocalController) ActiveExecution() *CommandExecution {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	if c.task.CurrentExecution == nil {
-		return nil
-	}
-
-	execution := *c.task.CurrentExecution
-	return &execution
+	return cloneCommandExecution(c.primaryExecutionLocked())
 }
 
 func (c *LocalController) AbandonActiveExecution(reason string) *CommandExecution {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.task.CurrentExecution == nil {
+	execution := c.primaryExecutionLocked()
+	if execution == nil {
 		return nil
 	}
 
-	execution := *c.task.CurrentExecution
-	execution.State = CommandExecutionCanceled
-	execution.Error = strings.TrimSpace(reason)
-	execution.LatestOutputTail = c.bestEffortRecentOutputLocked()
+	executionCopy := *execution
+	executionCopy.State = CommandExecutionCanceled
+	executionCopy.Error = strings.TrimSpace(reason)
+	executionCopy.LatestOutputTail = c.bestEffortRecentOutputLocked()
 	completedAt := time.Now()
-	execution.CompletedAt = &completedAt
-	c.task.CurrentExecution = nil
+	executionCopy.CompletedAt = &completedAt
+	c.removeExecutionLocked(execution.ID)
 	logging.Trace(
 		"controller.active_execution.abandoned",
-		"execution_id", execution.ID,
-		"command", execution.Command,
-		"origin", execution.Origin,
+		"execution_id", executionCopy.ID,
+		"command", executionCopy.Command,
+		"origin", executionCopy.Origin,
 		"reason", reason,
-		"tail_preview", logging.Preview(execution.LatestOutputTail, 1000),
+		"tail_preview", logging.Preview(executionCopy.LatestOutputTail, 1000),
 	)
-	return &execution
+	return &executionCopy
 }
 
 func (c *LocalController) RefreshShellContext(ctx context.Context) (*shell.PromptContext, error) {
@@ -1329,6 +1463,130 @@ func (c *LocalController) captureRecoverySnapshot(ctx context.Context, topPaneID
 	return strings.TrimSpace(captured)
 }
 
+func cloneCommandExecution(execution *CommandExecution) *CommandExecution {
+	if execution == nil {
+		return nil
+	}
+	copy := *execution
+	return &copy
+}
+
+func executionSortLess(left *CommandExecution, right *CommandExecution) bool {
+	if left == nil || right == nil {
+		return false
+	}
+	if !left.StartedAt.Equal(right.StartedAt) {
+		return left.StartedAt.Before(right.StartedAt)
+	}
+	return left.ID < right.ID
+}
+
+func (c *LocalController) primaryExecutionLocked() *CommandExecution {
+	c.bootstrapLegacyCurrentExecutionLocked()
+	if len(c.executions) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(c.primaryExecution) != "" {
+		if execution := c.executions[c.primaryExecution]; execution != nil {
+			return execution
+		}
+	}
+
+	var selected *CommandExecution
+	for _, execution := range c.executions {
+		if execution == nil {
+			continue
+		}
+		if selected == nil || executionSortLess(selected, execution) {
+			selected = execution
+		}
+	}
+	if selected != nil {
+		c.primaryExecution = selected.ID
+	}
+	return selected
+}
+
+func (c *LocalController) executionLocked(executionID string) *CommandExecution {
+	c.bootstrapLegacyCurrentExecutionLocked()
+	if strings.TrimSpace(executionID) == "" || len(c.executions) == 0 {
+		return nil
+	}
+	return c.executions[executionID]
+}
+
+func (c *LocalController) bootstrapLegacyCurrentExecutionLocked() {
+	if len(c.executions) != 0 || c.task.CurrentExecution == nil || strings.TrimSpace(c.task.CurrentExecution.ID) == "" {
+		return
+	}
+	c.ensureExecutionRegistryLocked()
+	executionCopy := *c.task.CurrentExecution
+	c.executions[executionCopy.ID] = &executionCopy
+	if strings.TrimSpace(c.primaryExecution) == "" {
+		c.primaryExecution = executionCopy.ID
+	}
+}
+
+func (c *LocalController) ensureExecutionRegistryLocked() {
+	if c.executions == nil {
+		c.executions = make(map[string]*CommandExecution)
+	}
+}
+
+func (c *LocalController) registerExecutionLocked(execution CommandExecution) *CommandExecution {
+	c.ensureExecutionRegistryLocked()
+	executionCopy := execution
+	c.executions[executionCopy.ID] = &executionCopy
+	c.primaryExecution = executionCopy.ID
+	c.syncTaskExecutionViewsLocked()
+	return c.executions[executionCopy.ID]
+}
+
+func (c *LocalController) removeExecutionLocked(executionID string) {
+	if len(c.executions) == 0 {
+		return
+	}
+	delete(c.executions, executionID)
+	if c.primaryExecution == executionID {
+		c.primaryExecution = ""
+	}
+	c.syncTaskExecutionViewsLocked()
+}
+
+func (c *LocalController) syncTaskExecutionViewsLocked() {
+	if len(c.executions) == 0 {
+		c.task.PrimaryExecutionID = ""
+		c.task.ExecutionRegistry = nil
+		c.task.CurrentExecution = nil
+		return
+	}
+
+	registry := make([]*CommandExecution, 0, len(c.executions))
+	for _, execution := range c.executions {
+		if execution != nil {
+			registry = append(registry, execution)
+		}
+	}
+	sort.Slice(registry, func(i int, j int) bool {
+		return executionSortLess(registry[i], registry[j])
+	})
+
+	snapshots := make([]CommandExecution, 0, len(registry))
+	for _, execution := range registry {
+		snapshots = append(snapshots, *execution)
+	}
+	c.task.ExecutionRegistry = snapshots
+
+	primary := c.primaryExecutionLocked()
+	if primary == nil {
+		c.task.PrimaryExecutionID = ""
+		c.task.CurrentExecution = nil
+		return
+	}
+	c.task.PrimaryExecutionID = primary.ID
+	c.task.CurrentExecution = cloneCommandExecution(primary)
+}
+
 func (c *LocalController) newEvent(kind TranscriptEventKind, payload any) TranscriptEvent {
 	return TranscriptEvent{
 		ID:        fmt.Sprintf("evt-%d", c.counter.Add(1)),
@@ -1344,11 +1602,13 @@ func (c *LocalController) appendEvents(events ...TranscriptEvent) {
 
 func (c *LocalController) newExecutionLocked(command string, origin CommandOrigin) CommandExecution {
 	execution := CommandExecution{
-		ID:        fmt.Sprintf("cmd-%d", c.counter.Add(1)),
-		Command:   command,
-		Origin:    origin,
-		State:     CommandExecutionRunning,
-		StartedAt: time.Now(),
+		ID:            fmt.Sprintf("cmd-%d", c.counter.Add(1)),
+		Command:       command,
+		Origin:        origin,
+		TrackedShell:  c.session.TrackedShell,
+		OwnershipMode: CommandOwnershipExclusive,
+		State:         CommandExecutionRunning,
+		StartedAt:     time.Now(),
 	}
 	if c.session.CurrentShell != nil {
 		contextCopy := *c.session.CurrentShell
@@ -1448,6 +1708,19 @@ func shouldCaptureRecoverySnapshot(execution *CommandExecution) bool {
 	}
 }
 
+func blocksSerialShellSubmission(execution *CommandExecution) bool {
+	if execution == nil {
+		return false
+	}
+
+	switch execution.State {
+	case CommandExecutionCompleted, CommandExecutionFailed, CommandExecutionCanceled, CommandExecutionLost:
+		return false
+	default:
+		return true
+	}
+}
+
 func isAgentOwnedExecution(origin CommandOrigin) bool {
 	switch origin {
 	case CommandOriginAgentProposal, CommandOriginAgentApproval, CommandOriginAgentPlan:
@@ -1477,6 +1750,88 @@ func buildProposalRefinementPrompt(proposal ProposalPayload, note string) string
 		parts = append(parts, "User note: "+strings.TrimSpace(note))
 	}
 	return strings.Join(parts, "\n")
+}
+
+func normalizePlanStepText(step string) string {
+	step = strings.TrimSpace(step)
+	if step == "" {
+		return ""
+	}
+
+	lower := strings.ToLower(step)
+	for _, prefix := range []string{"[done]", "[in_progress]", "[pending]", "[in progress]", "done:", "in_progress:", "in progress:", "pending:"} {
+		if strings.HasPrefix(lower, prefix) {
+			step = strings.TrimSpace(step[len(prefix):])
+			lower = strings.ToLower(step)
+		}
+	}
+
+	return step
+}
+
+func isPlanComplete(plan ActivePlan) bool {
+	if len(plan.Steps) == 0 {
+		return false
+	}
+	for _, step := range plan.Steps {
+		if step.Status != PlanStepDone {
+			return false
+		}
+	}
+	return true
+}
+
+func buildAutoContinuePrompt(task TaskContext) string {
+	prompt := autoContinuePrompt
+	if !shouldPreferSerialContinuation(task) {
+		return prompt
+	}
+	return prompt + " " + autoContinuePromptSerialSuffix
+}
+
+func shouldPreferSerialContinuation(task TaskContext) bool {
+	userPrompt := strings.ToLower(strings.TrimSpace(latestUserTranscriptMessage(task.PriorTranscript)))
+	if userPrompt == "" {
+		return false
+	}
+
+	return containsAnySubstring(
+		userPrompt,
+		"serial",
+		"one at a time",
+		"one command at a time",
+		"don't lump",
+		"dont lump",
+		"do not lump",
+		"then ",
+		" then",
+		"after ",
+		" next",
+		"step ",
+	)
+}
+
+func latestUserTranscriptMessage(events []TranscriptEvent) string {
+	for index := len(events) - 1; index >= 0; index-- {
+		event := events[index]
+		if event.Kind != EventUserMessage {
+			continue
+		}
+		payload, _ := event.Payload.(TextPayload)
+		if strings.TrimSpace(payload.Text) != "" {
+			return payload.Text
+		}
+	}
+	return ""
+}
+
+func containsAnySubstring(value string, needles ...string) bool {
+	for _, needle := range needles {
+		if strings.Contains(value, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func errString(err error) string {

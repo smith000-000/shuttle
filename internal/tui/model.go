@@ -847,6 +847,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlO:
 			return m.openDetail()
 		case tea.KeyCtrlG:
+			if m.pendingApproval == nil && m.pendingProposal == nil && m.activePlan != nil {
+				return m.continueActivePlan()
+			}
 			return m.primaryAction()
 		case tea.KeyCtrlJ:
 			if !m.sendingFullscreenKeys && m.composerLocked() {
@@ -855,6 +858,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.insertTextAtCursor("\n")
 			return m, nil
 		case tea.KeyCtrlE:
+			if m.pendingApproval == nil && m.pendingProposal == nil && m.activePlan != nil {
+				return m.continueActivePlan()
+			}
 			return m.primaryAction()
 		case tea.KeyCtrlY:
 			return m.primaryAction()
@@ -1227,9 +1233,6 @@ func (m Model) primaryAction() (tea.Model, tea.Cmd) {
 	case m.pendingProposal != nil && m.pendingProposal.Command != "":
 		logging.Trace("tui.primary_action", "action", "run_proposal", "command", m.pendingProposal.Command)
 		return m.runProposalCommand()
-	case m.activePlan != nil:
-		logging.Trace("tui.primary_action", "action", "continue_plan", "summary", m.activePlan.Summary)
-		return m.continueActivePlan()
 	default:
 		return m, nil
 	}
@@ -2773,7 +2776,7 @@ func (m Model) renderPlanCard(width int) string {
 		body = append(body, fmt.Sprintf("... (%d more steps)", hiddenSteps))
 	}
 	body = append(body, m.planProgressSummary())
-	body = append(body, "Y continue")
+	body = append(body, "Informational only. Ctrl+G continues the plan.")
 
 	content := lipgloss.JoinVertical(
 		lipgloss.Left,
@@ -3013,8 +3016,6 @@ func (m Model) footerParts(width int) []string {
 			parts = append(parts, "[Y/N/R]")
 		} else if m.pendingProposal != nil && m.pendingProposal.Command != "" {
 			parts = append(parts, "[Y/N/R/E]")
-		} else if m.activePlan != nil {
-			parts = append(parts, "[Y]")
 		}
 		return parts
 	case width < 100:
@@ -3036,8 +3037,6 @@ func (m Model) footerParts(width int) []string {
 			parts = append(parts, "[Y/N/R]")
 		} else if m.pendingProposal != nil && m.pendingProposal.Command != "" {
 			parts = append(parts, "[Y/N/R/E]")
-		} else if m.activePlan != nil {
-			parts = append(parts, "[Y] plan")
 		}
 		return parts
 	}
@@ -3060,8 +3059,6 @@ func (m Model) footerParts(width int) []string {
 		parts = append(parts, "[Y] send keys", "[N] reject", "[R] ask agent")
 	} else if m.pendingProposal != nil && m.pendingProposal.Command != "" {
 		parts = append(parts, "[Y] continue", "[N] reject", "[R] ask agent", "[E] tweak command")
-	} else if m.activePlan != nil {
-		parts = append(parts, "[Y] continue plan")
 	}
 	parts = append(parts, "[Ctrl+C] quit")
 	return parts
@@ -4280,7 +4277,11 @@ func (m *Model) syncActionState(events []controller.TranscriptEvent) {
 
 	newPlan := latestPlan(events)
 	if newPlan != nil {
-		m.activePlan = newPlan
+		if isCompletedPlan(*newPlan) {
+			m.activePlan = nil
+		} else {
+			m.activePlan = newPlan
+		}
 	}
 
 	newApproval := latestApproval(events)
@@ -4349,6 +4350,18 @@ func planStepMarker(status controller.PlanStepStatus) string {
 	default:
 		return "[ ]"
 	}
+}
+
+func isCompletedPlan(plan controller.ActivePlan) bool {
+	if len(plan.Steps) == 0 {
+		return false
+	}
+	for _, step := range plan.Steps {
+		if step.Status != controller.PlanStepDone {
+			return false
+		}
+	}
+	return true
 }
 
 func max(a int, b int) int {
@@ -4569,7 +4582,7 @@ func latestProposal(events []controller.TranscriptEvent) *controller.ProposalPay
 		}
 
 		payload, ok := events[index].Payload.(controller.ProposalPayload)
-		if !ok || (payload.Command == "" && payload.Keys == "" && payload.Patch == "" && payload.Kind == "") {
+		if !ok || !isActionableProposalPayload(payload) {
 			continue
 		}
 
@@ -4578,6 +4591,10 @@ func latestProposal(events []controller.TranscriptEvent) *controller.ProposalPay
 	}
 
 	return nil
+}
+
+func isActionableProposalPayload(payload controller.ProposalPayload) bool {
+	return strings.TrimSpace(payload.Command) != "" || payload.Keys != ""
 }
 
 func latestActiveExecution(events []controller.TranscriptEvent) *controller.CommandExecution {
@@ -4618,11 +4635,12 @@ func latestModelInfo(events []controller.TranscriptEvent) *controller.AgentModel
 
 func newLocalExecution(command string, origin controller.CommandOrigin) *controller.CommandExecution {
 	return &controller.CommandExecution{
-		ID:        "local-pending",
-		Command:   command,
-		Origin:    origin,
-		State:     controller.CommandExecutionRunning,
-		StartedAt: time.Now(),
+		ID:            "local-pending",
+		Command:       command,
+		Origin:        origin,
+		OwnershipMode: controller.CommandOwnershipExclusive,
+		State:         controller.CommandExecutionRunning,
+		StartedAt:     time.Now(),
 	}
 }
 

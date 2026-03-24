@@ -12,14 +12,15 @@ As of March 11, 2026, the implementation state is:
 - Milestone 4: complete for the mock-runtime path
 - Milestone 5: in progress
 
-Execution-monitor redesign status on `command-execution-redesign`:
+Execution-monitor redesign / semantic shell hardening status on `semantic-shell-bootstrap`:
 - implemented: first-class command monitor, local managed shell transport, `awaiting_input` detection, `interactive_fullscreen` detection, `lost` execution state, `F2` handoff/reconciliation, raw `KEYS>` terminal input, remote prompt-return reconciliation, and agent-driven `keys` proposals
 - implemented: state-aware agent recovery guidance using active execution state plus a larger recovery snapshot
 - implemented: first-pass local semantic shell integration using `OSC 133` / `OSC 7` shims plus semantic metadata in monitor/provider context, with best-effort raw-marker parsing from tmux capture
-- implemented on `semantic-shell-bootstrap`: collector abstraction for semantic sources and spec-correct `ST`-terminated local marker emission; a tmux spike now proves `pipe-pane -O` preserves raw `OSC 133` / `OSC 7` bytes well enough to support a real stream source
-- in progress: reducing ambiguity between `running`, `awaiting_input`, and `lost` in edge cases where the shell is quiet or terminal ownership changes unexpectedly
-- in progress: security hardening for execution monitoring, tracing, and semantic shell state
-- next: promote semantic consumption from opportunistic snapshot parsing to a real stream reducer, then keep local semantic-shell behavior stable while preventing bleed-through into remote/subshell flows, then add conservative subshell bootstrap
+- implemented on `semantic-shell-bootstrap`: collector abstraction for semantic sources, spec-correct `ST`-terminated local marker emission, `osc_stream` via `tmux pipe-pane -O`, generation-scoped semantic stream files, conservative stale-generation pruning, and source precedence `osc_stream > osc_capture > state_file > heuristics`
+- implemented on `semantic-shell-bootstrap`: subshell transition detection, local nested-shell semantic bootstrap, manual foreground attach, tracked-pane/session recovery, explicit `TrackedShellTarget`, and shell-only destructive tmux recovery
+- implemented on `semantic-shell-bootstrap`: serial execution registry scaffolding, single-owner submission enforcement, serial auto-continue prompt hardening, hidden `proposal_kind:"answer"` state fix, and informational-only plan cards that no longer overwrite or outlive real completion state
+- in progress: hardening execution lifecycle invariants so command state cannot drift across handoff, attach, pane replacement, or session recreation
+- next: add explicit execution-state transition helpers plus integration-style command-tracking recovery tests before any future parallel-command UI work
 
 Security hardening branch scope on `security-hardening-runtime`:
 - audit runtime artifact placement, permissions, and retention now that `main` includes both execution-monitor and provider-onboarding work
@@ -73,6 +74,8 @@ Milestone 5 still needs:
 - a real patch-application path so proposed diffs can become actual workspace changes
 - guardrails that prevent the agent from claiming proposed files exist before the patch is applied
 - stronger monitor-side confidence so active-command classification such as `awaiting_input`, `interactive_fullscreen`, and `lost` is driven by better evidence and fewer fallback heuristics
+- explicit execution lifecycle/state-machine hardening so one command cannot leave stale ownership or stale state behind across recovery and handoff paths
+- integration-style tests for tracked-command recovery flows, not just per-layer unit tests
 - pane-stream/fullscreen detection beyond tmux alternate-screen heuristics so aliases, wrappers, and remote fullscreen apps can be recognized from terminal behavior instead of command-name lists alone
 - richer state-aware agent recovery actions for ambiguous shell takeovers, including deciding when to propose raw terminal input versus simple recovery guidance
 - broader semantic shell integration and subshell/bootstrap support using signals such as `OSC 133` and `OSC 7`
@@ -91,6 +94,7 @@ Milestone 5 still needs:
   - extract composer/input-mode routing from command-execution control
   - move fullscreen/raw-key submission logic behind a narrower interface
   - reduce duplicated busy/lock/handoff gating in the TUI state machine
+  - keep plan cards passive/informational unless the product explicitly introduces a dedicated interactive checklist workflow
 
 ### Semantic Shell And Subshell Bootstrap Plan
 

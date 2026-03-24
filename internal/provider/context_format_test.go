@@ -113,6 +113,11 @@ func TestBuildTurnContextIncludesExecutionMetadata(t *testing.T) {
 	context := buildTurnContext(controller.AgentInput{
 		Prompt: "what is going on",
 		Task: controller.TaskContext{
+			PrimaryExecutionID: "cmd-1",
+			ExecutionRegistry: []controller.CommandExecution{
+				{ID: "cmd-1", Command: "ssh openclaw@openclaw"},
+				{ID: "cmd-2", Command: "tail -f /var/log/syslog"},
+			},
 			CurrentExecution: &controller.CommandExecution{
 				ID:                 "cmd-1",
 				Command:            "ssh openclaw@openclaw",
@@ -129,6 +134,9 @@ func TestBuildTurnContextIncludesExecutionMetadata(t *testing.T) {
 
 	if !strings.Contains(context, "foreground_command=ssh") {
 		t.Fatalf("expected foreground command metadata, got %q", context)
+	}
+	if !strings.Contains(context, "Execution registry:\nprimary_execution=cmd-1\nactive_execution_count=2") {
+		t.Fatalf("expected execution registry metadata, got %q", context)
 	}
 	if !strings.Contains(context, "semantic_shell=true") || !strings.Contains(context, "semantic_source=state_file") {
 		t.Fatalf("expected semantic shell metadata, got %q", context)

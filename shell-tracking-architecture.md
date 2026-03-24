@@ -113,6 +113,8 @@ Responsibilities:
 Important state:
 - `SessionContext.TrackedShell`
 - `SessionContext.TopPaneID`
+- `TaskContext.PrimaryExecutionID`
+- `TaskContext.ExecutionRegistry`
 - `TaskContext.CurrentExecution`
 - `TaskContext.LastCommandResult`
 
@@ -278,6 +280,7 @@ This does not yet mean Shuttle supports arbitrary multi-pane or multi-command ow
 Still true today:
 - one tracked shell target is authoritative at a time
 - one active execution is authoritative in controller state at a time
+- a second tracked shell command is rejected while another execution is active
 
 This is groundwork, not full parallelism.
 
@@ -363,7 +366,8 @@ This fixed a class of bugs where:
 The current architecture is much stronger than the earlier one-off fixes, but a few limits are still real.
 
 - parallel command tracking is not implemented yet
-- controller still uses a single `CurrentExecution`
+- controller projects a single primary `CurrentExecution` even though it now keeps an internal execution registry
+- serial submission is enforced; the registry is future-facing ownership scaffolding, not permission for overlap
 - some compatibility code still carries `TopPaneID` alongside `TrackedShellTarget`
 - remote/container semantic bootstrap is intentionally incomplete
 - interactive/fullscreen classification still relies partly on tmux metadata and heuristics
