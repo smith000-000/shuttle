@@ -163,6 +163,30 @@ func TestLocalControllerSubmitShellCommandUsesResolvedTopPaneID(t *testing.T) {
 	}
 }
 
+func TestLocalControllerSubmitShellCommandReturnsTrackedShellChangeNotice(t *testing.T) {
+	runner := &stubRunner{
+		result:         shell.TrackedExecution{CommandID: "cmd-1", Command: "ls", ExitCode: 0},
+		resolvedPaneID: "%5",
+	}
+	controller := New(nil, runner, nil, SessionContext{SessionName: "shuttle-test", TopPaneID: "%0"})
+
+	events, err := controller.SubmitShellCommand(context.Background(), "ls")
+	if err != nil {
+		t.Fatalf("SubmitShellCommand() error = %v", err)
+	}
+
+	if len(events) != 3 {
+		t.Fatalf("expected tracked-shell notice plus start/result, got %#v", events)
+	}
+	if events[0].Kind != EventSystemNotice || events[1].Kind != EventCommandStart || events[2].Kind != EventCommandResult {
+		t.Fatalf("unexpected event sequence: %#v", events)
+	}
+	notice, ok := events[0].Payload.(TextPayload)
+	if !ok || !strings.Contains(notice.Text, "Tracked shell pane changed from %0 to %5.") {
+		t.Fatalf("expected tracked-shell change notice, got %#v", events[0].Payload)
+	}
+}
+
 func TestNewNormalizesTrackedShellTargetFromLegacySessionFields(t *testing.T) {
 	controller := New(nil, nil, nil, SessionContext{
 		SessionName: "shuttle-test",
@@ -250,12 +274,12 @@ func TestLocalControllerResumeAfterTakeControlReconcilesUserShellPromptReturn(t 
 	if err != nil {
 		t.Fatalf("ResumeAfterTakeControl() error = %v", err)
 	}
-	if len(events) != 1 || events[0].Kind != EventCommandResult {
-		t.Fatalf("expected one command result event, got %#v", events)
+	if len(events) != 2 || events[0].Kind != EventSystemNotice || events[1].Kind != EventCommandResult {
+		t.Fatalf("expected handoff notice plus command result, got %#v", events)
 	}
-	result, ok := events[0].Payload.(CommandResultSummary)
+	result, ok := events[1].Payload.(CommandResultSummary)
 	if !ok {
-		t.Fatalf("expected command result payload, got %#v", events[0].Payload)
+		t.Fatalf("expected command result payload, got %#v", events[1].Payload)
 	}
 	if result.State != CommandExecutionCanceled || result.ExitCode != shell.InterruptedExitCode {
 		t.Fatalf("unexpected reconcile result %#v", result)
@@ -289,12 +313,12 @@ func TestLocalControllerResumeAfterTakeControlInfersCanceledWhenPromptReturnedWi
 	if err != nil {
 		t.Fatalf("ResumeAfterTakeControl() error = %v", err)
 	}
-	if len(events) != 1 || events[0].Kind != EventCommandResult {
-		t.Fatalf("expected one command result event, got %#v", events)
+	if len(events) != 2 || events[0].Kind != EventSystemNotice || events[1].Kind != EventCommandResult {
+		t.Fatalf("expected handoff notice plus command result, got %#v", events)
 	}
-	result, ok := events[0].Payload.(CommandResultSummary)
+	result, ok := events[1].Payload.(CommandResultSummary)
 	if !ok {
-		t.Fatalf("expected command result payload, got %#v", events[0].Payload)
+		t.Fatalf("expected command result payload, got %#v", events[1].Payload)
 	}
 	if result.State != CommandExecutionCanceled {
 		t.Fatalf("expected canceled reconcile result, got %#v", result)
@@ -307,6 +331,49 @@ func TestLocalControllerResumeAfterTakeControlInfersCanceledWhenPromptReturnedWi
 	}
 	if controller.ActiveExecution() != nil {
 		t.Fatal("expected active execution to clear after inferred handoff reconcile")
+	}
+}
+
+func TestLocalControllerResumeAfterTakeControlReturnsTrackedShellChangeNotice(t *testing.T) {
+	exitCode := shell.InterruptedExitCode
+	reader := &stubContextReader{
+		snapshot:       "^C\njsmith@linuxdesktop ~/source/repos/aiterm %",
+		resolvedPaneID: "%5",
+		context: shell.PromptContext{
+			User:         "jsmith",
+			Host:         "linuxdesktop",
+			Directory:    "/home/jsmith/source/repos/aiterm",
+			PromptSymbol: "%",
+			RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+			LastExitCode: &exitCode,
+		},
+	}
+	controller := New(nil, nil, reader, SessionContext{SessionName: "shuttle-test", TopPaneID: "%0"})
+	controller.task.CurrentExecution = &CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 10",
+		Origin:    CommandOriginUserShell,
+		State:     CommandExecutionRunning,
+		StartedAt: time.Now().Add(-10 * time.Second),
+	}
+
+	events, err := controller.ResumeAfterTakeControl(context.Background())
+	if err != nil {
+		t.Fatalf("ResumeAfterTakeControl() error = %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("expected tracked-shell notice plus handoff notice/result, got %#v", events)
+	}
+	if events[0].Kind != EventSystemNotice || events[1].Kind != EventSystemNotice || events[2].Kind != EventCommandResult {
+		t.Fatalf("unexpected event sequence: %#v", events)
+	}
+	firstNotice, ok := events[0].Payload.(TextPayload)
+	if !ok || !strings.Contains(firstNotice.Text, "Returned from shell handoff") {
+		t.Fatalf("expected handoff reconciliation notice, got %#v", events[0].Payload)
+	}
+	secondNotice, ok := events[1].Payload.(TextPayload)
+	if !ok || !strings.Contains(secondNotice.Text, "Tracked shell pane changed from %0 to %5.") {
+		t.Fatalf("expected tracked-shell change notice, got %#v", events[1].Payload)
 	}
 }
 
@@ -502,6 +569,17 @@ func TestLocalControllerAbandonActiveExecutionClearsState(t *testing.T) {
 	}
 	if controller.ActiveExecution() != nil {
 		t.Fatal("expected active execution to clear")
+	}
+	if len(controller.task.PriorTranscript) == 0 {
+		t.Fatal("expected abandon to append a transcript notice")
+	}
+	last := controller.task.PriorTranscript[len(controller.task.PriorTranscript)-1]
+	if last.Kind != EventSystemNotice {
+		t.Fatalf("expected system notice after abandon, got %#v", last)
+	}
+	notice, ok := last.Payload.(TextPayload)
+	if !ok || !strings.Contains(notice.Text, "Abandoned active execution: sleep 60") {
+		t.Fatalf("expected abandon notice payload, got %#v", last.Payload)
 	}
 }
 
@@ -734,6 +812,142 @@ func TestLocalControllerMonitorUpdatesActiveExecutionTail(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for monitored command to finish")
+	}
+}
+
+func TestLocalControllerAttachForegroundExecutionReturnsNoticeAndStart(t *testing.T) {
+	monitor := newManualMonitor()
+	now := time.Now().Add(-5 * time.Second)
+	monitor.snapshot = shell.MonitorSnapshot{
+		CommandID:         "cmd-monitor",
+		Command:           "sleep 30",
+		State:             shell.MonitorStateRunning,
+		StartedAt:         now,
+		ForegroundCommand: "sleep",
+	}
+	runner := &monitoringRunner{attachMonitor: monitor}
+	controller := New(nil, runner, nil, SessionContext{TopPaneID: "%0"})
+
+	events, attached, err := controller.attachForegroundExecution(context.Background())
+	if err != nil {
+		t.Fatalf("attachForegroundExecution() error = %v", err)
+	}
+	if !attached {
+		t.Fatal("expected foreground command to attach")
+	}
+	if len(events) != 2 || events[0].Kind != EventSystemNotice || events[1].Kind != EventCommandStart {
+		t.Fatalf("expected attach notice and command start, got %#v", events)
+	}
+	notice, ok := events[0].Payload.(TextPayload)
+	if !ok || !strings.Contains(notice.Text, "Attached to existing foreground command in the tracked shell: sleep 30") {
+		t.Fatalf("expected foreground attach notice, got %#v", events[0].Payload)
+	}
+	start, ok := events[1].Payload.(CommandStartPayload)
+	if !ok {
+		t.Fatalf("expected command start payload, got %#v", events[1].Payload)
+	}
+	if start.Execution.OwnershipMode != CommandOwnershipSharedObserver {
+		t.Fatalf("expected shared observer ownership, got %#v", start.Execution)
+	}
+	if start.Execution.State != CommandExecutionRunning || start.Execution.ForegroundCommand != "sleep" {
+		t.Fatalf("unexpected attached execution snapshot %#v", start.Execution)
+	}
+}
+
+func TestLocalControllerResumeAfterTakeControlAttachesForegroundExecutionAndCompletes(t *testing.T) {
+	monitor := newManualMonitor()
+	now := time.Now().Add(-5 * time.Second)
+	monitor.snapshot = shell.MonitorSnapshot{
+		CommandID:         "cmd-monitor",
+		Command:           "sleep 30",
+		State:             shell.MonitorStateRunning,
+		StartedAt:         now,
+		ForegroundCommand: "sleep",
+	}
+	runner := &monitoringRunner{attachMonitor: monitor}
+	controller := New(nil, runner, nil, SessionContext{TopPaneID: "%0"})
+
+	events, err := controller.ResumeAfterTakeControl(context.Background())
+	if err != nil {
+		t.Fatalf("ResumeAfterTakeControl() error = %v", err)
+	}
+	if len(events) != 2 || events[0].Kind != EventSystemNotice || events[1].Kind != EventCommandStart {
+		t.Fatalf("expected attach notice and command start, got %#v", events)
+	}
+	active := controller.ActiveExecution()
+	if active == nil || active.State != CommandExecutionRunning || active.Command != "sleep 30" {
+		t.Fatalf("expected attached foreground execution to be active, got %#v", active)
+	}
+
+	monitor.finish(shell.TrackedExecution{
+		CommandID: "cmd-monitor",
+		Command:   "sleep 30",
+		State:     shell.MonitorStateCompleted,
+		ExitCode:  0,
+		Captured:  "done",
+	}, nil)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if controller.ActiveExecution() == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected attached foreground execution to clear, got %#v", controller.ActiveExecution())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if controller.task.LastCommandResult == nil {
+		t.Fatal("expected attached foreground completion summary")
+	}
+	if controller.task.LastCommandResult.State != CommandExecutionCompleted || controller.task.LastCommandResult.Summary != "done" {
+		t.Fatalf("unexpected attached foreground result %#v", controller.task.LastCommandResult)
+	}
+}
+
+func TestLocalControllerAttachedForegroundLateCompletionIgnoredAfterAbandon(t *testing.T) {
+	monitor := newManualMonitor()
+	now := time.Now().Add(-5 * time.Second)
+	monitor.snapshot = shell.MonitorSnapshot{
+		CommandID:         "cmd-monitor",
+		Command:           "sleep 30",
+		State:             shell.MonitorStateRunning,
+		StartedAt:         now,
+		ForegroundCommand: "sleep",
+	}
+	runner := &monitoringRunner{attachMonitor: monitor}
+	controller := New(nil, runner, &stubContextReader{output: "^C"}, SessionContext{TopPaneID: "%0"})
+
+	_, attached, err := controller.attachForegroundExecution(context.Background())
+	if err != nil {
+		t.Fatalf("attachForegroundExecution() error = %v", err)
+	}
+	if !attached {
+		t.Fatal("expected foreground command to attach")
+	}
+
+	execution := controller.AbandonActiveExecution("user interrupted from handoff")
+	if execution == nil {
+		t.Fatal("expected abandoned execution snapshot")
+	}
+
+	monitor.finish(shell.TrackedExecution{
+		CommandID: "cmd-monitor",
+		Command:   "sleep 30",
+		State:     shell.MonitorStateCompleted,
+		ExitCode:  0,
+		Captured:  "done",
+	}, nil)
+
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if controller.task.LastCommandResult != nil {
+			t.Fatalf("expected late attached completion to be ignored, got %#v", controller.task.LastCommandResult)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if controller.ActiveExecution() != nil {
+		t.Fatalf("expected no active execution after abandon, got %#v", controller.ActiveExecution())
 	}
 }
 
@@ -1125,9 +1339,10 @@ func (b *blockingRunner) RunTrackedCommand(_ context.Context, _ string, _ string
 }
 
 type monitoringRunner struct {
-	monitor  *manualMonitor
-	commands []string
-	started  chan struct{}
+	monitor       *manualMonitor
+	attachMonitor *manualMonitor
+	commands      []string
+	started       chan struct{}
 }
 
 func (m *monitoringRunner) RunTrackedCommand(_ context.Context, _ string, _ string, _ time.Duration) (shell.TrackedExecution, error) {
@@ -1143,6 +1358,13 @@ func (m *monitoringRunner) StartTrackedCommand(_ context.Context, _ string, comm
 		}
 	}
 	return m.monitor, nil
+}
+
+func (m *monitoringRunner) AttachForegroundCommand(_ context.Context, _ string) (shell.CommandMonitor, error) {
+	if m.attachMonitor == nil {
+		return nil, nil
+	}
+	return m.attachMonitor, nil
 }
 
 func (m *monitoringRunner) waitForStart(t *testing.T) {

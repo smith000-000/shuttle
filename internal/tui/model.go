@@ -180,78 +180,79 @@ const (
 )
 
 type Model struct {
-	workspace             tmux.Workspace
-	ctrl                  controller.Controller
-	mode                  Mode
-	input                 string
-	cursor                int
-	entries               []Entry
-	selectedEntry         int
-	width                 int
-	height                int
-	busy                  bool
-	busyStartedAt         time.Time
-	transcriptScroll      int
-	transcriptFollow      bool
-	detailOpen            bool
-	detailScroll          int
-	shellHistory          composerHistory
-	agentHistory          composerHistory
-	activePlan            *controller.ActivePlan
-	shellContext          shell.PromptContext
-	pendingApproval       *controller.ApprovalRequest
-	pendingProposal       *controller.ProposalPayload
-	startupNotice         *startupSecurityNotice
-	refiningApproval      *controller.ApprovalRequest
-	refiningProposal      *controller.ProposalPayload
-	editingProposal       *controller.ProposalPayload
-	approvalInFlight      bool
-	proposalRunPending    bool
-	directShellPending    bool
-	inFlightCancel        context.CancelFunc
-	suppressCancelErr     bool
-	resumeAfterHandoff    bool
-	handoffVisible        bool
-	handoffPriorState     controller.CommandExecutionState
-	takeControl           takeControlConfig
-	liveShellTail         string
-	showShellTail         bool
-	activeExecution       *controller.CommandExecution
-	pendingFullscreen     *fullscreenAction
-	sendingFullscreenKeys bool
-	lastFullscreenKeys    string
-	lastFullscreenKeysAt  time.Time
-	exitConfirmUntil      time.Time
-	exitConfirmToken      uint64
-	checkInInFlight       bool
-	lastCheckInAt         time.Time
-	lastInterruptNoticeID string
-	activeProvider        provider.Profile
-	onboardingOpen        bool
-	onboardingStep        onboardingStep
-	onboardingIndex       int
-	onboardingChoices     []provider.OnboardingCandidate
-	onboardingSelected    *provider.OnboardingCandidate
-	onboardingForm        *onboardingFormState
-	onboardingModels      []provider.ModelOption
-	onboardingModelIdx    int
-	loadOnboarding        func() ([]provider.OnboardingCandidate, error)
-	loadModels            func(provider.Profile) ([]provider.ModelOption, error)
-	switchProvider        func(provider.Profile, *shell.PromptContext) (controller.Controller, provider.Profile, error)
-	saveProvider          func(provider.Profile) error
-	settingsOpen          bool
-	settingsStep          settingsStep
-	settingsIndex         int
-	settingsProviders     []settingsProviderEntry
-	settingsProviderIdx   int
-	settingsConfig        *onboardingFormState
-	settingsModelCatalog  []settingsModelChoice
-	settingsModels        []settingsModelChoice
-	settingsModelIdx      int
-	settingsModelFilter   string
-	settingsModelInfo     bool
-	lastModelInfo         *controller.AgentModelInfo
-	styles                styles
+	workspace               tmux.Workspace
+	ctrl                    controller.Controller
+	mode                    Mode
+	input                   string
+	cursor                  int
+	entries                 []Entry
+	selectedEntry           int
+	width                   int
+	height                  int
+	busy                    bool
+	busyStartedAt           time.Time
+	transcriptScroll        int
+	transcriptFollow        bool
+	detailOpen              bool
+	detailScroll            int
+	shellHistory            composerHistory
+	agentHistory            composerHistory
+	activePlan              *controller.ActivePlan
+	shellContext            shell.PromptContext
+	pendingApproval         *controller.ApprovalRequest
+	pendingProposal         *controller.ProposalPayload
+	startupNotice           *startupSecurityNotice
+	refiningApproval        *controller.ApprovalRequest
+	refiningProposal        *controller.ProposalPayload
+	editingProposal         *controller.ProposalPayload
+	approvalInFlight        bool
+	proposalRunPending      bool
+	directShellPending      bool
+	inFlightCancel          context.CancelFunc
+	suppressCancelErr       bool
+	resumeAfterHandoff      bool
+	handoffVisible          bool
+	handoffPriorState       controller.CommandExecutionState
+	handoffReturnGraceUntil time.Time
+	takeControl             takeControlConfig
+	liveShellTail           string
+	showShellTail           bool
+	activeExecution         *controller.CommandExecution
+	pendingFullscreen       *fullscreenAction
+	sendingFullscreenKeys   bool
+	lastFullscreenKeys      string
+	lastFullscreenKeysAt    time.Time
+	exitConfirmUntil        time.Time
+	exitConfirmToken        uint64
+	checkInInFlight         bool
+	lastCheckInAt           time.Time
+	lastInterruptNoticeID   string
+	activeProvider          provider.Profile
+	onboardingOpen          bool
+	onboardingStep          onboardingStep
+	onboardingIndex         int
+	onboardingChoices       []provider.OnboardingCandidate
+	onboardingSelected      *provider.OnboardingCandidate
+	onboardingForm          *onboardingFormState
+	onboardingModels        []provider.ModelOption
+	onboardingModelIdx      int
+	loadOnboarding          func() ([]provider.OnboardingCandidate, error)
+	loadModels              func(provider.Profile) ([]provider.ModelOption, error)
+	switchProvider          func(provider.Profile, *shell.PromptContext) (controller.Controller, provider.Profile, error)
+	saveProvider            func(provider.Profile) error
+	settingsOpen            bool
+	settingsStep            settingsStep
+	settingsIndex           int
+	settingsProviders       []settingsProviderEntry
+	settingsProviderIdx     int
+	settingsConfig          *onboardingFormState
+	settingsModelCatalog    []settingsModelChoice
+	settingsModels          []settingsModelChoice
+	settingsModelIdx        int
+	settingsModelFilter     string
+	settingsModelInfo       bool
+	lastModelInfo           *controller.AgentModelInfo
+	styles                  styles
 }
 
 func NewModel(workspace tmux.Workspace, ctrl controller.Controller) Model {
@@ -408,6 +409,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 		if msg.err != nil {
 			m.handoffVisible = false
+			m.handoffReturnGraceUntil = time.Time{}
 			m.entries = append(m.entries, Entry{
 				Title: "error",
 				Body:  msg.err.Error(),
@@ -434,10 +436,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.activeExecution != nil {
 			followUpCmds = append(followUpCmds, tickBusy())
 		}
-		if m.activeExecution != nil && m.ctrl != nil {
+		if m.ctrl != nil {
 			m.resumeAfterHandoff = false
 			m.busy = true
 			m.busyStartedAt = time.Now()
+			m.handoffReturnGraceUntil = time.Now().Add(2 * time.Second)
 			m.showShellTail = false
 			m.liveShellTail = ""
 			ctx, cancel := context.WithTimeout(context.Background(), agentTurnTimeout)
@@ -452,6 +455,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}, tickBusy(), m.refreshShellContextCmd(), m.pollShellTailCmd(), m.pollActiveExecutionCmd())
 		}
+		m.handoffReturnGraceUntil = time.Time{}
 		return m, tea.Batch(followUpCmds...)
 	case refreshedShellContextMsg:
 		if msg.context != nil {
@@ -470,6 +474,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case activeExecutionMsg:
+		if msg.execution == nil && m.shouldPreserveExecutionAfterHandoff() {
+			logging.Trace(
+				"tui.active_execution.preserve_after_handoff",
+				"execution_id", activeExecutionID(m.activeExecution),
+			)
+			return m, tea.Batch(m.pollActiveExecutionAfter(150*time.Millisecond), m.pollShellTailCmd())
+		}
+		if msg.execution != nil {
+			m.handoffReturnGraceUntil = time.Time{}
+		}
 		m.syncActiveExecution(msg.execution)
 		m.syncTrackedShellTarget()
 		return m, nil
@@ -1365,6 +1379,18 @@ func (m Model) takeControlNow() (tea.Model, tea.Cmd) {
 		"active_execution", activeExecutionID(m.activeExecution),
 		"resume_after_handoff", m.resumeAfterHandoff,
 	)
+	pinned := m.isTranscriptPinned()
+	m.entries = append(m.entries, Entry{
+		Title: "system",
+		Body:  "Taking control of the tracked shell pane.",
+	})
+	if pinned {
+		m.scrollTranscriptToBottom()
+	} else {
+		m.clampTranscriptScroll()
+	}
+	m.selectedEntry = len(m.entries) - 1
+	m.clampSelection()
 
 	if m.inFlightCancel != nil && m.activeExecution == nil {
 		m.resumeAfterHandoff = !m.directShellPending && (m.approvalInFlight || m.proposalRunPending || m.mode == AgentMode || m.activePlan != nil)
@@ -1544,6 +1570,16 @@ func (m Model) pollActiveExecutionCmd() tea.Cmd {
 	return func() tea.Msg {
 		return activeExecutionMsg{execution: m.ctrl.ActiveExecution()}
 	}
+}
+
+func (m Model) pollActiveExecutionAfter(delay time.Duration) tea.Cmd {
+	if m.ctrl == nil {
+		return nil
+	}
+
+	return tea.Tick(delay, func(time.Time) tea.Msg {
+		return activeExecutionMsg{execution: m.ctrl.ActiveExecution()}
+	})
 }
 
 func interruptShellCmd(config takeControlConfig) tea.Cmd {
@@ -1729,6 +1765,7 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 	}
 
 	if execution == nil {
+		m.handoffReturnGraceUntil = time.Time{}
 		m.activeExecution = nil
 		m.pendingFullscreen = nil
 		m.lastFullscreenKeys = ""
@@ -1799,6 +1836,18 @@ func (m *Model) syncTrackedShellTarget() {
 			"session", m.workspace.SessionName,
 			"pane", m.workspace.TopPane.ID,
 		)
+	}
+}
+
+func (m Model) shouldPreserveExecutionAfterHandoff() bool {
+	if m.activeExecution == nil || m.handoffReturnGraceUntil.IsZero() || time.Now().After(m.handoffReturnGraceUntil) {
+		return false
+	}
+	switch m.activeExecution.State {
+	case controller.CommandExecutionCompleted, controller.CommandExecutionFailed, controller.CommandExecutionCanceled, controller.CommandExecutionLost:
+		return false
+	default:
+		return true
 	}
 }
 
@@ -4308,6 +4357,8 @@ func (m *Model) syncActionState(events []controller.TranscriptEvent) {
 		m.pendingProposal = nil
 	}
 	if containsEventKind(events, controller.EventCommandResult) || containsEventKind(events, controller.EventError) {
+		m.showShellTail = false
+		m.liveShellTail = ""
 		m.syncActiveExecution(nil)
 	}
 

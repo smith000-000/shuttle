@@ -95,6 +95,10 @@ Milestone 5 still needs:
   - move fullscreen/raw-key submission logic behind a narrower interface
   - reduce duplicated busy/lock/handoff gating in the TUI state machine
   - keep plan cards passive/informational unless the product explicitly introduces a dedicated interactive checklist workflow
+- add a backlog item to break up monolithic orchestration files before they become unmaintainable:
+  - split `internal/tui/model.go` into smaller execution-control, composer/input, transcript/rendering, and handoff/fullscreen modules
+  - split `internal/controller/controller.go` into execution lifecycle, agent-turn normalization, plan management, and tracked-shell ownership/recovery helpers
+  - prefer narrow types/modules and integration tests over one more round of point fixes in the monoliths
 
 ### Semantic Shell And Subshell Bootstrap Plan
 

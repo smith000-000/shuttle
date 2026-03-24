@@ -378,6 +378,13 @@ func TestF2CancelsInFlightWorkAndStartsTakeControl(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected take-control command")
 	}
+	if len(next.entries) == 0 {
+		t.Fatal("expected take-control to append a transcript entry")
+	}
+	last := next.entries[len(next.entries)-1]
+	if last.Title != "system" || last.Body != "Taking control of the tracked shell pane." {
+		t.Fatalf("expected take-control system entry, got %#v", last)
+	}
 }
 
 func TestF2DoesNotCancelActiveShellExecution(t *testing.T) {
@@ -429,6 +436,41 @@ func TestTakeControlFinishedSyncsTrackedTopPane(t *testing.T) {
 	}
 	if next.takeControl.TrackedPaneID != "%7" {
 		t.Fatalf("expected take-control tracked pane %%7, got %q", next.takeControl.TrackedPaneID)
+	}
+}
+
+func TestTakeControlFinishedResumesControllerWithoutLocalExecution(t *testing.T) {
+	ctrl := &fakeController{
+		continueEvents: []controller.TranscriptEvent{
+			{
+				Kind: controller.EventCommandStart,
+				Payload: controller.CommandStartPayload{
+					Command: "sleep 20",
+					Execution: controller.CommandExecution{
+						ID:        "cmd-1",
+						Command:   "sleep 20",
+						Origin:    controller.CommandOriginUserShell,
+						State:     controller.CommandExecutionRunning,
+						StartedAt: time.Now(),
+					},
+				},
+			},
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+
+	updated, cmd := model.Update(takeControlFinishedMsg{})
+	next := updated.(Model)
+
+	msg := controllerEventsFromCmd(t, cmd)
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+
+	if ctrl.continueCalls != 1 {
+		t.Fatalf("expected ResumeAfterTakeControl to be called once, got %d", ctrl.continueCalls)
+	}
+	if next.activeExecution == nil || next.activeExecution.Command != "sleep 20" {
+		t.Fatalf("expected returned handoff command to become active, got %#v", next.activeExecution)
 	}
 }
 
@@ -846,6 +888,36 @@ func TestTakeControlFinishedRestartsTickingForActiveExecution(t *testing.T) {
 	}
 }
 
+func TestTakeControlFinishedPreservesExecutionAcrossTransientNilPoll(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 15",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionHandoffActive,
+		StartedAt: time.Now(),
+	}
+	model.handoffVisible = true
+	model.handoffPriorState = controller.CommandExecutionRunning
+
+	updated, _ := model.Update(takeControlFinishedMsg{})
+	model = updated.(Model)
+
+	updated, cmd := model.Update(activeExecutionMsg{execution: nil})
+	next := updated.(Model)
+
+	if next.activeExecution == nil {
+		t.Fatal("expected transient nil poll after handoff to preserve active execution")
+	}
+	if next.activeExecution.State != controller.CommandExecutionRunning {
+		t.Fatalf("expected running execution to remain visible, got %#v", next.activeExecution)
+	}
+	if cmd == nil {
+		t.Fatal("expected a follow-up execution poll after preserving active execution")
+	}
+}
+
 func TestMaybeExecutionCheckInCmdChecksInForAgentOwnedExecution(t *testing.T) {
 	ctrl := &fakeController{
 		checkInEvents: []controller.TranscriptEvent{
@@ -987,6 +1059,45 @@ func TestShellSubmitCreatesActiveExecution(t *testing.T) {
 	}
 	if next.activeExecution.Origin != controller.CommandOriginUserShell {
 		t.Fatalf("expected user-shell origin, got %#v", next.activeExecution)
+	}
+}
+
+func TestCommandResultClearsLiveShellTailPreview(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.showShellTail = true
+	model.liveShellTail = "1\n2\n3"
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 5",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+	}
+
+	updated, _ := model.Update(controllerEventsMsg{
+		events: []controller.TranscriptEvent{
+			{
+				Kind: controller.EventCommandResult,
+				Payload: controller.CommandResultSummary{
+					ExecutionID: "cmd-1",
+					Command:     "sleep 5",
+					Origin:      controller.CommandOriginUserShell,
+					ExitCode:    0,
+					Summary:     "1\n2\n3",
+				},
+			},
+		},
+	})
+	next := updated.(Model)
+
+	if next.showShellTail {
+		t.Fatal("expected live shell tail to clear after command result")
+	}
+	if next.liveShellTail != "" {
+		t.Fatalf("expected cleared shell tail text, got %q", next.liveShellTail)
+	}
+	if next.activeExecution != nil {
+		t.Fatalf("expected active execution to clear after command result, got %#v", next.activeExecution)
 	}
 }
 
@@ -2234,8 +2345,11 @@ func TestDirectShellCommandDoesNotAutoContinueAgentLoop(t *testing.T) {
 	if ctrl.continueCalls != 0 {
 		t.Fatalf("expected no auto-continue call, got %d", ctrl.continueCalls)
 	}
-	if nextCmd == nil {
-		t.Fatal("expected shell-tail refresh command")
+	if nextCmd != nil {
+		t.Fatal("expected no shell-tail refresh after direct shell result")
+	}
+	if model.showShellTail {
+		t.Fatal("expected shell-tail preview to clear after direct shell result")
 	}
 }
 

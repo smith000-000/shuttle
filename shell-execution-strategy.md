@@ -87,6 +87,9 @@ What is still not done:
 - the agent still needs tighter guardrails around when it should propose raw keys versus when it should simply tell the user to take control
 - semantic shell integration is only partially implemented; local shells now have a first-pass semantic shim, but Shuttle still needs broader raw-marker consumption and subshell/bootstrap support
 - execution lifecycle transitions are still too ad hoc in the controller; state and ownership rules need to become first-class before parallel execution is revisited
+- `internal/controller/controller.go` and `internal/tui/model.go` are now large enough that further point fixes should come with a decomposition backlog:
+  - controller: execution lifecycle/state machine, agent-turn normalization, plan management, and tracked-shell ownership helpers
+  - TUI: composer/input routing, transcript rendering, proposal/approval state, and handoff/fullscreen control
 
 ## Recommended Direction
 
