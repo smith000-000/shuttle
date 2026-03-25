@@ -20,6 +20,8 @@ What is working now:
 - `KEYS>` mode for sending raw terminal input
 - partial semantic shell integration for local shells
 - serial agentic command loops with one proposal at a time and auto-continue after results
+- native unified-diff patch proposals with explicit apply/reject/ask-agent flow
+- local file creation and edits through native patch application
 - foreground attach and handoff reconciliation for manually started shell commands
 - real OpenAI Responses API path with API-key auth
 - provider settings UI with:
@@ -37,7 +39,6 @@ What is working now:
 - Codex CLI model suggestions sourced from the OpenAI models catalog when available, with free-text entry still allowed
 
 What is still in progress:
-- patch application and file creation flow
 - broader semantic shell integration (`OSC 133` / `OSC 7`) consumption and subshell/bootstrap support
 - provider onboarding polish and provider-auth validation
 - provider registry/plugin architecture instead of static first-class wiring
@@ -235,8 +236,9 @@ git worktree list
 
 ## Current Limitations
 
-- proposed patches are not yet applied automatically
-- the agent cannot yet create files unless Shuttle grows a real patch/apply path
+- patch proposals still require explicit user apply/approval; there is no auto-apply mode
+- patch editing is not implemented; patch proposals support apply, reject, or ask-agent
+- native patch apply is text-unified-diff only; binary and other advanced patch forms are rejected
 - the serial shell-tracking model is in good shape, but remote/container semantic bootstrap is still incomplete
 - transcript and UI polish is still catching up with the newer shell/runtime model
 - multi-card or parallel execution UI is intentionally deferred
