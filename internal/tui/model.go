@@ -34,10 +34,25 @@ const (
 )
 
 type Entry struct {
-	Title  string
-	Body   string
-	Detail string
+	Title   string
+	Body    string
+	Detail  string
+	TagKind entryTagKind
 }
+
+type entryTagKind string
+
+const (
+	entryTagDefault        entryTagKind = ""
+	entryTagResultSuccess  entryTagKind = "result_success"
+	entryTagResultError    entryTagKind = "result_error"
+	entryTagResultNoExec   entryTagKind = "result_noexec"
+	entryTagResultNotFound entryTagKind = "result_not_found"
+	entryTagResultSignal   entryTagKind = "result_signal"
+	entryTagResultSigInt   entryTagKind = "result_sigint"
+	entryTagResultCustom   entryTagKind = "result_custom"
+	entryTagResultFatal    entryTagKind = "result_fatal"
+)
 
 type composerCompletion struct {
 	Start      int
@@ -1878,9 +1893,10 @@ func interruptedExecutionEntry(execution *controller.CommandExecution, summary s
 	}
 
 	return Entry{
-		Title:  "result",
-		Body:   strings.Join(bodyLines, "\n"),
-		Detail: strings.Join(detail, "\n"),
+		Title:   "result",
+		Body:    strings.Join(bodyLines, "\n"),
+		Detail:  strings.Join(detail, "\n"),
+		TagKind: entryTagResultSigInt,
 	}
 }
 
@@ -2842,7 +2858,7 @@ func (m Model) transcriptDisplayLines(width int) []transcriptRenderLine {
 		if index == m.selectedEntry {
 			prefix = "› "
 		}
-		tag := m.renderTag(entry.Title)
+		tag := m.renderTag(entry)
 		tagStart := lipgloss.Width(prefix)
 		tagEnd := tagStart + lipgloss.Width(tag)
 		rendered := m.renderEntryLines(index, entry, width)
@@ -2865,10 +2881,10 @@ func (m Model) renderEntryLines(index int, entry Entry, width int) []string {
 		prefix = "› "
 	}
 
-	tag := m.renderTag(entry.Title)
+	tag := m.renderTag(entry)
 	tagWidth := lipgloss.Width(tag)
 	bodyWidth := max(10, width-lipgloss.Width(prefix)-tagWidth-1)
-	bodyStyle := m.renderBodyStyle(entry.Title)
+	bodyStyle := m.renderBodyStyle(entry)
 	indent := strings.Repeat(" ", lipgloss.Width(prefix)+tagWidth+1)
 
 	rawLines := strings.Split(entry.Body, "\n")
@@ -2905,14 +2921,17 @@ func (m Model) renderEntryLines(index int, entry Entry, width int) []string {
 	return rendered
 }
 
-func (m Model) renderBodyStyle(title string) lipgloss.Style {
-	switch title {
+func (m Model) renderBodyStyle(entry Entry) lipgloss.Style {
+	switch entry.Title {
 	case "system":
 		return m.styles.bodySystem
 	case "user", "shell":
 		return m.styles.bodyShell
 	case "result":
-		return m.styles.bodyResult
+		if entry.TagKind == entryTagResultSuccess || entry.TagKind == entryTagDefault {
+			return m.styles.bodyResult
+		}
+		return m.styles.bodyError
 	case "agent", "plan", "proposal":
 		return m.styles.bodyAgent
 	case "approval", "error":
@@ -4997,6 +5016,68 @@ func formatResultDetail(command string, exitCode int, output string) string {
 	return strings.Join(sections, "\n")
 }
 
+func resultSummaryHasVisibleOutput(summary string) bool {
+	trimmed := strings.TrimSpace(summary)
+	return trimmed != "" && trimmed != "(no output)"
+}
+
+func commandLikelyChangesDirectory(command string) bool {
+	fields := strings.Fields(strings.TrimSpace(command))
+	if len(fields) == 0 {
+		return false
+	}
+
+	switch fields[0] {
+	case "cd", "pushd", "popd":
+		return true
+	default:
+		return false
+	}
+}
+
+func silentSuccessTranscriptBody(payload controller.CommandResultSummary) string {
+	if payload.ExitCode != 0 || payload.State != controller.CommandExecutionCompleted {
+		return ""
+	}
+	if resultSummaryHasVisibleOutput(payload.Summary) {
+		return ""
+	}
+	if payload.ShellContext != nil && commandLikelyChangesDirectory(payload.Command) {
+		return strings.TrimSpace(payload.ShellContext.Directory)
+	}
+	return ""
+}
+
+func classifyResultTagKind(payload controller.CommandResultSummary) entryTagKind {
+	if payload.State == controller.CommandExecutionLost {
+		return entryTagResultFatal
+	}
+
+	switch payload.ExitCode {
+	case 0:
+		return entryTagResultSuccess
+	case shell.InterruptedExitCode:
+		return entryTagResultSigInt
+	case 126:
+		return entryTagResultNoExec
+	case 127:
+		return entryTagResultNotFound
+	case 255:
+		return entryTagResultFatal
+	}
+
+	switch {
+	case payload.ExitCode >= 1 && payload.ExitCode <= 125:
+		return entryTagResultError
+	case payload.ExitCode >= 128 && payload.ExitCode <= 165:
+		return entryTagResultSignal
+	case payload.ExitCode >= 166 && payload.ExitCode <= 254:
+		return entryTagResultCustom
+	default:
+		return entryTagResultError
+	}
+}
+
 func compactPlanEntry(summary string, steps []controller.PlanStep) Entry {
 	detailLines := make([]string, 0, len(steps)+2)
 	if strings.TrimSpace(summary) != "" {
@@ -5275,8 +5356,27 @@ func (m Model) halfPageScrollSize() int {
 	return max(1, m.currentTranscriptHeight()/2)
 }
 
-func (m Model) renderTag(title string) string {
+func (m Model) renderTag(entry Entry) string {
+	title := entry.Title
 	if transcriptEmojiEnabled() {
+		switch entry.TagKind {
+		case entryTagResultSuccess:
+			return m.styles.glyphResult.Render("✅")
+		case entryTagResultError:
+			return m.styles.glyphError.Render("❌")
+		case entryTagResultNoExec:
+			return m.styles.glyphError.Render("🚫")
+		case entryTagResultNotFound:
+			return m.styles.glyphError.Render("❓")
+		case entryTagResultSignal:
+			return m.styles.glyphSystem.Render("💥")
+		case entryTagResultSigInt:
+			return m.styles.glyphSystem.Render("⚡")
+		case entryTagResultCustom:
+			return m.styles.glyphSystem.Render("🛠️")
+		case entryTagResultFatal:
+			return m.styles.glyphError.Render("🧨")
+		}
 		switch title {
 		case "system":
 			return m.styles.glyphSystem.Render("⚙")
@@ -5302,6 +5402,24 @@ func (m Model) renderTag(title string) string {
 	}
 
 	text := strings.ToUpper(title)
+	switch entry.TagKind {
+	case entryTagResultSuccess:
+		return m.styles.tagResult.Render("RESULT")
+	case entryTagResultError:
+		return m.styles.tagError.Render("ERROR")
+	case entryTagResultNoExec:
+		return m.styles.tagError.Render("NOEXEC")
+	case entryTagResultNotFound:
+		return m.styles.tagError.Render("MISSING")
+	case entryTagResultSignal:
+		return m.styles.tagSystem.Render("SIGNAL")
+	case entryTagResultSigInt:
+		return m.styles.tagSystem.Render("INT")
+	case entryTagResultCustom:
+		return m.styles.tagSystem.Render("CUSTOM")
+	case entryTagResultFatal:
+		return m.styles.tagError.Render("FATAL")
+	}
 
 	switch title {
 	case "system":
@@ -6764,12 +6882,17 @@ func eventsToEntries(events []controller.TranscriptEvent, collapseResults bool) 
 			entries = append(entries, Entry{Title: "shell", Body: payload.Command})
 		case controller.EventCommandResult:
 			payload, _ := event.Payload.(controller.CommandResultSummary)
+			tagKind := classifyResultTagKind(payload)
 			fullBody := strings.TrimSpace(payload.Summary)
-			if fullBody == "" {
-				fullBody = "(no output)"
+			hasVisibleOutput := resultSummaryHasVisibleOutput(fullBody)
+			detailBody := fullBody
+			if detailBody == "" {
+				detailBody = "(no output)"
 			}
 			body := fullBody
-			if collapseResults {
+			if !hasVisibleOutput {
+				body = silentSuccessTranscriptBody(payload)
+			} else if collapseResults {
 				body = compactResultPreview(fullBody, 6)
 			}
 			if payload.State == controller.CommandExecutionCanceled {
@@ -6784,9 +6907,10 @@ func eventsToEntries(events []controller.TranscriptEvent, collapseResults bool) 
 					detail = append(detail, "", "output so far:", fullBody)
 				}
 				entries = append(entries, Entry{
-					Title:  "result",
-					Body:   "status=canceled\n" + body,
-					Detail: strings.Join(detail, "\n"),
+					Title:   "result",
+					Body:    "status=canceled\n" + body,
+					Detail:  strings.Join(detail, "\n"),
+					TagKind: tagKind,
 				})
 				break
 			}
@@ -6808,16 +6932,18 @@ func eventsToEntries(events []controller.TranscriptEvent, collapseResults bool) 
 					detail = append(detail, "", "latest observed output:", fullBody)
 				}
 				entries = append(entries, Entry{
-					Title:  "result",
-					Body:   "status=lost\n" + body,
-					Detail: strings.Join(detail, "\n"),
+					Title:   "result",
+					Body:    "status=lost\n" + body,
+					Detail:  strings.Join(detail, "\n"),
+					TagKind: tagKind,
 				})
 				break
 			}
 			entries = append(entries, Entry{
-				Title:  "result",
-				Body:   fmt.Sprintf("exit=%d\n%s", payload.ExitCode, body),
-				Detail: formatResultDetail(payload.Command, payload.ExitCode, fullBody),
+				Title:   "result",
+				Body:    body,
+				Detail:  formatResultDetail(payload.Command, payload.ExitCode, detailBody),
+				TagKind: tagKind,
 			})
 		case controller.EventModelInfo:
 			payload, _ := event.Payload.(controller.AgentModelInfo)

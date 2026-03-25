@@ -20,8 +20,9 @@ Execution-monitor redesign / semantic shell hardening status on `semantic-shell-
 - implemented on `semantic-shell-bootstrap`: subshell transition detection, local nested-shell semantic bootstrap, manual foreground attach, tracked-pane/session recovery, explicit `TrackedShellTarget`, and shell-only destructive tmux recovery
 - implemented on `semantic-shell-bootstrap`: serial execution registry scaffolding, single-owner submission enforcement, serial auto-continue prompt hardening, hidden `proposal_kind:"answer"` state fix, and informational-only plan cards that no longer overwrite or outlive real completion state
 - implemented on `semantic-shell-bootstrap`: hybrid shell execution model with a persistent user shell context, structured recent manual-shell commands/actions from shell history, owned tmux execution panes for agent-approved commands, owned-pane cleanup, and TUI interrupt/key routing that targets the active execution pane instead of always targeting the persistent user shell
-- in progress: hardening execution lifecycle invariants so command state cannot drift across handoff, attach, pane replacement, or session recreation
-- next: finish the controller-side execution state machine and add integration-style command-tracking recovery tests before any future parallel-command UI work
+- implemented on `semantic-shell-bootstrap`: prompt-validation hardening so stale scrollback cannot reconcile running commands as completed after `F2`, plus compact exit-aware transcript result rendering
+- current focus should shift away from shell-tracking surgery and toward transcript/UI cleanup plus decomposition of the large controller and TUI files
+- next: keep the serial tracking model stable, add more integration-style regression coverage opportunistically, and defer any parallel-command UI work to a later branch
 
 Security hardening branch scope on `security-hardening-runtime`:
 - audit runtime artifact placement, permissions, and retention now that `main` includes both execution-monitor and provider-onboarding work
@@ -74,8 +75,7 @@ Milestone 5 still needs:
 - release-grade runtime management for socket/session lifecycle and crash recovery
 - a real patch-application path so proposed diffs can become actual workspace changes
 - guardrails that prevent the agent from claiming proposed files exist before the patch is applied
-- stronger monitor-side confidence so active-command classification such as `awaiting_input`, `interactive_fullscreen`, and `lost` is driven by better evidence and fewer fallback heuristics
-- explicit execution lifecycle/state-machine hardening so one command cannot leave stale ownership or stale state behind across recovery and handoff paths
+- stronger monitor-side confidence for ambiguous remote/container takeovers beyond the now-stable local serial model
 - integration-style tests for tracked-command recovery flows, not just per-layer unit tests
 - pane-stream/fullscreen detection beyond tmux alternate-screen heuristics so aliases, wrappers, and remote fullscreen apps can be recognized from terminal behavior instead of command-name lists alone
 - richer state-aware agent recovery actions for ambiguous shell takeovers, including deciding when to propose raw terminal input versus simple recovery guidance

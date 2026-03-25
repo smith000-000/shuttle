@@ -161,6 +161,11 @@ Current fallback ladder:
 - if no execution reconciles, ask the controller to attach to a manually started foreground command
 - if neither applies, treat the shell as having no active tracked command
 
+Important correctness rule:
+- prompt context is only accepted when Shuttle can see a current trailing prompt
+- prompt-looking lines buried earlier in pane scrollback do not count as proof that a quiet foreground command has completed
+- this prevents false `exit=0` reconciliation for handoff cases like `sleep 20`
+
 Important presentation rule:
 - the live shell tail preview is only for in-flight commands
 - once Shuttle emits a terminal `command_result` or `error`, transcript ownership takes over and the live tail preview is cleared
@@ -226,6 +231,10 @@ This path is weaker than fully tracked transport because the command was not lau
 - detect that something is still running
 - keep showing output
 - reconcile completion back into `LastCommandResult`
+
+Additional guardrail:
+- attached foreground monitors now require a current prompt before completing from prompt-return semantics
+- stale prompt scrollback is ignored the same way it is for the primary handoff-reconciliation path
 
 ## 3.5 Context-Transition Commands
 

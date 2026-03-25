@@ -64,8 +64,8 @@ The real problem is that Shuttle currently models shell execution as a blocking 
 That diagnosis still holds after the recent hardening work:
 - the shell substrate is much stronger now
 - serial agentic looping is workable
-- but execution state is still mutated in too many places without one explicit transition table
-- the next hardening slice should fix that before any richer overlap or multi-card UI work
+- the serial tracking model is now stable enough that the next slice should not be more shell-tracking churn
+- the remaining risk is mostly transcript/UI complexity and monolithic controller/TUI code, not core command truth
 
 ## Current Branch Status
 On `semantic-shell-bootstrap`, Shuttle now has a usable first pass of the redesigned execution stack:
@@ -79,14 +79,14 @@ On `semantic-shell-bootstrap`, Shuttle now has a usable first pass of the redesi
 - serial execution ownership enforcement plus an internal execution registry so future multi-card work has a stable base without allowing overlap yet
 - serial auto-continue hardening so ordered one-command-at-a-time workflows can keep progressing without an extra user "go"
 - plan cards demoted to informational state instead of approval-like control flow, with continuation turns now suppressing stale replacement plans and emitting explicit plan-complete state when needed
+- quiet commands like `sleep 20` no longer reconcile as completed from stale prompt scrollback after `F2`
+- transcript result entries now reflect exit status instead of always presenting a green success result
 
 What is still not done:
-- monitor-side confidence is still too heuristic in some quiet or ambiguous takeovers
 - fullscreen/interactive detection still needs stronger terminal-behavior signals beyond current tmux metadata heuristics
-- noisy transport/script echoes still need occasional cleanup in tails and recovery snapshots
+- transcript and UI polish still need cleanup now that the shell/runtime model has changed substantially
 - the agent still needs tighter guardrails around when it should propose raw keys versus when it should simply tell the user to take control
 - semantic shell integration is only partially implemented; local shells now have a first-pass semantic shim, but Shuttle still needs broader raw-marker consumption and subshell/bootstrap support
-- execution lifecycle transitions are still too ad hoc in the controller; state and ownership rules need to become first-class before parallel execution is revisited
 - `internal/controller/controller.go` and `internal/tui/model.go` are now large enough that further point fixes should come with a decomposition backlog:
   - controller: execution lifecycle/state machine, agent-turn normalization, plan management, and tracked-shell ownership helpers
   - TUI: composer/input routing, transcript rendering, proposal/approval state, and handoff/fullscreen control
@@ -100,7 +100,15 @@ That hybrid model is now the intended baseline. The remaining work is to simplif
 
 ## Recommended Direction
 
-Before adding any tiny local classifier, the next major architecture upgrade should be standards-based semantic shell integration:
+The next major product slice should not be another command-tracking redesign.
+
+For this branch, the better direction is:
+- keep the current hybrid shell model stable
+- clean up transcript/UI noise around results, plans, and handoff
+- split the large controller/TUI files before layering more behavior onto them
+- defer multi-card / parallel execution work to a later branch
+
+Semantic-shell expansion remains valuable, but it is no longer the immediate blocker for normal serial use. When that work resumes, it should still stay standards-based:
 - `OSC 133` for prompt/command lifecycle
 - `OSC 7` for cwd tracking
 

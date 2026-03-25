@@ -2536,6 +2536,99 @@ func TestCommandResultEntryCanRenderExpandedForDirectShellUse(t *testing.T) {
 	}
 }
 
+func TestSilentSuccessResultEntryOmitsExitZeroNoise(t *testing.T) {
+	entries := eventsToEntries([]controller.TranscriptEvent{
+		{
+			Kind: controller.EventCommandResult,
+			Payload: controller.CommandResultSummary{
+				Command:  "touch note.txt",
+				ExitCode: 0,
+				State:    controller.CommandExecutionCompleted,
+				Summary:  "(no output)",
+			},
+		},
+	}, true)
+
+	if len(entries) != 1 {
+		t.Fatalf("expected one entry, got %d", len(entries))
+	}
+	if entries[0].Body != "" {
+		t.Fatalf("expected silent success body to be empty, got %q", entries[0].Body)
+	}
+	if !strings.Contains(entries[0].Detail, "exit=0") {
+		t.Fatalf("expected detail to retain exit code, got %q", entries[0].Detail)
+	}
+}
+
+func TestSilentDirectoryChangeResultShowsUpdatedDirectory(t *testing.T) {
+	entries := eventsToEntries([]controller.TranscriptEvent{
+		{
+			Kind: controller.EventCommandResult,
+			Payload: controller.CommandResultSummary{
+				Command:  "cd go_learn",
+				ExitCode: 0,
+				State:    controller.CommandExecutionCompleted,
+				Summary:  "(no output)",
+				ShellContext: &shell.PromptContext{
+					Directory: "~/source/repos/go_learn",
+				},
+			},
+		},
+	}, true)
+
+	if len(entries) != 1 {
+		t.Fatalf("expected one entry, got %d", len(entries))
+	}
+	if entries[0].Body != "~/source/repos/go_learn" {
+		t.Fatalf("expected updated directory in silent success body, got %q", entries[0].Body)
+	}
+}
+
+func TestCommandResultEntryClassifiesExitCodeTags(t *testing.T) {
+	entries := eventsToEntries([]controller.TranscriptEvent{
+		{
+			Kind: controller.EventCommandResult,
+			Payload: controller.CommandResultSummary{
+				Command:  "missing-cmd",
+				ExitCode: 127,
+				State:    controller.CommandExecutionFailed,
+				Summary:  "command not found",
+			},
+		},
+		{
+			Kind: controller.EventCommandResult,
+			Payload: controller.CommandResultSummary{
+				Command:  "sleep 20",
+				ExitCode: shell.InterruptedExitCode,
+				State:    controller.CommandExecutionCanceled,
+				Summary:  "^C",
+			},
+		},
+		{
+			Kind: controller.EventCommandResult,
+			Payload: controller.CommandResultSummary{
+				Command:  "bad-wrapper",
+				ExitCode: 255,
+				State:    controller.CommandExecutionFailed,
+				Summary:  "fatal wrapper failure",
+			},
+		},
+	}, true)
+
+	if len(entries) != 3 {
+		t.Fatalf("expected three entries, got %d", len(entries))
+	}
+	if entries[0].TagKind != entryTagResultNotFound {
+		t.Fatalf("expected not-found tag, got %#v", entries[0])
+	}
+	if entries[1].TagKind != entryTagResultSigInt {
+		t.Fatalf("expected sigint tag, got %#v", entries[1])
+	}
+	if entries[2].TagKind != entryTagResultFatal {
+		t.Fatalf("expected fatal tag, got %#v", entries[2])
+	}
+}
+
 func TestPlanEntryIsCollapsedInTranscriptButPreservedInDetail(t *testing.T) {
 	events := []controller.TranscriptEvent{
 		{

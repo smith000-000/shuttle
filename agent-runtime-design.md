@@ -102,12 +102,15 @@ type AgentInput struct {
 }
 
 type SessionContext struct {
-    SessionName         string
-    BottomPaneID        string
-    TrackedShell        TrackedShellTarget
-    WorkingDirectory    string
-    RecentShellOutput   string
-    RecentManualActions []string
+    SessionName          string
+    BottomPaneID         string
+    TrackedShell         TrackedShellTarget
+    WorkingDirectory     string
+    UserShellHistoryFile string
+    RecentShellOutput    string
+    RecentManualCommands []string
+    RecentManualActions  []string
+    CurrentShell         *shell.PromptContext
 }
 
 type TaskContext struct {
@@ -115,6 +118,9 @@ type TaskContext struct {
     PriorTranscript    []TranscriptEvent
     PendingApproval    *ApprovalRequest
     LastCommandResult  *CommandResultSummary
+    ActivePlan         *ActivePlan
+    PrimaryExecutionID string
+    ExecutionRegistry  []CommandExecution
 }
 ```
 
@@ -122,6 +128,8 @@ Notes:
 - `RecentShellOutput` should come from Shuttle's observed shell buffer, not from the runtime.
 - `PriorTranscript` should be a compact structured history, not a raw terminal dump.
 - `PendingApproval` allows the runtime to continue a refine or approval flow coherently.
+- `RecentManualCommands` and `RecentManualActions` let the runtime resolve prompts like "see the file I just renamed".
+- `TrackedShell` and `CurrentShell` describe the persistent user shell context; approved agent commands may still run in owned execution panes tracked separately in `ExecutionRegistry`.
 
 ## 3.3 Agent Response
 
