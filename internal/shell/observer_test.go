@@ -55,6 +55,15 @@ __SHUTTLE_CTX_USER__=jsmith
 	}
 }
 
+func TestSanitizeCapturedBodyPreservesTrackedCommandScriptErrors(t *testing.T) {
+	body := ". '/run/user/1000/shuttle/commands/cmd-1.sh'\n__SHUTTLE_B__:cmd-1\n/run/user/1000/shuttle/commands/cmd-1.sh:2: command not found: apply_patch\njsmith@linuxdesktop ~/source/repos/aiterm %"
+
+	got := sanitizeCapturedBody(body)
+	if !strings.Contains(got, "command not found: apply_patch") {
+		t.Fatalf("expected tracked command error to survive sanitization, got %q", got)
+	}
+}
+
 func TestStripEchoedSingleLineCommand(t *testing.T) {
 	body := "jsmith@host % ls\nfile-a\nfile-b"
 
@@ -457,6 +466,80 @@ func TestAttachForegroundCommandSkipsIdleRemotePrompt(t *testing.T) {
 	}
 	if monitor != nil {
 		t.Fatalf("expected idle remote prompt not to attach, got %#v", monitor.Snapshot())
+	}
+}
+
+func TestAttachForegroundCommandSkipsIdleRemotePromptWithoutDirectory(t *testing.T) {
+	client := &fakeSemanticPaneClient{
+		pane:    tmux.Pane{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/24"},
+		capture: "root@web01#",
+	}
+	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
+
+	monitor, err := observer.AttachForegroundCommand(context.Background(), "%0")
+	if err != nil {
+		t.Fatalf("AttachForegroundCommand() error = %v", err)
+	}
+	if monitor != nil {
+		t.Fatalf("expected idle remote prompt without cwd not to attach, got %#v", monitor.Snapshot())
+	}
+}
+
+func TestAttachForegroundCommandSkipsShellPaneWhenPromptParseFails(t *testing.T) {
+	client := &fakeSemanticPaneClient{
+		pane:    tmux.Pane{ID: "%0", CurrentCommand: "zsh", TTY: "/dev/pts/24"},
+		capture: "banner line without a parseable prompt yet",
+	}
+	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
+
+	monitor, err := observer.AttachForegroundCommand(context.Background(), "%0")
+	if err != nil {
+		t.Fatalf("AttachForegroundCommand() error = %v", err)
+	}
+	if monitor != nil {
+		t.Fatalf("expected shell pane without prompt evidence not to attach, got %#v", monitor.Snapshot())
+	}
+}
+
+func TestRunTrackedMonitorCompletesOnPromptReturnEvenWithNonPromptSemanticState(t *testing.T) {
+	markers := protocol.NewMarkers()
+	command := "apply_patch <<'PATCH'\ndiff --git a/hello.txt b/hello.txt\n--- a/hello.txt\n+++ b/hello.txt\n@@ -1 +1 @@\n-hello\n+hello world\nPATCH"
+	client := &fakeSemanticPaneClient{
+		pane: tmux.Pane{ID: "%0", CurrentCommand: "zsh", TTY: "/dev/pts/31"},
+		capture: strings.Join([]string{
+			"jsmith@linuxdesktop ~/source/repos/aiterm %",
+			markers.BeginLine,
+			"/run/user/1000/shuttle/commands/cmd-1.sh:2: command not found: apply_patch",
+			"jsmith@linuxdesktop ~/source/repos/aiterm %",
+		}, "\n"),
+		escaped: "\x1b]133;C\x1b\\\x1b]7;file://localhost/home/jsmith/source/repos/aiterm\x1b\\",
+	}
+	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
+	monitor := newTrackedCommandMonitor(markers.CommandID, command)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	go observer.runTrackedMonitor(
+		ctx,
+		monitor,
+		"%0",
+		command,
+		". '/run/user/1000/shuttle/commands/cmd-1.sh'",
+		250*time.Millisecond,
+		"jsmith@linuxdesktop ~/source/repos/aiterm %",
+		markers,
+		func() {},
+	)
+
+	result, err := monitor.Wait()
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if result.State != MonitorStateFailed || result.ExitCode != 127 {
+		t.Fatalf("expected prompt-return failure result, got %#v", result)
+	}
+	if !strings.Contains(result.Captured, "command not found: apply_patch") {
+		t.Fatalf("expected captured shell failure, got %q", result.Captured)
 	}
 }
 

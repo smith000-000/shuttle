@@ -27,6 +27,7 @@ type SessionContext struct {
 	BottomPaneID         string
 	TrackedShell         TrackedShellTarget
 	WorkingDirectory     string
+	LocalWorkspaceRoot   string
 	UserShellHistoryFile string
 	RecentShellOutput    string
 	RecentManualCommands []string
@@ -35,15 +36,16 @@ type SessionContext struct {
 }
 
 type TaskContext struct {
-	TaskID             string
-	PriorTranscript    []TranscriptEvent
-	PendingApproval    *ApprovalRequest
-	LastCommandResult  *CommandResultSummary
-	ActivePlan         *ActivePlan
-	PrimaryExecutionID string
-	ExecutionRegistry  []CommandExecution
-	CurrentExecution   *CommandExecution
-	RecoverySnapshot   string
+	TaskID               string
+	PriorTranscript      []TranscriptEvent
+	PendingApproval      *ApprovalRequest
+	LastCommandResult    *CommandResultSummary
+	LastPatchApplyResult *PatchApplySummary
+	ActivePlan           *ActivePlan
+	PrimaryExecutionID   string
+	ExecutionRegistry    []CommandExecution
+	CurrentExecution     *CommandExecution
+	RecoverySnapshot     string
 }
 
 type AgentResponse struct {
@@ -145,17 +147,36 @@ type TranscriptEvent struct {
 type TranscriptEventKind string
 
 const (
-	EventUserMessage   TranscriptEventKind = "user_message"
-	EventAgentMessage  TranscriptEventKind = "agent_message"
-	EventPlan          TranscriptEventKind = "plan"
-	EventProposal      TranscriptEventKind = "proposal"
-	EventApproval      TranscriptEventKind = "approval"
-	EventCommandStart  TranscriptEventKind = "command_start"
-	EventCommandResult TranscriptEventKind = "command_result"
-	EventModelInfo     TranscriptEventKind = "model_info"
-	EventSystemNotice  TranscriptEventKind = "system_notice"
-	EventError         TranscriptEventKind = "error"
+	EventUserMessage      TranscriptEventKind = "user_message"
+	EventAgentMessage     TranscriptEventKind = "agent_message"
+	EventPlan             TranscriptEventKind = "plan"
+	EventProposal         TranscriptEventKind = "proposal"
+	EventApproval         TranscriptEventKind = "approval"
+	EventCommandStart     TranscriptEventKind = "command_start"
+	EventCommandResult    TranscriptEventKind = "command_result"
+	EventPatchApplyResult TranscriptEventKind = "patch_apply_result"
+	EventModelInfo        TranscriptEventKind = "model_info"
+	EventSystemNotice     TranscriptEventKind = "system_notice"
+	EventError            TranscriptEventKind = "error"
 )
+
+type PatchApplyFile struct {
+	Operation string
+	OldPath   string
+	NewPath   string
+}
+
+type PatchApplySummary struct {
+	WorkspaceRoot string
+	Validation    string
+	Applied       bool
+	Created       int
+	Updated       int
+	Deleted       int
+	Renamed       int
+	Files         []PatchApplyFile
+	Error         string
+}
 
 type CommandOrigin string
 
@@ -229,11 +250,13 @@ type Controller interface {
 	SubmitProposalRefinement(ctx context.Context, proposal ProposalPayload, note string) ([]TranscriptEvent, error)
 	ContinueActivePlan(ctx context.Context) ([]TranscriptEvent, error)
 	ContinueAfterCommand(ctx context.Context) ([]TranscriptEvent, error)
+	ContinueAfterPatchApply(ctx context.Context) ([]TranscriptEvent, error)
 	CheckActiveExecution(ctx context.Context) ([]TranscriptEvent, error)
 	ResumeAfterTakeControl(ctx context.Context) ([]TranscriptEvent, error)
 	RefreshActiveExecution(ctx context.Context) ([]TranscriptEvent, *CommandExecution, error)
 	SubmitShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error)
 	SubmitProposedShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error)
+	ApplyProposedPatch(ctx context.Context, patch string) ([]TranscriptEvent, error)
 	DecideApproval(ctx context.Context, approvalID string, decision ApprovalDecision, refineText string) ([]TranscriptEvent, error)
 	RefreshShellContext(ctx context.Context) (*shell.PromptContext, error)
 	PeekShellTail(ctx context.Context, lines int) (string, error)

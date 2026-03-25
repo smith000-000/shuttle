@@ -138,6 +138,18 @@ func TestStructuredResponsesRequestIncludesSerialContinuationGuidance(t *testing
 	if !strings.Contains(systemPrompt, "propose exactly one next command now") {
 		t.Fatalf("expected serial continuation guidance in system prompt, got %q", systemPrompt)
 	}
+	if !strings.Contains(systemPrompt, "Prefer stopping after a satisfied one-shot request.") {
+		t.Fatalf("expected stop-biased continuation guidance in system prompt, got %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "ordered multi-step workflow") || !strings.Contains(systemPrompt, "do not stop at diagnosis") {
+		t.Fatalf("expected workflow checklist and unresolved-inspection guidance in system prompt, got %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "git-style unified diff text") || !strings.Contains(systemPrompt, "Do not emit the non-standard \"*** Begin Patch\" format.") {
+		t.Fatalf("expected patch format guidance in system prompt, got %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "Never propose a shell command that invokes apply_patch, git apply, patch") {
+		t.Fatalf("expected shell patch-tool prohibition in system prompt, got %q", systemPrompt)
+	}
 }
 
 func TestResponsesAgentCustomBaseURLSmoke(t *testing.T) {

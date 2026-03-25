@@ -116,7 +116,7 @@ func parsePromptContextLine(line string, localHost string) (PromptContext, bool)
 	}
 
 	userHost, directory := parsePromptPrefix(body)
-	if directory == "" && branch == "" {
+	if userHost == "" && directory == "" && branch == "" {
 		return PromptContext{}, false
 	}
 
