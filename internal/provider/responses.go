@@ -515,6 +515,9 @@ func buildTurnContext(input controller.AgentInput) string {
 	if input.Session.WorkingDirectory != "" {
 		sessionLines = append(sessionLines, "cwd="+input.Session.WorkingDirectory)
 	}
+	if input.Session.LocalWorkspaceRoot != "" {
+		sessionLines = append(sessionLines, "workspace_root="+input.Session.LocalWorkspaceRoot)
+	}
 	if input.Session.TrackedShell.PaneID != "" {
 		sessionLines = append(sessionLines, "tracked_pane="+input.Session.TrackedShell.PaneID)
 	}
@@ -561,6 +564,38 @@ func buildTurnContext(input controller.AgentInput) string {
 			lines = append(lines, "summary="+summary)
 		}
 		sections = append(sections, "Last command result:\n"+strings.Join(lines, "\n"))
+	}
+
+	if input.Task.LastPatchApplyResult != nil {
+		last := input.Task.LastPatchApplyResult
+		lines := []string{
+			fmt.Sprintf("applied=%t", last.Applied),
+			fmt.Sprintf("created=%d", last.Created),
+			fmt.Sprintf("updated=%d", last.Updated),
+			fmt.Sprintf("deleted=%d", last.Deleted),
+			fmt.Sprintf("renamed=%d", last.Renamed),
+		}
+		if strings.TrimSpace(last.WorkspaceRoot) != "" {
+			lines = append(lines, "workspace_root="+last.WorkspaceRoot)
+		}
+		if strings.TrimSpace(last.Validation) != "" {
+			lines = append(lines, "validation="+last.Validation)
+		}
+		if strings.TrimSpace(last.Error) != "" {
+			lines = append(lines, "error="+clipText(last.Error, 240))
+		}
+		if len(last.Files) > 0 {
+			fileLines := make([]string, 0, len(last.Files))
+			for _, file := range last.Files {
+				path := strings.TrimSpace(file.NewPath)
+				if path == "" {
+					path = strings.TrimSpace(file.OldPath)
+				}
+				fileLines = append(fileLines, fmt.Sprintf("%s %s", file.Operation, path))
+			}
+			lines = append(lines, "files="+clipText(strings.Join(fileLines, "; "), 400))
+		}
+		sections = append(sections, "Last patch apply result:\n"+strings.Join(lines, "\n"))
 	}
 
 	if input.Task.PrimaryExecutionID != "" || len(input.Task.ExecutionRegistry) > 0 {
@@ -709,6 +744,12 @@ func summarizeTranscriptEvent(event controller.TranscriptEvent) string {
 			return fmt.Sprintf("%s: canceled %s", event.Kind, clipText(payload.Command, 180))
 		}
 		return fmt.Sprintf("%s: exit=%d %s", event.Kind, payload.ExitCode, clipText(payload.Command, 180))
+	case controller.EventPatchApplyResult:
+		payload, _ := event.Payload.(controller.PatchApplySummary)
+		if payload.Applied {
+			return fmt.Sprintf("%s: created=%d updated=%d deleted=%d renamed=%d", event.Kind, payload.Created, payload.Updated, payload.Deleted, payload.Renamed)
+		}
+		return fmt.Sprintf("%s: failed %s", event.Kind, clipText(payload.Error, 180))
 	case controller.EventModelInfo:
 		payload, _ := event.Payload.(controller.AgentModelInfo)
 		model := payload.ResponseModel
@@ -831,6 +872,7 @@ Return only the JSON object required by the schema.
 Rules:
 - Keep "message" concise and useful.
 - Only use "plan_summary" and "plan_steps" when the user is asking for a plan, next steps, strategy, troubleshooting, or how to fix/approach something, or when a multi-step plan is genuinely necessary to answer well.
+- If the user asks for an ordered multi-step workflow, reversible edit-and-restore flow, or checklist-like execution, emit a concise plan/checklist that matches that requested sequence and keep the next action aligned to it.
 - Do not emit a plan for simple descriptive, factual, or status-summary requests.
 - If an active plan is present in context, prefer continuing it from the current in-progress or pending step instead of inventing a new unrelated plan.
 - For requests to inspect the current directory, repository, files, environment, or system state, prefer a "proposal_command" over answering from stale context.
@@ -838,6 +880,11 @@ Rules:
 - Never imply that you executed a shell command unless Shuttle has actual command/result context for it.
 - Never imply that a proposed patch or diff has already been applied.
 - Do not claim that files created by a proposed patch already exist, are executable, or can be referenced by later commands until Shuttle explicitly confirms the patch was applied.
+- Patch proposals and approvals must use git-style unified diff text in "proposal_patch" or "approval_patch", relative to the local workspace root shown in context.
+- Do not emit the non-standard "*** Begin Patch" format.
+- When you emit a patch, output only the raw unified diff text with exact hunk headers and counts. Do not wrap the diff in prose, bullets, or code fences.
+- Patch application mutates the local workspace root, not the active remote shell host. If the shell prompt is remote, keep local patch effects and remote shell effects clearly separate.
+- Never propose a shell command that invokes apply_patch, git apply, patch, or any heredoc-based patch application tool for local workspace edits. Use "proposal_kind":"patch" or patch approval fields instead.
 - If you propose a shell action, set "proposal_kind" to "command" and fill "proposal_command".
 - If you propose sending a small raw key sequence to an already-active prompt or fullscreen app, set "proposal_kind" to "keys" and fill "proposal_keys". Use a literal newline in "proposal_keys" when Enter should be sent.
 - If you propose a patch, set "proposal_kind" to "patch" and fill "proposal_patch".
@@ -853,5 +900,7 @@ Rules:
 - If a current active command is in "awaiting_input", "interactive_fullscreen", or "lost" and the user asks a general question such as what to do next, what happened, help, or how to continue, prioritize recovery guidance over new proposals or plans.
 - If a current active command is in "awaiting_input" or "interactive_fullscreen" and the user explicitly asks you to send the needed input on their behalf, prefer a "keys" proposal over prose.
 - After a proposed or approved command completes, if there is no active plan, stop only when the user's request is already satisfied. If the user's request clearly still requires more shell work, propose the next action.
+- If the latest command was a read-only inspection command and the transcript or command result still shows unresolved work, do not stop at diagnosis. Propose exactly one next action now.
+- Prefer stopping after a satisfied one-shot request. Do not invent extra verification or follow-up work unless the user explicitly asked for verification, the request is part of an active multi-step plan, or the available result is ambiguous.
 - If the recent transcript shows that the user explicitly asked for serial, ordered, or one-command-at-a-time shell work, and the latest command only completed one step of that request, summarize briefly and propose exactly one next command now. Do not lump multiple shell actions together, and do not wait for an extra "go ahead" unless the user explicitly asked to approve each step separately.
 - Leave unused fields as empty strings, and leave unused arrays empty.`

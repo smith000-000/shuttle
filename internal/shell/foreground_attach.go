@@ -68,15 +68,16 @@ func shouldAttachForegroundMonitor(hasPromptContext bool, currentPaneCommand str
 		return true
 	}
 
-	if strings.TrimSpace(currentPaneCommand) == "" {
-		return !hasPromptContext
+	trimmed := strings.TrimSpace(currentPaneCommand)
+	if trimmed == "" {
+		return false
 	}
 
-	if !paneCommandIsShell(currentPaneCommand) && !paneCommandAllowsPromptInference(currentPaneCommand) {
+	if !paneCommandIsShell(trimmed) && !paneCommandAllowsPromptInference(trimmed) {
 		return true
 	}
 
-	return !hasPromptContext
+	return false
 }
 
 func (o *Observer) runAttachedForegroundMonitor(ctx context.Context, monitor *trackedCommandMonitor, paneID string, command string, initialPaneCommand string, initialCapture string) {

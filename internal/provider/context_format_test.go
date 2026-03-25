@@ -182,3 +182,36 @@ func TestBuildTurnContextIncludesRecentManualShellContext(t *testing.T) {
 		t.Fatalf("expected recent manual action section, got %q", context)
 	}
 }
+
+func TestBuildTurnContextIncludesWorkspaceRootAndPatchResult(t *testing.T) {
+	context := buildTurnContext(controller.AgentInput{
+		Prompt: "what changed?",
+		Session: controller.SessionContext{
+			WorkingDirectory:   "/tmp/remote",
+			LocalWorkspaceRoot: "/home/jsmith/source/repos/aiterm",
+		},
+		Task: controller.TaskContext{
+			LastPatchApplyResult: &controller.PatchApplySummary{
+				WorkspaceRoot: "/home/jsmith/source/repos/aiterm",
+				Validation:    "native+git_apply_check",
+				Applied:       true,
+				Created:       1,
+				Updated:       2,
+				Files: []controller.PatchApplyFile{
+					{Operation: "create", NewPath: "new.txt"},
+					{Operation: "update", NewPath: "README.md"},
+				},
+			},
+		},
+	})
+
+	if !strings.Contains(context, "workspace_root=/home/jsmith/source/repos/aiterm") {
+		t.Fatalf("expected workspace root, got %q", context)
+	}
+	if !strings.Contains(context, "Last patch apply result:\n") {
+		t.Fatalf("expected last patch apply section, got %q", context)
+	}
+	if !strings.Contains(context, "validation=native+git_apply_check") {
+		t.Fatalf("expected patch validation, got %q", context)
+	}
+}

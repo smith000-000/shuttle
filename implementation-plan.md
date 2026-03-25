@@ -74,6 +74,7 @@ Milestone 5 still needs:
 - provider switching UI
 - release-grade runtime management for socket/session lifecycle and crash recovery
 - a real patch-application path so proposed diffs can become actual workspace changes
+- patch strategy should follow the documented native-preflight shape in [patch-apply-implementation-plan.md](patch-apply-implementation-plan.md) and [patch-apply-strategy.md](patch-apply-strategy.md)
 - guardrails that prevent the agent from claiming proposed files exist before the patch is applied
 - stronger monitor-side confidence for ambiguous remote/container takeovers beyond the now-stable local serial model
 - integration-style tests for tracked-command recovery flows, not just per-layer unit tests
@@ -100,6 +101,7 @@ Milestone 5 still needs:
   - split `internal/tui/model.go` into smaller execution-control, composer/input, transcript/rendering, and handoff/fullscreen modules
   - split `internal/controller/controller.go` into execution lifecycle, agent-turn normalization, plan management, and tracked-shell ownership/recovery helpers
   - prefer narrow types/modules and integration tests over one more round of point fixes in the monoliths
+  - see [refactor-checklist.md](refactor-checklist.md) for the concrete execution checklist and test reorganization plan
 
 ### Semantic Shell And Subshell Bootstrap Plan
 
@@ -446,6 +448,7 @@ Execution plan: [provider-integration-plan.md](provider-integration-plan.md)
 Runtime lifecycle design: [runtime-management-design.md](runtime-management-design.md)
 Shell and agent execution strategy: [shell-execution-strategy.md](shell-execution-strategy.md)
 Deferred patch/apply research: [patch-apply-research.md](patch-apply-research.md)
+Patch/apply implementation plan: [patch-apply-implementation-plan.md](patch-apply-implementation-plan.md)
 
 ### Execution Regression Note
 - After meaningful execution-monitor changes, run the manual regression checklist in [shell-execution-strategy.md](shell-execution-strategy.md) before treating the branch as stable.
