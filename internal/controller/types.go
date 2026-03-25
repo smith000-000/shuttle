@@ -17,23 +17,33 @@ type AgentInput struct {
 	Prompt  string
 }
 
+type TrackedShellTarget struct {
+	SessionName string
+	PaneID      string
+}
+
 type SessionContext struct {
-	SessionName       string
-	TopPaneID         string
-	BottomPaneID      string
-	WorkingDirectory  string
-	RecentShellOutput string
-	CurrentShell      *shell.PromptContext
+	SessionName          string
+	BottomPaneID         string
+	TrackedShell         TrackedShellTarget
+	WorkingDirectory     string
+	UserShellHistoryFile string
+	RecentShellOutput    string
+	RecentManualCommands []string
+	RecentManualActions  []string
+	CurrentShell         *shell.PromptContext
 }
 
 type TaskContext struct {
-	TaskID            string
-	PriorTranscript   []TranscriptEvent
-	PendingApproval   *ApprovalRequest
-	LastCommandResult *CommandResultSummary
-	ActivePlan        *ActivePlan
-	CurrentExecution  *CommandExecution
-	RecoverySnapshot  string
+	TaskID             string
+	PriorTranscript    []TranscriptEvent
+	PendingApproval    *ApprovalRequest
+	LastCommandResult  *CommandResultSummary
+	ActivePlan         *ActivePlan
+	PrimaryExecutionID string
+	ExecutionRegistry  []CommandExecution
+	CurrentExecution   *CommandExecution
+	RecoverySnapshot   string
 }
 
 type AgentResponse struct {
@@ -171,10 +181,20 @@ const (
 	CommandExecutionLost                  CommandExecutionState = "lost"
 )
 
+type CommandOwnershipMode string
+
+const (
+	CommandOwnershipExclusive      CommandOwnershipMode = "exclusive"
+	CommandOwnershipSharedObserver CommandOwnershipMode = "shared_observer"
+	CommandOwnershipHandoff        CommandOwnershipMode = "handoff"
+)
+
 type CommandExecution struct {
 	ID                 string
 	Command            string
 	Origin             CommandOrigin
+	TrackedShell       TrackedShellTarget
+	OwnershipMode      CommandOwnershipMode
 	State              CommandExecutionState
 	StartedAt          time.Time
 	CompletedAt        *time.Time
@@ -211,6 +231,7 @@ type Controller interface {
 	ContinueAfterCommand(ctx context.Context) ([]TranscriptEvent, error)
 	CheckActiveExecution(ctx context.Context) ([]TranscriptEvent, error)
 	ResumeAfterTakeControl(ctx context.Context) ([]TranscriptEvent, error)
+	RefreshActiveExecution(ctx context.Context) ([]TranscriptEvent, *CommandExecution, error)
 	SubmitShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error)
 	SubmitProposedShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error)
 	DecideApproval(ctx context.Context, approvalID string, decision ApprovalDecision, refineText string) ([]TranscriptEvent, error)
@@ -218,4 +239,5 @@ type Controller interface {
 	PeekShellTail(ctx context.Context, lines int) (string, error)
 	ActiveExecution() *CommandExecution
 	AbandonActiveExecution(reason string) *CommandExecution
+	TrackedShellTarget() TrackedShellTarget
 }

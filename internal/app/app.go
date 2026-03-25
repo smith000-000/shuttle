@@ -42,10 +42,27 @@ func New(cfg config.Config, logger *slog.Logger) *App {
 }
 
 func (a *App) Run(ctx context.Context) (Result, error) {
+	socketTarget := tmux.ResolveSocketTarget(a.cfg.TmuxSocket)
+	historyFile := filepath.Join(a.cfg.StateDir, "shell_history")
+	ensureWorkspace := func(ctx context.Context, client *tmux.Client, startDir string) error {
+		_, _, err := tmux.BootstrapShellSession(
+			ctx,
+			client,
+			tmux.ShellSessionOptions{
+				SessionName: a.cfg.SessionName,
+				StartDir:    startDir,
+				HistoryFile: historyFile,
+			},
+		)
+		if err != nil {
+			return err
+		}
+		return client.BindNoPrefixKey(ctx, tui.TakeControlKey, "detach-client")
+	}
 	logging.Trace(
 		"app.run.begin",
 		"session", a.cfg.SessionName,
-		"socket", a.cfg.TmuxSocket,
+		"socket", socketTarget,
 		"tui", a.cfg.TUI,
 		"inject", a.cfg.Inject,
 		"track", a.cfg.Track,
@@ -56,9 +73,9 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 		return Result{}, fmt.Errorf("load stored provider config: %w", err)
 	}
 
-	client, err := tmux.NewClient(a.cfg.TmuxSocket)
+	client, err := tmux.NewClient(socketTarget)
 	if err != nil {
-		logging.TraceError("app.tmux_client.error", err, "socket", a.cfg.TmuxSocket)
+		logging.TraceError("app.tmux_client.error", err, "socket", socketTarget)
 		return Result{}, err
 	}
 
@@ -69,7 +86,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			SessionName:       a.cfg.SessionName,
 			StartDir:          a.cfg.StartDir,
 			BottomPanePercent: 30,
-			HistoryFile:       filepath.Join(a.cfg.StateDir, "shell_history"),
+			HistoryFile:       historyFile,
 		},
 	)
 	if err != nil {
@@ -99,7 +116,9 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	}
 
 	if a.cfg.AgentPrompt != "" {
-		observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir)
+		observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir).WithSessionName(workspace.SessionName).WithStartDir(runtimeCfg.StartDir).WithSessionEnsurer(func(ctx context.Context) error {
+			return ensureWorkspace(ctx, client, runtimeCfg.StartDir)
+		})
 		initialShellContext := initialPromptContext(ctx, observer, workspace.TopPane.ID, runtimeCfg.StartDir)
 		observer.WithPromptHint(initialShellContext)
 		if err := observer.EnsureLocalShellIntegration(ctx, workspace.TopPane.ID); err != nil {
@@ -120,11 +139,12 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			"auth_source", providerLogAuthSource(profile),
 		)
 		ctrl := controller.New(agent, observer, observer, controller.SessionContext{
-			SessionName:      workspace.SessionName,
-			TopPaneID:        workspace.TopPane.ID,
-			BottomPaneID:     workspace.BottomPane.ID,
-			WorkingDirectory: runtimeCfg.StartDir,
-			CurrentShell:     initialShellContextPtr(initialShellContext),
+			SessionName:          workspace.SessionName,
+			BottomPaneID:         workspace.BottomPane.ID,
+			TrackedShell:         controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
+			WorkingDirectory:     runtimeCfg.StartDir,
+			UserShellHistoryFile: historyFile,
+			CurrentShell:         initialShellContextPtr(initialShellContext),
 		})
 		agentCtx, cancel := context.WithTimeout(ctx, agentPromptTimeout)
 		defer cancel()
@@ -142,7 +162,9 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	}
 
 	if a.cfg.TUI {
-		observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir)
+		observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir).WithSessionName(workspace.SessionName).WithStartDir(runtimeCfg.StartDir).WithSessionEnsurer(func(ctx context.Context) error {
+			return ensureWorkspace(ctx, client, runtimeCfg.StartDir)
+		})
 		if err := client.BindNoPrefixKey(ctx, tui.TakeControlKey, "detach-client"); err != nil {
 			logging.TraceError("app.bind_take_control.error", err, "key", tui.TakeControlKey)
 			return Result{}, fmt.Errorf("configure take-control key: %w", err)
@@ -167,11 +189,12 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			"auth_source", providerLogAuthSource(profile),
 		)
 		ctrl := controller.New(agent, observer, observer, controller.SessionContext{
-			SessionName:      workspace.SessionName,
-			TopPaneID:        workspace.TopPane.ID,
-			BottomPaneID:     workspace.BottomPane.ID,
-			WorkingDirectory: runtimeCfg.StartDir,
-			CurrentShell:     initialShellContextPtr(initialShellContext),
+			SessionName:          workspace.SessionName,
+			BottomPaneID:         workspace.BottomPane.ID,
+			TrackedShell:         controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
+			WorkingDirectory:     runtimeCfg.StartDir,
+			UserShellHistoryFile: historyFile,
+			CurrentShell:         initialShellContextPtr(initialShellContext),
 		})
 		switchProvider := func(profile provider.Profile, shellContext *shell.PromptContext) (controller.Controller, provider.Profile, error) {
 			agent, err := provider.NewFromProfile(profile, provider.FactoryOptions{})
@@ -180,16 +203,18 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			}
 
 			return controller.New(agent, observer, observer, controller.SessionContext{
-				SessionName:      workspace.SessionName,
-				TopPaneID:        workspace.TopPane.ID,
-				BottomPaneID:     workspace.BottomPane.ID,
-				WorkingDirectory: runtimeCfg.StartDir,
-				CurrentShell:     shellContext,
+				SessionName:          workspace.SessionName,
+				BottomPaneID:         workspace.BottomPane.ID,
+				TrackedShell:         controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
+				WorkingDirectory:     runtimeCfg.StartDir,
+				UserShellHistoryFile: historyFile,
+				CurrentShell:         shellContext,
 			}), profile, nil
 		}
 		model := tui.NewModel(workspace, ctrl).
 			WithShellContext(initialShellContext).
-			WithTakeControl(a.cfg.TmuxSocket, workspace.SessionName, workspace.TopPane.ID, tui.TakeControlKey).
+			WithTakeControl(socketTarget, workspace.SessionName, workspace.TopPane.ID, tui.TakeControlKey).
+			WithTakeControlStartDir(runtimeCfg.StartDir).
 			WithProviderOnboarding(profile, func() ([]provider.OnboardingCandidate, error) {
 				return provider.BuildOnboardingCandidates(runtimeCfg.StateDir)
 			}, func(profile provider.Profile) ([]provider.ModelOption, error) {
@@ -232,7 +257,9 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	}
 
 	if a.cfg.Track != "" {
-		observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir)
+		observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir).WithSessionName(workspace.SessionName).WithStartDir(runtimeCfg.StartDir).WithSessionEnsurer(func(ctx context.Context) error {
+			return ensureWorkspace(ctx, client, runtimeCfg.StartDir)
+		})
 		observer.WithPromptHint(shell.GuessLocalContext(a.cfg.StartDir))
 		if err := observer.EnsureLocalShellIntegration(ctx, workspace.TopPane.ID); err != nil {
 			logging.TraceError("app.shell_integration.error", err, "pane", workspace.TopPane.ID)

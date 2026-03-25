@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,6 +40,33 @@ type Client struct {
 	socketName string
 }
 
+func ResolveSocketTarget(configured string) string {
+	configured = strings.TrimSpace(configured)
+	if configured != "" {
+		return configured
+	}
+
+	tmuxEnv := strings.TrimSpace(os.Getenv("TMUX"))
+	if tmuxEnv == "" {
+		return ""
+	}
+	if comma := strings.Index(tmuxEnv, ","); comma >= 0 {
+		tmuxEnv = tmuxEnv[:comma]
+	}
+	return strings.TrimSpace(tmuxEnv)
+}
+
+func SocketFlagArgs(socketTarget string) []string {
+	socketTarget = strings.TrimSpace(socketTarget)
+	if socketTarget == "" {
+		return nil
+	}
+	if filepath.IsAbs(socketTarget) {
+		return []string{"-S", socketTarget}
+	}
+	return []string{"-L", socketTarget}
+}
+
 func NewClient(socketName string) (*Client, error) {
 	binary, err := exec.LookPath("tmux")
 	if err != nil {
@@ -69,6 +98,25 @@ func (c *Client) NewDetachedSession(ctx context.Context, sessionName string, sta
 	args = append(args, environmentArgs(env)...)
 	_, err := c.run(ctx, args...)
 	return err
+}
+
+func (c *Client) NewDetachedWindow(ctx context.Context, sessionName string, startDir string, env map[string]string) (Pane, error) {
+	args := []string{"new-window", "-d", "-t", sessionName, "-c", startDir, "-P", "-F", paneFormat}
+	args = append(args, environmentArgs(env)...)
+	output, err := c.run(ctx, args...)
+	if err != nil {
+		return Pane{}, err
+	}
+
+	panes, err := parsePanesOutput(output)
+	if err != nil {
+		return Pane{}, err
+	}
+	if len(panes) != 1 {
+		return Pane{}, fmt.Errorf("expected 1 pane after new window, found %d", len(panes))
+	}
+
+	return panes[0], nil
 }
 
 func (c *Client) SplitBottom(ctx context.Context, target string, percent int, startDir string) error {
@@ -136,6 +184,19 @@ func (c *Client) CapturePaneEscaped(ctx context.Context, target string, startLin
 	return c.capturePane(ctx, target, startLine, true)
 }
 
+func (c *Client) PipePaneOutput(ctx context.Context, target string, shellCommand string) error {
+	if strings.TrimSpace(shellCommand) == "" {
+		return fmt.Errorf("pipe-pane shell command cannot be empty")
+	}
+	_, err := c.run(ctx, "pipe-pane", "-O", "-t", target, shellCommand)
+	return err
+}
+
+func (c *Client) ClosePipePane(ctx context.Context, target string) error {
+	_, err := c.run(ctx, "pipe-pane", "-t", target)
+	return err
+}
+
 func (c *Client) capturePane(ctx context.Context, target string, startLine int, escaped bool) (string, error) {
 	if len(target) == 0 || target[0] != '%' {
 		return "", fmt.Errorf("invalid pane target %q", target)
@@ -162,6 +223,11 @@ func (c *Client) KillSession(ctx context.Context, sessionName string) error {
 	return err
 }
 
+func (c *Client) KillWindow(ctx context.Context, target string) error {
+	_, err := c.run(ctx, "kill-window", "-t", target)
+	return err
+}
+
 func (c *Client) BindNoPrefixKey(ctx context.Context, key string, command ...string) error {
 	args := []string{"bind-key", "-n", key}
 	args = append(args, command...)
@@ -177,9 +243,7 @@ func (c *Client) SetGlobalOption(ctx context.Context, name string, value string)
 func (c *Client) run(ctx context.Context, args ...string) (string, error) {
 	startedAt := time.Now()
 	commandArgs := make([]string, 0, len(args)+2)
-	if c.socketName != "" {
-		commandArgs = append(commandArgs, "-L", c.socketName)
-	}
+	commandArgs = append(commandArgs, SocketFlagArgs(c.socketName)...)
 	commandArgs = append(commandArgs, args...)
 
 	logging.Trace(

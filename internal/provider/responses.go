@@ -509,11 +509,14 @@ func buildTurnContext(input controller.AgentInput) string {
 	if input.Session.SessionName != "" {
 		sessionLines = append(sessionLines, "session="+input.Session.SessionName)
 	}
+	if input.Session.TrackedShell.SessionName != "" {
+		sessionLines = append(sessionLines, "tracked_session="+input.Session.TrackedShell.SessionName)
+	}
 	if input.Session.WorkingDirectory != "" {
 		sessionLines = append(sessionLines, "cwd="+input.Session.WorkingDirectory)
 	}
-	if input.Session.TopPaneID != "" {
-		sessionLines = append(sessionLines, "top_pane="+input.Session.TopPaneID)
+	if input.Session.TrackedShell.PaneID != "" {
+		sessionLines = append(sessionLines, "tracked_pane="+input.Session.TrackedShell.PaneID)
 	}
 	if input.Session.BottomPaneID != "" {
 		sessionLines = append(sessionLines, "bottom_pane="+input.Session.BottomPaneID)
@@ -525,6 +528,14 @@ func buildTurnContext(input controller.AgentInput) string {
 	recentOutput := compactShellOutput(input.Session.RecentShellOutput, 8, 4, 1200)
 	if shouldIncludeContextSnippet(seenSnippets, recentOutput) {
 		sections = append(sections, "Recent shell output:\n"+recentOutput)
+	}
+	if len(input.Session.RecentManualCommands) > 0 {
+		lines := append([]string(nil), input.Session.RecentManualCommands...)
+		sections = append(sections, "Recent manual shell commands:\n"+strings.Join(lines, "\n"))
+	}
+	if len(input.Session.RecentManualActions) > 0 {
+		lines := append([]string(nil), input.Session.RecentManualActions...)
+		sections = append(sections, "Recent manual shell actions:\n"+strings.Join(lines, "\n"))
 	}
 
 	if input.Task.LastCommandResult != nil {
@@ -552,6 +563,17 @@ func buildTurnContext(input controller.AgentInput) string {
 		sections = append(sections, "Last command result:\n"+strings.Join(lines, "\n"))
 	}
 
+	if input.Task.PrimaryExecutionID != "" || len(input.Task.ExecutionRegistry) > 0 {
+		lines := make([]string, 0, 2)
+		if input.Task.PrimaryExecutionID != "" {
+			lines = append(lines, "primary_execution="+input.Task.PrimaryExecutionID)
+		}
+		if len(input.Task.ExecutionRegistry) > 0 {
+			lines = append(lines, fmt.Sprintf("active_execution_count=%d", len(input.Task.ExecutionRegistry)))
+		}
+		sections = append(sections, "Execution registry:\n"+strings.Join(lines, "\n"))
+	}
+
 	if input.Task.CurrentExecution != nil {
 		current := input.Task.CurrentExecution
 		lines := []string{
@@ -559,6 +581,12 @@ func buildTurnContext(input controller.AgentInput) string {
 			"command=" + current.Command,
 			"origin=" + string(current.Origin),
 			"state=" + string(current.State),
+		}
+		if current.TrackedShell.SessionName != "" {
+			lines = append(lines, "execution_session="+current.TrackedShell.SessionName)
+		}
+		if current.TrackedShell.PaneID != "" {
+			lines = append(lines, "execution_pane="+current.TrackedShell.PaneID)
 		}
 		if strings.TrimSpace(current.ForegroundCommand) != "" {
 			lines = append(lines, "foreground_command="+current.ForegroundCommand)
@@ -824,5 +852,6 @@ Rules:
 - If a recovery terminal snapshot is present, use it to reason about the current terminal state. Prefer actionable recovery guidance over abstract commentary.
 - If a current active command is in "awaiting_input", "interactive_fullscreen", or "lost" and the user asks a general question such as what to do next, what happened, help, or how to continue, prioritize recovery guidance over new proposals or plans.
 - If a current active command is in "awaiting_input" or "interactive_fullscreen" and the user explicitly asks you to send the needed input on their behalf, prefer a "keys" proposal over prose.
-- After a proposed or approved command completes, if there is no active plan, default to summarizing the result and waiting for the user. Only chain into another command when the user's request clearly requires more shell work.
+- After a proposed or approved command completes, if there is no active plan, stop only when the user's request is already satisfied. If the user's request clearly still requires more shell work, propose the next action.
+- If the recent transcript shows that the user explicitly asked for serial, ordered, or one-command-at-a-time shell work, and the latest command only completed one step of that request, summarize briefly and propose exactly one next command now. Do not lump multiple shell actions together, and do not wait for an extra "go ahead" unless the user explicitly asked to approve each step separately.
 - Leave unused fields as empty strings, and leave unused arrays empty.`

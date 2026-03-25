@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"aiterm/internal/protocol"
 	"aiterm/internal/securefs"
 	"aiterm/internal/tmux"
 )
@@ -108,20 +109,25 @@ func synthesizePromptContext(base PromptContext, state semanticShellState) Promp
 }
 
 func (o *Observer) EnsureLocalShellIntegration(ctx context.Context, paneID string) error {
+	_, err := o.ensureLocalShellIntegration(ctx, paneID)
+	return err
+}
+
+func (o *Observer) ensureLocalShellIntegration(ctx context.Context, paneID string) (bool, error) {
 	if strings.TrimSpace(o.stateDir) == "" {
-		return nil
+		return false, nil
 	}
 
-	pane, err := o.client.PaneInfo(ctx, paneID)
+	pane, err := o.paneInfo(ctx, paneID)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	shellName := strings.TrimSpace(strings.ToLower(pane.CurrentCommand))
 	switch shellName {
 	case "bash", "zsh":
 	default:
-		return nil
+		return false, nil
 	}
 
 	promptContext, err := o.CaptureShellContext(ctx, paneID)
@@ -129,19 +135,58 @@ func (o *Observer) EnsureLocalShellIntegration(ctx context.Context, paneID strin
 		promptContext = o.promptHint
 	}
 	if promptContext.PromptLine() == "" || promptContext.Remote {
-		return nil
+		return false, nil
 	}
 
 	scriptPath, err := writeSemanticShellIntegrationScript(o.stateDir, pane, shellName)
 	if err != nil {
+		return false, err
+	}
+
+	command := " [ \"${SHUTTLE_SEMANTIC_SHELL_V1_PID:-}\" = \"$$\" ] || . " + shellQuote(scriptPath) + " >/dev/null 2>&1"
+	if err := o.runManagedSemanticInstall(ctx, paneID, command); err != nil {
+		return false, fmt.Errorf("send semantic shell integration command: %w", err)
+	}
+	return true, nil
+}
+
+func (o *Observer) runManagedSemanticInstall(ctx context.Context, paneID string, command string) error {
+	markers := protocol.NewMarkers()
+	wrapped := protocol.WrapCommand(command, markers)
+	if err := o.sendKeys(ctx, paneID, wrapped, true); err != nil {
 		return err
 	}
 
-	command := " [ -n \"$SHUTTLE_SEMANTIC_SHELL_V1\" ] || . " + shellQuote(scriptPath) + " >/dev/null 2>&1"
-	if err := o.client.SendKeys(ctx, paneID, command, true); err != nil {
-		return fmt.Errorf("send semantic shell integration command: %w", err)
+	deadline := time.Now().Add(3 * time.Second)
+	lastCapture := ""
+	for {
+		captured, err := o.capturePane(ctx, paneID, -trackedCaptureLines)
+		if err != nil {
+			return err
+		}
+		lastCapture = captured
+
+		result, complete, err := protocol.ParseCommandResult(captured, markers)
+		if err != nil {
+			return err
+		}
+		if complete {
+			if result.ExitCode != 0 {
+				return fmt.Errorf("semantic shell integration exited with %d", result.ExitCode)
+			}
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for semantic shell integration to settle")
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+			_ = lastCapture
+		}
 	}
-	return nil
 }
 
 func writeSemanticShellIntegrationScript(stateDir string, pane tmux.Pane, shellName string) (string, error) {
@@ -179,9 +224,10 @@ func sanitizeIntegrationName(value string) string {
 func bashSemanticShellIntegrationScript(statePath string) string {
 	return strings.TrimSpace(`
 export SHUTTLE_SEMANTIC_SHELL_V1=1
+export SHUTTLE_SEMANTIC_SHELL_V1_PID=$$
 export SHUTTLE_SEMANTIC_SHELL_STATE_FILE=`+shellQuote(statePath)+`
-__shuttle_semantic_emit_osc133() { printf '\033]133;%s\007' "$1"; }
-__shuttle_semantic_emit_osc7() { printf '\033]7;file://%s%s\007' "${HOSTNAME:-localhost}" "$PWD"; }
+__shuttle_semantic_emit_osc133() { printf '\033]133;%s\033\\' "$1"; }
+__shuttle_semantic_emit_osc7() { printf '\033]7;file://%s%s\033\\' "${HOSTNAME:-localhost}" "$PWD"; }
 __shuttle_semantic_write_state() {
   local event="$1"
   local exit_code="$2"
@@ -231,10 +277,11 @@ __shuttle_semantic_precmd
 func zshSemanticShellIntegrationScript(statePath string) string {
 	return strings.TrimSpace(`
 export SHUTTLE_SEMANTIC_SHELL_V1=1
+export SHUTTLE_SEMANTIC_SHELL_V1_PID=$$
 export SHUTTLE_SEMANTIC_SHELL_STATE_FILE=`+shellQuote(statePath)+`
 autoload -Uz add-zsh-hook
-__shuttle_semantic_emit_osc133() { printf '\033]133;%s\007' "$1"; }
-__shuttle_semantic_emit_osc7() { printf '\033]7;file://%s%s\007' "${HOST:-localhost}" "$PWD"; }
+__shuttle_semantic_emit_osc133() { printf '\033]133;%s\033\\' "$1"; }
+__shuttle_semantic_emit_osc7() { printf '\033]7;file://%s%s\033\\' "${HOST:-localhost}" "$PWD"; }
 __shuttle_semantic_write_state() {
   local event="$1"
   local exit_code="$2"

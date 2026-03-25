@@ -2,7 +2,7 @@
 
 Shuttle is a tmux-backed AI terminal assistant.
 
-It runs a real shell in the top tmux pane and a Bubble Tea TUI in the bottom pane. The current branch also includes an execution monitor for long-running commands, interactive prompts, fullscreen apps, handoff into the live shell with `F2`, and agent-driven recovery actions like raw terminal key proposals.
+It runs a persistent real shell in the top tmux pane and a Bubble Tea TUI in the bottom pane. Agent-approved commands can also run in owned tmux execution panes, while the persistent shell remains the continuity surface for `F2`, `$>`, cwd, and recent manual shell activity.
 
 ## Status
 
@@ -12,11 +12,15 @@ What is working now:
 - tmux workspace bootstrap and rediscovery
 - shell command injection into the real top pane
 - tracked command observation with execution states
+- persistent user-shell context for cwd, recent shell output, and recent manual shell actions
+- owned tmux execution panes for agent-approved commands
 - Agent and Shell modes in the TUI
 - approval and refine flow
 - local and remote handoff with `F2`
 - `KEYS>` mode for sending raw terminal input
 - partial semantic shell integration for local shells
+- serial agentic command loops with one proposal at a time and auto-continue after results
+- foreground attach and handoff reconciliation for manually started shell commands
 - real OpenAI Responses API path with API-key auth
 - provider settings UI with:
   - active provider switching
@@ -34,11 +38,12 @@ What is working now:
 
 What is still in progress:
 - patch application and file creation flow
-- more execution-monitor confidence hardening
 - broader semantic shell integration (`OSC 133` / `OSC 7`) consumption and subshell/bootstrap support
 - provider onboarding polish and provider-auth validation
 - provider registry/plugin architecture instead of static first-class wiring
 - any richer shell bootstrap/helper mode beyond those standards
+- transcript/UI cleanup and continued TUI/controller decomposition
+- multi-card or parallel execution UI
 - release packaging
 
 ## Requirements
@@ -192,10 +197,17 @@ Core controls:
 - `S`: enter `KEYS>` mode when the active terminal is waiting for input or a fullscreen app owns the pane
 - `Ctrl+O`: inspect the selected transcript entry
 
+Transcript result notes:
+- successful silent commands collapse to a compact result line instead of showing `exit=0` and `(no output)`
+- silent directory-changing commands can show the resulting cwd
+- result tags are exit-aware: nonzero exits no longer render as green success entries
+
 The TUI is intentionally keyboard-first. Current behavior is still evolving, so see [ui-scratchpad.md](ui-scratchpad.md) for active UX backlog notes.
 
 ## Important Docs
 
+- [shell-tracking-architecture.md](shell-tracking-architecture.md)
+- [architecture.md](architecture.md)
 - [implementation-plan.md](implementation-plan.md)
 - [provider-auth-guide.md](provider-auth-guide.md)
 - [shell-execution-strategy.md](shell-execution-strategy.md)
@@ -225,5 +237,7 @@ git worktree list
 
 - proposed patches are not yet applied automatically
 - the agent cannot yet create files unless Shuttle grows a real patch/apply path
-- execution monitoring is much stronger now, but still being hardened for ambiguous shell takeover cases
+- the serial shell-tracking model is in good shape, but remote/container semantic bootstrap is still incomplete
+- transcript and UI polish is still catching up with the newer shell/runtime model
+- multi-card or parallel execution UI is intentionally deferred
 - release packaging is intentionally deferred for now

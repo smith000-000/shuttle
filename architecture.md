@@ -8,11 +8,12 @@ Define the proposed system boundaries and implementation direction separately fr
 # 1. Architectural Summary
 
 Shuttle is a local, tmux-backed two-pane system:
-- the top pane is the real shell session
+- the top pane is the persistent real shell session
 - the bottom pane is a TUI application
+- approved agent commands may also run in owned tmux execution panes within the same tmux session
 - a local controller coordinates tmux integration, shell observation, command lifecycle tracking, provider communication, and persistence
 
-The system must act on the shell session the user is already in rather than replacing the terminal or creating a shadow execution environment.
+The system must preserve the user-visible shell session as the continuity surface rather than replacing the terminal. It may still create owned execution panes for approved agent work when that makes command tracking more reliable.
 
 ---
 
@@ -103,13 +104,13 @@ Release-oriented socket/session lifecycle guidance lives in [runtime-management-
 1. Gather recent shell context and task state.
 2. Send normalized context to the selected provider.
 3. Render the response as a message, plan, diff, or approval request.
-4. If approved, inject commands into the top pane.
+4. If approved, inject commands into the persistent shell or launch an owned execution pane, depending on controller policy.
 5. Observe output and parse command lifecycle events.
 6. Persist results and update the transcript.
 
 ## 3.3 Shell Mode
 1. The user enters a shell command from the bottom pane.
-2. The controller injects that command into the top pane.
+2. The controller injects that command into the persistent user shell pane.
 3. Command lifecycle tracking runs through the same observation pipeline.
 4. Results are surfaced back into the transcript and inspection views.
 
@@ -141,6 +142,7 @@ This is a recommended direction, not a hard product requirement. It aligns with 
 # 6. Notes
 
 - Detailed shell command lifecycle behavior is specified in [protocol-shell-observation.md](protocol-shell-observation.md).
+- Current implementation-facing shell tracking structure, ownership, semantic-source precedence, and recovery behavior are described in [shell-tracking-architecture.md](shell-tracking-architecture.md).
 - Detailed product acceptance criteria are specified in [requirements-mvp.md](requirements-mvp.md).
 - Agent runtime boundaries and integration guidance are specified in [agent-runtime-design.md](agent-runtime-design.md).
 - Provider onboarding and multi-backend integration guidance are specified in [provider-integration-design.md](provider-integration-design.md) and [provider-integration-plan.md](provider-integration-plan.md).

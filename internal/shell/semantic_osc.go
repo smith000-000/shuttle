@@ -3,9 +3,6 @@ package shell
 import "strings"
 
 const (
-	semanticSourceNone       = ""
-	semanticSourceState      = "state_file"
-	semanticSourceOSCCapture = "osc_capture"
 )
 
 func parseSemanticShellStateFromOSCCapture(raw string) (semanticShellState, bool) {

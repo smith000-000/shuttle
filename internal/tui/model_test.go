@@ -940,7 +940,7 @@ func TestSendKeysModeBypassesComposerLockOnEnter(t *testing.T) {
 		StartedAt: time.Now(),
 	}
 	model.setInput("hello")
-	model.takeControl = takeControlConfig{SocketName: "sock", SessionName: "sess", TopPaneID: "%0", DetachKey: TakeControlKey}
+	model.takeControl = takeControlConfig{SocketName: "sock", SessionName: "sess", TrackedPaneID: "%0", DetachKey: TakeControlKey}
 
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next := updated.(Model)
@@ -1049,6 +1049,9 @@ func TestF2CancelsInFlightWorkAndStartsTakeControl(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected take-control command")
 	}
+	if len(next.entries) != len(model.entries) {
+		t.Fatalf("expected take-control not to append transcript noise, got %d entries", len(next.entries))
+	}
 }
 
 func TestF2DoesNotCancelActiveShellExecution(t *testing.T) {
@@ -1079,6 +1082,145 @@ func TestF2DoesNotCancelActiveShellExecution(t *testing.T) {
 	}
 	if !next.directShellPending {
 		t.Fatal("expected direct shell pending to remain set")
+	}
+}
+
+func TestF2DoesNotMarkOwnedExecutionAsHandoff(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 15",
+		Origin:    controller.CommandOriginAgentProposal,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+		TrackedShell: controller.TrackedShellTarget{
+			SessionName: "shuttle-test",
+			PaneID:      "%9",
+		},
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF2})
+	next := updated.(Model)
+
+	if next.activeExecution == nil || next.activeExecution.State != controller.CommandExecutionRunning {
+		t.Fatalf("expected owned execution to remain running, got %#v", next.activeExecution)
+	}
+	if next.handoffVisible {
+		t.Fatal("expected owned execution not to enter handoff-visible state")
+	}
+}
+
+func TestTakeControlFinishedSyncsTrackedTopPane(t *testing.T) {
+	ctrl := &fakeController{sessionName: "shuttle-recovered", trackedPaneID: "%7"}
+	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+
+	updated, _ := model.Update(takeControlFinishedMsg{})
+	next := updated.(Model)
+
+	if next.workspace.SessionName != "shuttle-recovered" {
+		t.Fatalf("expected workspace session shuttle-recovered, got %q", next.workspace.SessionName)
+	}
+	if next.workspace.TopPane.ID != "%7" {
+		t.Fatalf("expected workspace top pane %%7, got %q", next.workspace.TopPane.ID)
+	}
+	if next.takeControl.SessionName != "shuttle-recovered" {
+		t.Fatalf("expected take-control session shuttle-recovered, got %q", next.takeControl.SessionName)
+	}
+	if next.takeControl.TrackedPaneID != "%7" {
+		t.Fatalf("expected take-control tracked pane %%7, got %q", next.takeControl.TrackedPaneID)
+	}
+}
+
+func TestTakeControlFinishedResumesControllerWithoutLocalExecution(t *testing.T) {
+	activeExecution := &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 20",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+	}
+	ctrl := &fakeController{
+		continueEvents: []controller.TranscriptEvent{
+			{
+				Kind: controller.EventCommandStart,
+				Payload: controller.CommandStartPayload{
+					Command:   "sleep 20",
+					Execution: *activeExecution,
+				},
+			},
+		},
+		activeExecution: activeExecution,
+	}
+	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+
+	updated, cmd := model.Update(takeControlFinishedMsg{})
+	next := updated.(Model)
+
+	msg := controllerEventsFromCmd(t, cmd)
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+
+	if ctrl.continueCalls != 1 {
+		t.Fatalf("expected ResumeAfterTakeControl to be called once, got %d", ctrl.continueCalls)
+	}
+	if next.activeExecution == nil || next.activeExecution.Command != "sleep 20" {
+		t.Fatalf("expected returned handoff command to become active, got %#v", next.activeExecution)
+	}
+}
+
+func TestActiveExecutionReattachPreservesObservedStartTimeAcrossHandoff(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	startedAt := time.Now().Add(-12 * time.Second)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionHandoffActive,
+		StartedAt: startedAt,
+		TrackedShell: controller.TrackedShellTarget{
+			SessionName: "shuttle-test",
+			PaneID:      "%0",
+		},
+		OwnershipMode: controller.CommandOwnershipSharedObserver,
+	}
+	model.handoffVisible = true
+
+	updated, _ := model.Update(activeExecutionMsg{
+		execution: &controller.CommandExecution{
+			ID:        "cmd-2",
+			Command:   "sleep",
+			Origin:    controller.CommandOriginUserShell,
+			State:     controller.CommandExecutionRunning,
+			StartedAt: time.Now(),
+			TrackedShell: controller.TrackedShellTarget{
+				SessionName: "shuttle-test",
+				PaneID:      "%0",
+			},
+			OwnershipMode: controller.CommandOwnershipSharedObserver,
+		},
+	})
+	next := updated.(Model)
+
+	if next.activeExecution == nil {
+		t.Fatal("expected active execution to remain visible")
+	}
+	if !next.activeExecution.StartedAt.Equal(startedAt) {
+		t.Fatalf("expected preserved startedAt %v, got %v", startedAt, next.activeExecution.StartedAt)
+	}
+}
+
+func TestRefreshedShellContextSyncsTrackedTopPane(t *testing.T) {
+	ctrl := &fakeController{trackedPaneID: "%8"}
+	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+
+	updated, _ := model.Update(refreshedShellContextMsg{context: &shell.PromptContext{Directory: "/tmp"}})
+	next := updated.(Model)
+
+	if next.workspace.TopPane.ID != "%8" {
+		t.Fatalf("expected workspace top pane %%8, got %q", next.workspace.TopPane.ID)
+	}
+	if next.takeControl.TrackedPaneID != "%8" {
+		t.Fatalf("expected take-control tracked pane %%8, got %q", next.takeControl.TrackedPaneID)
 	}
 }
 
@@ -1244,6 +1386,30 @@ func TestActiveExecutionCardShowsFullscreenKeyHintsWithoutKill(t *testing.T) {
 	}
 	if strings.Contains(card, "K attempt local interrupt") {
 		t.Fatalf("expected fullscreen card to suppress dangerous kill hint, got %q", card)
+	}
+}
+
+func TestActiveExecutionCardExplainsOwnedExecutionPane(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 20",
+		Origin:    controller.CommandOriginAgentProposal,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+		TrackedShell: controller.TrackedShellTarget{
+			SessionName: "shuttle-test",
+			PaneID:      "%9",
+		},
+		LatestOutputTail: "still running",
+	}
+
+	card := model.renderActiveExecutionCard(100)
+	if !strings.Contains(card, "owned execution pane") {
+		t.Fatalf("expected owned execution explanation, got %q", card)
+	}
+	if strings.Contains(card, "F2 take control") {
+		t.Fatalf("expected owned execution card not to advertise F2 takeover, got %q", card)
 	}
 }
 
@@ -1481,6 +1647,79 @@ func TestTakeControlFinishedRestartsTickingForActiveExecution(t *testing.T) {
 	}
 }
 
+func TestTakeControlFinishedPreservesExecutionAcrossTransientNilPoll(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 15",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionHandoffActive,
+		StartedAt: time.Now(),
+	}
+	model.handoffVisible = true
+	model.handoffPriorState = controller.CommandExecutionRunning
+
+	updated, _ := model.Update(takeControlFinishedMsg{})
+	model = updated.(Model)
+
+	updated, cmd := model.Update(activeExecutionMsg{execution: nil})
+	next := updated.(Model)
+
+	if next.activeExecution == nil {
+		t.Fatal("expected transient nil poll after handoff to preserve active execution")
+	}
+	if next.activeExecution.State != controller.CommandExecutionRunning {
+		t.Fatalf("expected running execution to remain visible, got %#v", next.activeExecution)
+	}
+	if cmd == nil {
+		t.Fatal("expected a follow-up execution poll after preserving active execution")
+	}
+}
+
+func TestActiveExecutionNilPollRequiresConfirmationBeforeClear(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 15",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+	}
+
+	updated, cmd := model.Update(activeExecutionMsg{execution: nil})
+	next := updated.(Model)
+
+	if next.activeExecution == nil {
+		t.Fatal("expected first nil execution poll to preserve active execution pending confirmation")
+	}
+	if next.activeExecutionMissingSince.IsZero() {
+		t.Fatal("expected missing-execution confirmation window to start")
+	}
+	if cmd == nil {
+		t.Fatal("expected follow-up poll while confirming missing execution")
+	}
+}
+
+func TestActiveExecutionClearsAfterConfirmedMissingPolls(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 15",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+	}
+	model.activeExecutionMissingSince = time.Now().Add(-4 * time.Second)
+
+	updated, _ := model.Update(activeExecutionMsg{execution: nil})
+	next := updated.(Model)
+
+	if next.activeExecution != nil {
+		t.Fatalf("expected confirmed missing execution to clear, got %#v", next.activeExecution)
+	}
+}
+
 func TestMaybeExecutionCheckInCmdChecksInForAgentOwnedExecution(t *testing.T) {
 	ctrl := &fakeController{
 		checkInEvents: []controller.TranscriptEvent{
@@ -1607,21 +1846,57 @@ func TestShellSubmitEnablesShellTailPreview(t *testing.T) {
 	}
 }
 
-func TestShellSubmitCreatesActiveExecution(t *testing.T) {
+func TestShellSubmitWaitsForControllerToReportActiveExecution(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.input = "sleep 5"
 
 	updated, _ := model.submit()
 	next := updated.(Model)
 
-	if next.activeExecution == nil {
-		t.Fatal("expected active execution for shell submit")
+	if next.activeExecution != nil {
+		t.Fatalf("expected TUI to wait for controller execution state, got %#v", next.activeExecution)
 	}
-	if next.activeExecution.Command != "sleep 5" {
-		t.Fatalf("expected active command sleep 5, got %#v", next.activeExecution)
+	if !next.busy {
+		t.Fatal("expected shell submit to remain busy while awaiting controller response")
 	}
-	if next.activeExecution.Origin != controller.CommandOriginUserShell {
-		t.Fatalf("expected user-shell origin, got %#v", next.activeExecution)
+}
+
+func TestCommandResultClearsLiveShellTailPreview(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.showShellTail = true
+	model.liveShellTail = "1\n2\n3"
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 5",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+	}
+
+	updated, _ := model.Update(controllerEventsMsg{
+		events: []controller.TranscriptEvent{
+			{
+				Kind: controller.EventCommandResult,
+				Payload: controller.CommandResultSummary{
+					ExecutionID: "cmd-1",
+					Command:     "sleep 5",
+					Origin:      controller.CommandOriginUserShell,
+					ExitCode:    0,
+					Summary:     "1\n2\n3",
+				},
+			},
+		},
+	})
+	next := updated.(Model)
+
+	if next.showShellTail {
+		t.Fatal("expected live shell tail to clear after command result")
+	}
+	if next.liveShellTail != "" {
+		t.Fatalf("expected cleared shell tail text, got %q", next.liveShellTail)
+	}
+	if next.activeExecution != nil {
+		t.Fatalf("expected active execution to clear after command result, got %#v", next.activeExecution)
 	}
 }
 
@@ -2261,6 +2536,99 @@ func TestCommandResultEntryCanRenderExpandedForDirectShellUse(t *testing.T) {
 	}
 }
 
+func TestSilentSuccessResultEntryOmitsExitZeroNoise(t *testing.T) {
+	entries := eventsToEntries([]controller.TranscriptEvent{
+		{
+			Kind: controller.EventCommandResult,
+			Payload: controller.CommandResultSummary{
+				Command:  "touch note.txt",
+				ExitCode: 0,
+				State:    controller.CommandExecutionCompleted,
+				Summary:  "(no output)",
+			},
+		},
+	}, true)
+
+	if len(entries) != 1 {
+		t.Fatalf("expected one entry, got %d", len(entries))
+	}
+	if entries[0].Body != "" {
+		t.Fatalf("expected silent success body to be empty, got %q", entries[0].Body)
+	}
+	if !strings.Contains(entries[0].Detail, "exit=0") {
+		t.Fatalf("expected detail to retain exit code, got %q", entries[0].Detail)
+	}
+}
+
+func TestSilentDirectoryChangeResultShowsUpdatedDirectory(t *testing.T) {
+	entries := eventsToEntries([]controller.TranscriptEvent{
+		{
+			Kind: controller.EventCommandResult,
+			Payload: controller.CommandResultSummary{
+				Command:  "cd go_learn",
+				ExitCode: 0,
+				State:    controller.CommandExecutionCompleted,
+				Summary:  "(no output)",
+				ShellContext: &shell.PromptContext{
+					Directory: "~/source/repos/go_learn",
+				},
+			},
+		},
+	}, true)
+
+	if len(entries) != 1 {
+		t.Fatalf("expected one entry, got %d", len(entries))
+	}
+	if entries[0].Body != "~/source/repos/go_learn" {
+		t.Fatalf("expected updated directory in silent success body, got %q", entries[0].Body)
+	}
+}
+
+func TestCommandResultEntryClassifiesExitCodeTags(t *testing.T) {
+	entries := eventsToEntries([]controller.TranscriptEvent{
+		{
+			Kind: controller.EventCommandResult,
+			Payload: controller.CommandResultSummary{
+				Command:  "missing-cmd",
+				ExitCode: 127,
+				State:    controller.CommandExecutionFailed,
+				Summary:  "command not found",
+			},
+		},
+		{
+			Kind: controller.EventCommandResult,
+			Payload: controller.CommandResultSummary{
+				Command:  "sleep 20",
+				ExitCode: shell.InterruptedExitCode,
+				State:    controller.CommandExecutionCanceled,
+				Summary:  "^C",
+			},
+		},
+		{
+			Kind: controller.EventCommandResult,
+			Payload: controller.CommandResultSummary{
+				Command:  "bad-wrapper",
+				ExitCode: 255,
+				State:    controller.CommandExecutionFailed,
+				Summary:  "fatal wrapper failure",
+			},
+		},
+	}, true)
+
+	if len(entries) != 3 {
+		t.Fatalf("expected three entries, got %d", len(entries))
+	}
+	if entries[0].TagKind != entryTagResultNotFound {
+		t.Fatalf("expected not-found tag, got %#v", entries[0])
+	}
+	if entries[1].TagKind != entryTagResultSigInt {
+		t.Fatalf("expected sigint tag, got %#v", entries[1])
+	}
+	if entries[2].TagKind != entryTagResultFatal {
+		t.Fatalf("expected fatal tag, got %#v", entries[2])
+	}
+}
+
 func TestPlanEntryIsCollapsedInTranscriptButPreservedInDetail(t *testing.T) {
 	events := []controller.TranscriptEvent{
 		{
@@ -2322,6 +2690,41 @@ func TestPlanEventUpdatesActivePlanCard(t *testing.T) {
 	}
 	if !strings.Contains(view, "Plan 2/3") {
 		t.Fatalf("expected progress summary, got %q", view)
+	}
+	if !strings.Contains(view, "Informational only. Ctrl+G continues the plan.") {
+		t.Fatalf("expected informational plan footer, got %q", view)
+	}
+	if strings.Contains(view, "Y continue") {
+		t.Fatalf("did not expect approval-style Y affordance in plan card, got %q", view)
+	}
+}
+
+func TestCompletedPlanEventClearsActivePlanCard(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.activePlan = &controller.ActivePlan{
+		Summary: "Inspect and repair the workspace.",
+		Steps: []controller.PlanStep{
+			{Text: "Review the current files.", Status: controller.PlanStepInProgress},
+		},
+	}
+
+	updated, _ := model.Update(controllerEventsMsg{
+		events: []controller.TranscriptEvent{
+			{
+				Kind: controller.EventPlan,
+				Payload: controller.PlanPayload{
+					Summary: "Inspect and repair the workspace.",
+					Steps: []controller.PlanStep{
+						{Text: "Review the current files.", Status: controller.PlanStepDone},
+					},
+				},
+			},
+		},
+	})
+	next := updated.(Model)
+
+	if next.activePlan != nil {
+		t.Fatalf("expected completed plan to clear, got %#v", next.activePlan)
 	}
 }
 
@@ -2503,13 +2906,48 @@ func TestAgentModeKeysProposalBecomesPendingProposal(t *testing.T) {
 	}
 }
 
+func TestAgentModeAnswerProposalDoesNotBecomePendingProposal(t *testing.T) {
+	ctrl := &fakeController{
+		agentEvents: []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventUserMessage,
+				Payload: controller.TextPayload{Text: "continue"},
+			},
+			{
+				Kind:    controller.EventAgentMessage,
+				Payload: controller.TextPayload{Text: "Selection is complete."},
+			},
+			{
+				Kind: controller.EventProposal,
+				Payload: controller.ProposalPayload{
+					Kind:        controller.ProposalAnswer,
+					Description: "No further action is needed.",
+				},
+			},
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.mode = AgentMode
+	model.input = "continue"
+
+	updated, cmd := model.submit()
+	next := updated.(Model)
+	msg := controllerEventsFromCmd(t, cmd)
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+
+	if next.pendingProposal != nil {
+		t.Fatalf("expected answer proposal to stay out of pending action state, got %#v", next.pendingProposal)
+	}
+}
+
 func TestPrimaryActionRunsEnterOnlyKeysProposal(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.takeControl = takeControlConfig{
-		SocketName:  "shuttle-test",
-		SessionName: "shuttle-test",
-		TopPaneID:   "%0",
-		DetachKey:   TakeControlKey,
+		SocketName:    "shuttle-test",
+		SessionName:   "shuttle-test",
+		TrackedPaneID: "%0",
+		DetachKey:     TakeControlKey,
 	}
 	model.activeExecution = &controller.CommandExecution{
 		ID:        "cmd-1",
@@ -2882,8 +3320,11 @@ func TestDirectShellCommandDoesNotAutoContinueAgentLoop(t *testing.T) {
 	if ctrl.continueCalls != 0 {
 		t.Fatalf("expected no auto-continue call, got %d", ctrl.continueCalls)
 	}
-	if nextCmd == nil {
-		t.Fatal("expected shell-tail refresh command")
+	if nextCmd != nil {
+		t.Fatal("expected no shell-tail refresh after direct shell result")
+	}
+	if model.showShellTail {
+		t.Fatal("expected shell-tail preview to clear after direct shell result")
 	}
 }
 
@@ -4143,8 +4584,11 @@ type fakeController struct {
 	continueCalls   int
 	checkInCalls    int
 	activeExecution *controller.CommandExecution
+	refreshEvents   []controller.TranscriptEvent
 	abandonReason   string
 	peekShellTail   string
+	sessionName     string
+	trackedPaneID   string
 }
 
 func (f *fakeController) SubmitAgentPrompt(_ context.Context, _ string) ([]controller.TranscriptEvent, error) {
@@ -4295,6 +4739,15 @@ func (f *fakeController) ActiveExecution() *controller.CommandExecution {
 	return &execution
 }
 
+func (f *fakeController) RefreshActiveExecution(_ context.Context) ([]controller.TranscriptEvent, *controller.CommandExecution, error) {
+	var execution *controller.CommandExecution
+	if f.activeExecution != nil {
+		copy := *f.activeExecution
+		execution = &copy
+	}
+	return append([]controller.TranscriptEvent(nil), f.refreshEvents...), execution, nil
+}
+
 func (f *fakeController) AbandonActiveExecution(reason string) *controller.CommandExecution {
 	f.abandonReason = reason
 	if f.activeExecution == nil {
@@ -4303,6 +4756,17 @@ func (f *fakeController) AbandonActiveExecution(reason string) *controller.Comma
 	execution := *f.activeExecution
 	f.activeExecution = nil
 	return &execution
+}
+
+func (f *fakeController) TrackedShellTarget() controller.TrackedShellTarget {
+	sessionName := strings.TrimSpace(f.sessionName)
+	if sessionName == "" {
+		sessionName = "shuttle-test"
+	}
+	if strings.TrimSpace(f.trackedPaneID) != "" {
+		return controller.TrackedShellTarget{SessionName: sessionName, PaneID: f.trackedPaneID}
+	}
+	return controller.TrackedShellTarget{SessionName: sessionName, PaneID: "%0"}
 }
 
 type approvalDecisionCall struct {
