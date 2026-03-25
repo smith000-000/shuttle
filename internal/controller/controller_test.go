@@ -3,6 +3,8 @@ package controller
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +24,7 @@ func TestLocalControllerSubmitAgentPrompt(t *testing.T) {
 	}
 	controller := New(agent, nil, &stubContextReader{
 		output: "recent shell output",
-	}, SessionContext{TopPaneID: "%0"})
+	}, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	events, err := controller.SubmitAgentPrompt(context.Background(), "list files")
 	if err != nil {
@@ -42,6 +44,46 @@ func TestLocalControllerSubmitAgentPrompt(t *testing.T) {
 	}
 }
 
+func TestLocalControllerSubmitAgentPromptIncludesRecentManualShellContext(t *testing.T) {
+	historyFile := t.TempDir() + "/shell_history"
+	if err := os.WriteFile(historyFile, []byte(strings.Join([]string{
+		": 1710000000:0;ls",
+		"mv foo.md foo_new.md",
+		"touch chicken.mmd",
+	}, "\n")), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "ready",
+		},
+	}
+	controller := New(agent, nil, &stubContextReader{
+		output: "recent shell output",
+		context: shell.PromptContext{
+			User:         "jsmith",
+			Host:         "linuxdesktop",
+			Directory:    "/home/jsmith/source/repos/aiterm",
+			PromptSymbol: "%",
+			RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+		},
+	}, SessionContext{
+		UserShellHistoryFile: historyFile,
+	})
+
+	if _, err := controller.SubmitAgentPrompt(context.Background(), "what changed?"); err != nil {
+		t.Fatalf("SubmitAgentPrompt() error = %v", err)
+	}
+
+	if got := strings.Join(agent.lastInput.Session.RecentManualCommands, "\n"); !strings.Contains(got, "mv foo.md foo_new.md") || !strings.Contains(got, "touch chicken.mmd") {
+		t.Fatalf("expected recent manual commands in agent input, got %#v", agent.lastInput.Session.RecentManualCommands)
+	}
+	if got := strings.Join(agent.lastInput.Session.RecentManualActions, "\n"); !strings.Contains(got, "renamed foo.md -> foo_new.md") || !strings.Contains(got, "touched chicken.mmd") {
+		t.Fatalf("expected recent manual actions in agent input, got %#v", agent.lastInput.Session.RecentManualActions)
+	}
+}
+
 func TestLocalControllerSubmitAgentPromptCreatesActivePlan(t *testing.T) {
 	agent := &stubAgent{
 		response: AgentResponse{
@@ -55,7 +97,7 @@ func TestLocalControllerSubmitAgentPromptCreatesActivePlan(t *testing.T) {
 			},
 		},
 	}
-	controller := New(agent, nil, nil, SessionContext{TopPaneID: "%0"})
+	controller := New(agent, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	events, err := controller.SubmitAgentPrompt(context.Background(), "make a plan")
 	if err != nil {
@@ -86,7 +128,7 @@ func TestLocalControllerSubmitAgentPromptIgnoresAnswerProposal(t *testing.T) {
 			},
 		},
 	}
-	controller := New(agent, nil, nil, SessionContext{TopPaneID: "%0"})
+	controller := New(agent, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	events, err := controller.SubmitAgentPrompt(context.Background(), "continue")
 	if err != nil {
@@ -109,7 +151,7 @@ func TestLocalControllerSubmitShellCommand(t *testing.T) {
 			ExitCode:  0,
 			Captured:  "file.txt",
 		},
-	}, nil, SessionContext{TopPaneID: "%0"})
+	}, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	events, err := controller.SubmitShellCommand(context.Background(), "ls")
 	if err != nil {
@@ -141,21 +183,18 @@ func TestLocalControllerSubmitShellCommand(t *testing.T) {
 	}
 }
 
-func TestLocalControllerSubmitShellCommandUsesResolvedTopPaneID(t *testing.T) {
+func TestLocalControllerSubmitShellCommandUsesResolvedTrackedShellPane(t *testing.T) {
 	runner := &stubRunner{
 		result:         shell.TrackedExecution{CommandID: "cmd-1", Command: "ls", ExitCode: 0},
 		resolvedPaneID: "%5",
 	}
-	controller := New(nil, runner, nil, SessionContext{TopPaneID: "%0"})
+	controller := New(nil, runner, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	if _, err := controller.SubmitShellCommand(context.Background(), "ls"); err != nil {
 		t.Fatalf("SubmitShellCommand() error = %v", err)
 	}
 	if len(runner.paneIDs) != 1 || runner.paneIDs[0] != "%5" {
 		t.Fatalf("expected tracked command to use resolved pane %%5, got %#v", runner.paneIDs)
-	}
-	if controller.TopPaneID() != "%5" {
-		t.Fatalf("expected controller to retain resolved top pane %%5, got %q", controller.TopPaneID())
 	}
 	target := controller.TrackedShellTarget()
 	if target.PaneID != "%5" {
@@ -168,7 +207,7 @@ func TestLocalControllerSubmitShellCommandReturnsTrackedShellChangeNotice(t *tes
 		result:         shell.TrackedExecution{CommandID: "cmd-1", Command: "ls", ExitCode: 0},
 		resolvedPaneID: "%5",
 	}
-	controller := New(nil, runner, nil, SessionContext{SessionName: "shuttle-test", TopPaneID: "%0"})
+	controller := New(nil, runner, nil, SessionContext{SessionName: "shuttle-test", TrackedShell: TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"}})
 
 	events, err := controller.SubmitShellCommand(context.Background(), "ls")
 	if err != nil {
@@ -187,10 +226,12 @@ func TestLocalControllerSubmitShellCommandReturnsTrackedShellChangeNotice(t *tes
 	}
 }
 
-func TestNewNormalizesTrackedShellTargetFromLegacySessionFields(t *testing.T) {
+func TestNewNormalizesTrackedShellTargetFromSessionContext(t *testing.T) {
 	controller := New(nil, nil, nil, SessionContext{
-		SessionName: "shuttle-test",
-		TopPaneID:   "%0",
+		SessionName: " shuttle-test ",
+		TrackedShell: TrackedShellTarget{
+			PaneID: " %0 ",
+		},
 	})
 
 	target := controller.TrackedShellTarget()
@@ -210,7 +251,7 @@ func TestLocalControllerSubmitShellCommandCanceledReturnsResultEvent(t *testing.
 			ExitCode:   shell.InterruptedExitCode,
 			Captured:   "^C\njsmith@host % ",
 		},
-	}, nil, SessionContext{TopPaneID: "%0"})
+	}, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	events, err := controller.SubmitShellCommand(context.Background(), "sleep 60")
 	if err != nil {
@@ -261,25 +302,25 @@ func TestLocalControllerResumeAfterTakeControlReconcilesUserShellPromptReturn(t 
 			LastExitCode: &exitCode,
 		},
 	}
-	controller := New(nil, nil, reader, SessionContext{TopPaneID: "%0"})
-	controller.task.CurrentExecution = &CommandExecution{
+	controller := New(nil, nil, reader, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	setPrimaryExecutionForTest(controller, CommandExecution{
 		ID:        "cmd-1",
 		Command:   "bash -lc 'for i in {1..30}; do echo \"$i\"; sleep 1; done'",
 		Origin:    CommandOriginUserShell,
 		State:     CommandExecutionRunning,
 		StartedAt: time.Now().Add(-30 * time.Second),
-	}
+	})
 
 	events, err := controller.ResumeAfterTakeControl(context.Background())
 	if err != nil {
 		t.Fatalf("ResumeAfterTakeControl() error = %v", err)
 	}
-	if len(events) != 2 || events[0].Kind != EventSystemNotice || events[1].Kind != EventCommandResult {
-		t.Fatalf("expected handoff notice plus command result, got %#v", events)
+	if len(events) != 1 || events[0].Kind != EventCommandResult {
+		t.Fatalf("expected command result only, got %#v", events)
 	}
-	result, ok := events[1].Payload.(CommandResultSummary)
+	result, ok := events[0].Payload.(CommandResultSummary)
 	if !ok {
-		t.Fatalf("expected command result payload, got %#v", events[1].Payload)
+		t.Fatalf("expected command result payload, got %#v", events[0].Payload)
 	}
 	if result.State != CommandExecutionCanceled || result.ExitCode != shell.InterruptedExitCode {
 		t.Fatalf("unexpected reconcile result %#v", result)
@@ -300,25 +341,25 @@ func TestLocalControllerResumeAfterTakeControlInfersCanceledWhenPromptReturnedWi
 			RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
 		},
 	}
-	controller := New(nil, nil, reader, SessionContext{TopPaneID: "%0"})
-	controller.task.CurrentExecution = &CommandExecution{
+	controller := New(nil, nil, reader, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	setPrimaryExecutionForTest(controller, CommandExecution{
 		ID:        "cmd-1",
 		Command:   "sleep 10",
 		Origin:    CommandOriginUserShell,
 		State:     CommandExecutionRunning,
 		StartedAt: time.Now().Add(-10 * time.Second),
-	}
+	})
 
 	events, err := controller.ResumeAfterTakeControl(context.Background())
 	if err != nil {
 		t.Fatalf("ResumeAfterTakeControl() error = %v", err)
 	}
-	if len(events) != 2 || events[0].Kind != EventSystemNotice || events[1].Kind != EventCommandResult {
-		t.Fatalf("expected handoff notice plus command result, got %#v", events)
+	if len(events) != 1 || events[0].Kind != EventCommandResult {
+		t.Fatalf("expected command result only, got %#v", events)
 	}
-	result, ok := events[1].Payload.(CommandResultSummary)
+	result, ok := events[0].Payload.(CommandResultSummary)
 	if !ok {
-		t.Fatalf("expected command result payload, got %#v", events[1].Payload)
+		t.Fatalf("expected command result payload, got %#v", events[0].Payload)
 	}
 	if result.State != CommandExecutionCanceled {
 		t.Fatalf("expected canceled reconcile result, got %#v", result)
@@ -331,6 +372,82 @@ func TestLocalControllerResumeAfterTakeControlInfersCanceledWhenPromptReturnedWi
 	}
 	if controller.ActiveExecution() != nil {
 		t.Fatal("expected active execution to clear after inferred handoff reconcile")
+	}
+}
+
+func TestLocalControllerResumeAfterTakeControlDoesNotReconcileWithoutCurrentPrompt(t *testing.T) {
+	reader := &stubContextReader{
+		snapshot: "jsmith@linuxdesktop ~/source/repos/aiterm %\n. '/run/user/1000/shuttle/shell-integration/zsh-pane0.sh'\nsleep 20",
+		contexts: []shell.PromptContext{{}},
+	}
+	controller := New(nil, nil, reader, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	setPrimaryExecutionForTest(controller, CommandExecution{
+		ID:            "cmd-1",
+		Command:       "sleep 20",
+		Origin:        CommandOriginUserShell,
+		OwnershipMode: CommandOwnershipSharedObserver,
+		State:         CommandExecutionRunning,
+		StartedAt:     time.Now().Add(-10 * time.Second),
+	})
+
+	events, err := controller.ResumeAfterTakeControl(context.Background())
+	if err != nil {
+		t.Fatalf("ResumeAfterTakeControl() error = %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected no reconcile events without a current prompt, got %#v", events)
+	}
+	if active := controller.ActiveExecution(); active == nil || active.ID != "cmd-1" {
+		t.Fatalf("expected active execution to remain running, got %#v", active)
+	}
+}
+
+func TestLocalControllerResumeAfterTakeControlPrefersAttachedExecutionTail(t *testing.T) {
+	exitCode := 0
+	reader := &stubContextReader{
+		snapshot: "jsmith@linuxdesktop ~/source/repos/go_learn %\n. '/run/user/1000/shuttle/commands/noisy.sh'",
+		context: shell.PromptContext{
+			User:         "jsmith",
+			Host:         "linuxdesktop",
+			Directory:    "~/source/repos/go_learn",
+			PromptSymbol: "%",
+			RawLine:      "jsmith@linuxdesktop ~/source/repos/go_learn %",
+			LastExitCode: &exitCode,
+		},
+	}
+	controller := New(nil, nil, reader, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	setPrimaryExecutionForTest(controller, CommandExecution{
+		ID:               "cmd-1",
+		Command:          "sleep",
+		Origin:           CommandOriginUserShell,
+		OwnershipMode:    CommandOwnershipSharedObserver,
+		State:            CommandExecutionRunning,
+		StartedAt:        time.Now().Add(-10 * time.Second),
+		LatestOutputTail: "",
+	})
+	controller.mu.Lock()
+	current := controller.executionLocked("cmd-1")
+	current.LatestOutputTail = ""
+	controller.mu.Unlock()
+
+	// Simulate the attached foreground monitor having already observed the real command window.
+	controller.mu.Lock()
+	controller.executionLocked("cmd-1").LatestOutputTail = "tick 1\ntick 2"
+	controller.mu.Unlock()
+
+	events, err := controller.ResumeAfterTakeControl(context.Background())
+	if err != nil {
+		t.Fatalf("ResumeAfterTakeControl() error = %v", err)
+	}
+	if len(events) != 1 || events[0].Kind != EventCommandResult {
+		t.Fatalf("expected command result only, got %#v", events)
+	}
+	result, ok := events[0].Payload.(CommandResultSummary)
+	if !ok {
+		t.Fatalf("expected command result payload, got %#v", events[0].Payload)
+	}
+	if result.Summary != "tick 1\ntick 2" {
+		t.Fatalf("expected attached execution tail, got %q", result.Summary)
 	}
 }
 
@@ -348,32 +465,28 @@ func TestLocalControllerResumeAfterTakeControlReturnsTrackedShellChangeNotice(t 
 			LastExitCode: &exitCode,
 		},
 	}
-	controller := New(nil, nil, reader, SessionContext{SessionName: "shuttle-test", TopPaneID: "%0"})
-	controller.task.CurrentExecution = &CommandExecution{
+	controller := New(nil, nil, reader, SessionContext{SessionName: "shuttle-test", TrackedShell: TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"}})
+	setPrimaryExecutionForTest(controller, CommandExecution{
 		ID:        "cmd-1",
 		Command:   "sleep 10",
 		Origin:    CommandOriginUserShell,
 		State:     CommandExecutionRunning,
 		StartedAt: time.Now().Add(-10 * time.Second),
-	}
+	})
 
 	events, err := controller.ResumeAfterTakeControl(context.Background())
 	if err != nil {
 		t.Fatalf("ResumeAfterTakeControl() error = %v", err)
 	}
-	if len(events) != 3 {
-		t.Fatalf("expected tracked-shell notice plus handoff notice/result, got %#v", events)
+	if len(events) != 2 {
+		t.Fatalf("expected tracked-shell notice plus result, got %#v", events)
 	}
-	if events[0].Kind != EventSystemNotice || events[1].Kind != EventSystemNotice || events[2].Kind != EventCommandResult {
+	if events[0].Kind != EventSystemNotice || events[1].Kind != EventCommandResult {
 		t.Fatalf("unexpected event sequence: %#v", events)
 	}
 	firstNotice, ok := events[0].Payload.(TextPayload)
-	if !ok || !strings.Contains(firstNotice.Text, "Returned from shell handoff") {
-		t.Fatalf("expected handoff reconciliation notice, got %#v", events[0].Payload)
-	}
-	secondNotice, ok := events[1].Payload.(TextPayload)
-	if !ok || !strings.Contains(secondNotice.Text, "Tracked shell pane changed from %0 to %5.") {
-		t.Fatalf("expected tracked-shell change notice, got %#v", events[1].Payload)
+	if !ok || !strings.Contains(firstNotice.Text, "Tracked shell pane changed from %0 to %5.") {
+		t.Fatalf("expected tracked-shell change notice, got %#v", events[0].Payload)
 	}
 }
 
@@ -388,7 +501,7 @@ func TestLocalControllerSubmitShellCommandLostReturnsResultEvent(t *testing.T) {
 			Captured:   "partial output",
 		},
 		err: context.DeadlineExceeded,
-	}, nil, SessionContext{TopPaneID: "%0"})
+	}, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	events, err := controller.SubmitShellCommand(context.Background(), "rg -n foo ~")
 	if err != nil {
@@ -441,7 +554,7 @@ func TestLocalControllerAgentOwnedLostTriggersRecoveryInference(t *testing.T) {
 		err: context.DeadlineExceeded,
 	}, &stubContextReader{
 		output: "recovery line 1\nrecovery line 2",
-	}, SessionContext{TopPaneID: "%0"})
+	}, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	events, err := controller.SubmitProposedShellCommand(context.Background(), "rg -n foo ~")
 	if err != nil {
@@ -474,7 +587,7 @@ func TestLocalControllerSubmitProposedShellCommandTracksAgentOrigin(t *testing.T
 			ExitCode:  0,
 			Captured:  "file.txt",
 		},
-	}, nil, SessionContext{TopPaneID: "%0"})
+	}, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	events, err := controller.SubmitProposedShellCommand(context.Background(), "ls -lah")
 	if err != nil {
@@ -498,6 +611,199 @@ func TestLocalControllerSubmitProposedShellCommandTracksAgentOrigin(t *testing.T
 	}
 }
 
+func TestLocalControllerSubmitProposedShellCommandUsesOwnedExecutionPane(t *testing.T) {
+	runner := &ownedExecutionRunner{
+		stubRunner: stubRunner{
+			result: shell.TrackedExecution{
+				CommandID: "cmd-2",
+				Command:   "ls -lah",
+				ExitCode:  0,
+				Captured:  "file.txt",
+			},
+		},
+		ownedPane: shell.OwnedExecutionPane{
+			SessionName: "shuttle-test",
+			PaneID:      "%9",
+			WindowID:    "@3",
+		},
+	}
+	controller := New(nil, runner, nil, SessionContext{
+		SessionName:      "shuttle-test",
+		TrackedShell:     TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
+		WorkingDirectory: "/tmp/project",
+		CurrentShell: &shell.PromptContext{
+			User:         "jsmith",
+			Host:         "linuxdesktop",
+			Directory:    "/tmp/project",
+			PromptSymbol: "%",
+			RawLine:      "jsmith@linuxdesktop /tmp/project %",
+		},
+	})
+
+	events, err := controller.SubmitProposedShellCommand(context.Background(), "ls -lah")
+	if err != nil {
+		t.Fatalf("SubmitProposedShellCommand() error = %v", err)
+	}
+
+	if runner.startDir != "/tmp/project" {
+		t.Fatalf("expected owned execution to inherit user-shell cwd, got %q", runner.startDir)
+	}
+	if len(runner.paneIDs) != 1 || runner.paneIDs[0] != "%9" {
+		t.Fatalf("expected owned execution pane %%9, got %#v", runner.paneIDs)
+	}
+	if runner.cleanupCalls != 1 {
+		t.Fatalf("expected owned execution cleanup to run once, got %d", runner.cleanupCalls)
+	}
+	if controller.TrackedShellTarget().PaneID != "%0" {
+		t.Fatalf("expected persistent tracked shell pane to remain %%0, got %#v", controller.TrackedShellTarget())
+	}
+	if len(events) != 3 || events[0].Kind != EventSystemNotice || events[1].Kind != EventCommandStart || events[2].Kind != EventCommandResult {
+		t.Fatalf("expected owned-execution notice plus start/result, got %#v", events)
+	}
+	startPayload, ok := events[1].Payload.(CommandStartPayload)
+	if !ok {
+		t.Fatalf("expected command start payload, got %#v", events[1].Payload)
+	}
+	if startPayload.Execution.TrackedShell.PaneID != "%9" {
+		t.Fatalf("expected execution target pane %%9, got %#v", startPayload.Execution.TrackedShell)
+	}
+}
+
+func TestLocalControllerOwnedExecutionDoesNotOverwriteUserShellContext(t *testing.T) {
+	runner := &ownedExecutionRunner{
+		stubRunner: stubRunner{
+			result: shell.TrackedExecution{
+				CommandID: "cmd-2",
+				Command:   "pwd",
+				ExitCode:  0,
+				Captured:  "/tmp/owned",
+				ShellContext: shell.PromptContext{
+					User:         "jsmith",
+					Host:         "linuxdesktop",
+					Directory:    "/tmp/owned",
+					PromptSymbol: "%",
+					RawLine:      "jsmith@linuxdesktop /tmp/owned %",
+				},
+			},
+		},
+		ownedPane: shell.OwnedExecutionPane{
+			SessionName: "shuttle-test",
+			PaneID:      "%9",
+			WindowID:    "@3",
+		},
+	}
+	controller := New(nil, runner, nil, SessionContext{
+		SessionName:      "shuttle-test",
+		TrackedShell:     TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
+		WorkingDirectory: "/home/jsmith/source/repos/aiterm",
+		CurrentShell: &shell.PromptContext{
+			User:         "jsmith",
+			Host:         "linuxdesktop",
+			Directory:    "/home/jsmith/source/repos/aiterm",
+			PromptSymbol: "%",
+			RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+		},
+	})
+
+	if _, err := controller.SubmitProposedShellCommand(context.Background(), "pwd"); err != nil {
+		t.Fatalf("SubmitProposedShellCommand() error = %v", err)
+	}
+
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if controller.session.WorkingDirectory != "/home/jsmith/source/repos/aiterm" {
+		t.Fatalf("expected user-shell cwd to remain unchanged, got %q", controller.session.WorkingDirectory)
+	}
+	if controller.session.CurrentShell == nil || controller.session.CurrentShell.Directory != "/home/jsmith/source/repos/aiterm" {
+		t.Fatalf("expected user-shell prompt context to remain unchanged, got %#v", controller.session.CurrentShell)
+	}
+	if controller.task.LastCommandResult == nil || controller.task.LastCommandResult.Summary != "/tmp/owned" {
+		t.Fatalf("expected owned execution result summary to be preserved, got %#v", controller.task.LastCommandResult)
+	}
+}
+
+func TestLocalControllerDirectShellCommandRefreshesTrackedUserShellContext(t *testing.T) {
+	homeDirectory, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir() error = %v", err)
+	}
+	goLearnDirectory := filepath.Join(homeDirectory, "source/repos/go_learn")
+
+	runner := &ownedExecutionRunner{
+		stubRunner: stubRunner{
+			result: shell.TrackedExecution{
+				CommandID: "cmd-1",
+				ExitCode:  0,
+			},
+		},
+		ownedPane: shell.OwnedExecutionPane{
+			SessionName: "shuttle-test",
+			PaneID:      "%9",
+			WindowID:    "@3",
+		},
+	}
+	reader := &stubContextReader{
+		contexts: []shell.PromptContext{
+			{
+				User:         "jsmith",
+				Host:         "linuxdesktop",
+				Directory:    "~/source/repos",
+				PromptSymbol: "%",
+				RawLine:      "jsmith@linuxdesktop ~/source/repos %",
+			},
+			{
+				User:         "jsmith",
+				Host:         "linuxdesktop",
+				Directory:    "~/source/repos/go_learn",
+				PromptSymbol: "%",
+				RawLine:      "jsmith@linuxdesktop ~/source/repos/go_learn %",
+			},
+			{
+				User:         "jsmith",
+				Host:         "linuxdesktop",
+				Directory:    "~/source/repos/go_learn",
+				PromptSymbol: "%",
+				RawLine:      "jsmith@linuxdesktop ~/source/repos/go_learn %",
+			},
+		},
+	}
+	controller := New(nil, runner, reader, SessionContext{
+		SessionName:      "shuttle-test",
+		TrackedShell:     TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
+		WorkingDirectory: filepath.Join(homeDirectory, "source/repos"),
+		CurrentShell: &shell.PromptContext{
+			User:         "jsmith",
+			Host:         "linuxdesktop",
+			Directory:    "~/source/repos",
+			PromptSymbol: "%",
+			RawLine:      "jsmith@linuxdesktop ~/source/repos %",
+		},
+	})
+
+	if _, err := controller.SubmitShellCommand(context.Background(), "cd go_learn"); err != nil {
+		t.Fatalf("SubmitShellCommand() error = %v", err)
+	}
+
+	controller.mu.Lock()
+	if controller.session.WorkingDirectory != goLearnDirectory {
+		controller.mu.Unlock()
+		t.Fatalf("expected refreshed working directory %q, got %q", goLearnDirectory, controller.session.WorkingDirectory)
+	}
+	if controller.session.CurrentShell == nil || controller.session.CurrentShell.Directory != "~/source/repos/go_learn" {
+		controller.mu.Unlock()
+		t.Fatalf("expected refreshed prompt context, got %#v", controller.session.CurrentShell)
+	}
+	controller.mu.Unlock()
+
+	if _, err := controller.SubmitProposedShellCommand(context.Background(), "tail -n 10 README.md"); err != nil {
+		t.Fatalf("SubmitProposedShellCommand() error = %v", err)
+	}
+
+	if runner.startDir != goLearnDirectory {
+		t.Fatalf("expected owned execution start dir %q, got %q", goLearnDirectory, runner.startDir)
+	}
+}
+
 func TestLocalControllerActiveExecutionVisibleWhileCommandRuns(t *testing.T) {
 	runner := &blockingRunner{
 		started: make(chan struct{}, 1),
@@ -509,7 +815,7 @@ func TestLocalControllerActiveExecutionVisibleWhileCommandRuns(t *testing.T) {
 			Captured:  "done",
 		},
 	}
-	controller := New(nil, runner, nil, SessionContext{TopPaneID: "%0"})
+	controller := New(nil, runner, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	done := make(chan struct{})
 	go func() {
@@ -545,14 +851,14 @@ func TestLocalControllerActiveExecutionVisibleWhileCommandRuns(t *testing.T) {
 }
 
 func TestLocalControllerAbandonActiveExecutionClearsState(t *testing.T) {
-	controller := New(nil, nil, &stubContextReader{output: "tail line"}, SessionContext{TopPaneID: "%0"})
-	controller.task.CurrentExecution = &CommandExecution{
+	controller := New(nil, nil, &stubContextReader{output: "tail line"}, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	setPrimaryExecutionForTest(controller, CommandExecution{
 		ID:        "cmd-1",
 		Command:   "sleep 60",
 		Origin:    CommandOriginUserShell,
 		State:     CommandExecutionRunning,
 		StartedAt: time.Now(),
-	}
+	})
 
 	execution := controller.AbandonActiveExecution("user interrupted from handoff")
 	if execution == nil {
@@ -594,7 +900,7 @@ func TestLocalControllerIgnoresLateResultAfterAbandon(t *testing.T) {
 			Captured:  "done",
 		},
 	}
-	controller := New(nil, runner, &stubContextReader{output: "^C"}, SessionContext{TopPaneID: "%0"})
+	controller := New(nil, runner, &stubContextReader{output: "^C"}, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	resultCh := make(chan struct {
 		events []TranscriptEvent
@@ -636,15 +942,15 @@ func TestLocalControllerCheckActiveExecutionUsesAgentContext(t *testing.T) {
 			Message: "Still waiting on the active command.",
 		},
 	}
-	controller := New(agent, nil, nil, SessionContext{TopPaneID: "%0"})
-	controller.task.CurrentExecution = &CommandExecution{
+	controller := New(agent, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	setPrimaryExecutionForTest(controller, CommandExecution{
 		ID:               "cmd-agent",
 		Command:          "sleep 60",
 		Origin:           CommandOriginAgentProposal,
 		State:            CommandExecutionRunning,
 		StartedAt:        time.Now().Add(-15 * time.Second),
 		LatestOutputTail: "line 1\nline 2\nline 3",
-	}
+	})
 
 	events, err := controller.CheckActiveExecution(context.Background())
 	if err != nil {
@@ -664,21 +970,47 @@ func TestLocalControllerCheckActiveExecutionUsesAgentContext(t *testing.T) {
 	}
 }
 
+func TestLocalControllerPeekShellTailUsesActiveExecutionPane(t *testing.T) {
+	reader := &stubContextReader{output: "running"}
+	controller := New(nil, nil, reader, SessionContext{
+		SessionName:  "shuttle-test",
+		TrackedShell: TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
+	})
+	setPrimaryExecutionForTest(controller, CommandExecution{
+		ID:           "cmd-1",
+		Command:      "sleep 20",
+		Origin:       CommandOriginAgentProposal,
+		State:        CommandExecutionRunning,
+		TrackedShell: TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%9"},
+	})
+
+	tail, err := controller.PeekShellTail(context.Background(), 20)
+	if err != nil {
+		t.Fatalf("PeekShellTail() error = %v", err)
+	}
+	if tail != "running" {
+		t.Fatalf("expected tail output, got %q", tail)
+	}
+	if len(reader.paneIDs) == 0 || reader.paneIDs[len(reader.paneIDs)-1] != "%9" {
+		t.Fatalf("expected active execution pane %%9, got %#v", reader.paneIDs)
+	}
+}
+
 func TestLocalControllerCheckActiveExecutionPreservesAwaitingInputState(t *testing.T) {
 	agent := &stubAgent{
 		response: AgentResponse{
 			Message: "The command is waiting for input.",
 		},
 	}
-	controller := New(agent, nil, &stubContextReader{snapshot: "snapshot lines"}, SessionContext{TopPaneID: "%0"})
-	controller.task.CurrentExecution = &CommandExecution{
+	controller := New(agent, nil, &stubContextReader{snapshot: "snapshot lines"}, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	setPrimaryExecutionForTest(controller, CommandExecution{
 		ID:               "cmd-agent",
 		Command:          "python3 -c \"input('name: ')\"",
 		Origin:           CommandOriginAgentProposal,
 		State:            CommandExecutionAwaitingInput,
 		StartedAt:        time.Now().Add(-15 * time.Second),
 		LatestOutputTail: "name:",
-	}
+	})
 
 	_, err := controller.CheckActiveExecution(context.Background())
 	if err != nil {
@@ -701,15 +1033,15 @@ func TestLocalControllerCheckActiveExecutionPreservesInteractiveFullscreenState(
 			Message: "The command is occupying a fullscreen terminal app.",
 		},
 	}
-	controller := New(agent, nil, &stubContextReader{snapshot: "fullscreen snapshot"}, SessionContext{TopPaneID: "%0"})
-	controller.task.CurrentExecution = &CommandExecution{
+	controller := New(agent, nil, &stubContextReader{snapshot: "fullscreen snapshot"}, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	setPrimaryExecutionForTest(controller, CommandExecution{
 		ID:               "cmd-agent",
 		Command:          "wrapped-btop",
 		Origin:           CommandOriginAgentProposal,
 		State:            CommandExecutionInteractiveFullscreen,
 		StartedAt:        time.Now().Add(-15 * time.Second),
 		LatestOutputTail: "",
-	}
+	})
 
 	_, err := controller.CheckActiveExecution(context.Background())
 	if err != nil {
@@ -732,15 +1064,15 @@ func TestLocalControllerCheckActiveExecutionUsesLostPrompt(t *testing.T) {
 			Message: "Tracking confidence is low.",
 		},
 	}
-	controller := New(agent, nil, &stubContextReader{snapshot: "recovery lines"}, SessionContext{TopPaneID: "%0"})
-	controller.task.CurrentExecution = &CommandExecution{
+	controller := New(agent, nil, &stubContextReader{snapshot: "recovery lines"}, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	setPrimaryExecutionForTest(controller, CommandExecution{
 		ID:               "cmd-agent",
 		Command:          "unknown",
 		Origin:           CommandOriginAgentProposal,
 		State:            CommandExecutionLost,
 		StartedAt:        time.Now().Add(-15 * time.Second),
 		LatestOutputTail: "weird output",
-	}
+	})
 
 	_, err := controller.CheckActiveExecution(context.Background())
 	if err != nil {
@@ -760,7 +1092,7 @@ func TestLocalControllerMonitorUpdatesActiveExecutionTail(t *testing.T) {
 		monitor: monitor,
 		started: make(chan struct{}, 1),
 	}
-	controller := New(nil, runner, nil, SessionContext{TopPaneID: "%0"})
+	controller := New(nil, runner, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	done := make(chan struct{})
 	go func() {
@@ -826,7 +1158,7 @@ func TestLocalControllerAttachForegroundExecutionReturnsNoticeAndStart(t *testin
 		ForegroundCommand: "sleep",
 	}
 	runner := &monitoringRunner{attachMonitor: monitor}
-	controller := New(nil, runner, nil, SessionContext{TopPaneID: "%0"})
+	controller := New(nil, runner, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	events, attached, err := controller.attachForegroundExecution(context.Background())
 	if err != nil {
@@ -854,6 +1186,134 @@ func TestLocalControllerAttachForegroundExecutionReturnsNoticeAndStart(t *testin
 	}
 }
 
+func TestLocalControllerRefreshActiveExecutionAttachesForegroundCommand(t *testing.T) {
+	monitor := newManualMonitor()
+	now := time.Now().Add(-5 * time.Second)
+	monitor.snapshot = shell.MonitorSnapshot{
+		CommandID:         "cmd-monitor",
+		Command:           "sleep 30",
+		State:             shell.MonitorStateRunning,
+		StartedAt:         now,
+		ForegroundCommand: "sleep",
+	}
+	runner := &monitoringRunner{attachMonitor: monitor}
+	controller := New(nil, runner, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+
+	events, active, err := controller.RefreshActiveExecution(context.Background())
+	if err != nil {
+		t.Fatalf("RefreshActiveExecution() error = %v", err)
+	}
+	if len(events) != 2 || events[0].Kind != EventSystemNotice || events[1].Kind != EventCommandStart {
+		t.Fatalf("expected attach notice and command start, got %#v", events)
+	}
+	if active == nil || active.Command != "sleep 30" || active.State != CommandExecutionRunning {
+		t.Fatalf("expected refreshed active execution, got %#v", active)
+	}
+
+	monitor.finish(shell.TrackedExecution{
+		CommandID: "cmd-monitor",
+		Command:   "sleep 30",
+		State:     shell.MonitorStateCompleted,
+		ExitCode:  0,
+		Captured:  "done",
+	}, nil)
+}
+
+func TestLocalControllerRefreshActiveExecutionDoesNotReattachWhileForegroundExecutionActive(t *testing.T) {
+	monitor := newManualMonitor()
+	now := time.Now().Add(-5 * time.Second)
+	monitor.snapshot = shell.MonitorSnapshot{
+		CommandID:         "cmd-monitor",
+		Command:           "sleep 30",
+		State:             shell.MonitorStateRunning,
+		StartedAt:         now,
+		ForegroundCommand: "sleep",
+	}
+	runner := &monitoringRunner{attachMonitor: monitor}
+	controller := New(nil, runner, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+
+	_, active, err := controller.RefreshActiveExecution(context.Background())
+	if err != nil {
+		t.Fatalf("first RefreshActiveExecution() error = %v", err)
+	}
+	if active == nil {
+		t.Fatal("expected attached active execution on first refresh")
+	}
+	firstID := active.ID
+
+	events, active, err := controller.RefreshActiveExecution(context.Background())
+	if err != nil {
+		t.Fatalf("second RefreshActiveExecution() error = %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected no new events on second refresh, got %#v", events)
+	}
+	if active == nil || active.ID != firstID {
+		t.Fatalf("expected same attached execution on second refresh, got %#v", active)
+	}
+	if runner.attachCalls != 1 {
+		t.Fatalf("expected one foreground attach call, got %d", runner.attachCalls)
+	}
+
+	monitor.finish(shell.TrackedExecution{
+		CommandID: "cmd-monitor",
+		Command:   "sleep 30",
+		State:     shell.MonitorStateCompleted,
+		ExitCode:  0,
+		Captured:  "done",
+	}, nil)
+}
+
+func TestLocalControllerAttachForegroundExecutionDetachesMonitorLifetimeFromRequestContext(t *testing.T) {
+	monitor := newManualMonitor()
+	now := time.Now().Add(-5 * time.Second)
+	monitor.snapshot = shell.MonitorSnapshot{
+		CommandID:         "cmd-monitor",
+		Command:           "sleep 30",
+		State:             shell.MonitorStateRunning,
+		StartedAt:         now,
+		ForegroundCommand: "sleep",
+	}
+	var attachedCtx context.Context
+	runner := &monitoringRunner{
+		attachFunc: func(ctx context.Context, _ string) (shell.CommandMonitor, error) {
+			attachedCtx = ctx
+			return monitor, nil
+		},
+	}
+	controller := New(nil, runner, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+
+	requestCtx, cancel := context.WithCancel(context.Background())
+	_, active, err := controller.RefreshActiveExecution(requestCtx)
+	if err != nil {
+		t.Fatalf("RefreshActiveExecution() error = %v", err)
+	}
+	if active == nil {
+		t.Fatal("expected attached active execution")
+	}
+	if attachedCtx == nil {
+		t.Fatal("expected attach runner to receive a context")
+	}
+
+	cancel()
+	time.Sleep(25 * time.Millisecond)
+
+	if err := attachedCtx.Err(); err != nil {
+		t.Fatalf("expected attached monitor context to survive request cancellation, got %v", err)
+	}
+	if controller.ActiveExecution() == nil {
+		t.Fatal("expected active execution to remain after request cancellation")
+	}
+
+	monitor.finish(shell.TrackedExecution{
+		CommandID: "cmd-monitor",
+		Command:   "sleep 30",
+		State:     shell.MonitorStateCompleted,
+		ExitCode:  0,
+		Captured:  "done",
+	}, nil)
+}
+
 func TestLocalControllerResumeAfterTakeControlAttachesForegroundExecutionAndCompletes(t *testing.T) {
 	monitor := newManualMonitor()
 	now := time.Now().Add(-5 * time.Second)
@@ -865,7 +1325,7 @@ func TestLocalControllerResumeAfterTakeControlAttachesForegroundExecutionAndComp
 		ForegroundCommand: "sleep",
 	}
 	runner := &monitoringRunner{attachMonitor: monitor}
-	controller := New(nil, runner, nil, SessionContext{TopPaneID: "%0"})
+	controller := New(nil, runner, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	events, err := controller.ResumeAfterTakeControl(context.Background())
 	if err != nil {
@@ -916,7 +1376,7 @@ func TestLocalControllerAttachedForegroundLateCompletionIgnoredAfterAbandon(t *t
 		ForegroundCommand: "sleep",
 	}
 	runner := &monitoringRunner{attachMonitor: monitor}
-	controller := New(nil, runner, &stubContextReader{output: "^C"}, SessionContext{TopPaneID: "%0"})
+	controller := New(nil, runner, &stubContextReader{output: "^C"}, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	_, attached, err := controller.attachForegroundExecution(context.Background())
 	if err != nil {
@@ -957,7 +1417,7 @@ func TestLocalControllerRejectsSecondShellCommandWhileExecutionIsActive(t *testi
 		release: make(chan struct{}),
 		result:  shell.TrackedExecution{CommandID: "cmd-1", Command: "sleep 30", ExitCode: 0},
 	}
-	controller := New(nil, runner, nil, SessionContext{TopPaneID: "%0"})
+	controller := New(nil, runner, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	firstDone := make(chan []TranscriptEvent, 1)
 	go func() {
@@ -1030,7 +1490,7 @@ func TestLocalControllerMonitorMapsAwaitingInputState(t *testing.T) {
 		monitor: monitor,
 		started: make(chan struct{}, 1),
 	}
-	controller := New(nil, runner, nil, SessionContext{TopPaneID: "%0"})
+	controller := New(nil, runner, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	done := make(chan struct{})
 	go func() {
@@ -1079,7 +1539,7 @@ func TestLocalControllerMonitorMapsInteractiveFullscreenState(t *testing.T) {
 		monitor: monitor,
 		started: make(chan struct{}, 1),
 	}
-	controller := New(nil, runner, nil, SessionContext{TopPaneID: "%0"})
+	controller := New(nil, runner, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	done := make(chan struct{})
 	go func() {
@@ -1128,14 +1588,14 @@ func TestLocalControllerCheckActiveExecutionSkipsUserShellCommands(t *testing.T)
 			Message: "unexpected",
 		},
 	}
-	controller := New(agent, nil, &stubContextReader{output: "ignored"}, SessionContext{TopPaneID: "%0"})
-	controller.task.CurrentExecution = &CommandExecution{
+	controller := New(agent, nil, &stubContextReader{output: "ignored"}, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	setPrimaryExecutionForTest(controller, CommandExecution{
 		ID:        "cmd-user",
 		Command:   "sleep 60",
 		Origin:    CommandOriginUserShell,
 		State:     CommandExecutionRunning,
 		StartedAt: time.Now().Add(-15 * time.Second),
-	}
+	})
 
 	events, err := controller.CheckActiveExecution(context.Background())
 	if err != nil {
@@ -1155,7 +1615,7 @@ func TestLocalControllerSubmitProposalRefinementBuildsAgentPrompt(t *testing.T) 
 			Message: "Revised proposal ready.",
 		},
 	}
-	controller := New(agent, nil, nil, SessionContext{TopPaneID: "%0"})
+	controller := New(agent, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	events, err := controller.SubmitProposalRefinement(context.Background(), ProposalPayload{
 		Kind:        ProposalCommand,
@@ -1196,7 +1656,7 @@ func TestLocalControllerApproveRunsCommand(t *testing.T) {
 				Command: "rm -rf tmp",
 			},
 		},
-	}, runner, nil, SessionContext{TopPaneID: "%0"})
+	}, runner, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	events, err := controller.SubmitAgentPrompt(context.Background(), "remove tmp")
 	if err != nil {
@@ -1238,7 +1698,7 @@ func TestLocalControllerProposalCommandFillsApprovalCommand(t *testing.T) {
 			},
 		},
 	}
-	controller := New(agent, nil, nil, SessionContext{TopPaneID: "%0"})
+	controller := New(agent, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	events, err := controller.SubmitAgentPrompt(context.Background(), "propose a streaming loop and ask for approval")
 	if err != nil {
@@ -1267,7 +1727,7 @@ func TestLocalControllerProposalCommandFillsApprovalCommand(t *testing.T) {
 }
 
 func TestLocalControllerApproveWithoutCommandReturnsError(t *testing.T) {
-	controller := New(nil, nil, nil, SessionContext{TopPaneID: "%0"})
+	controller := New(nil, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 	controller.task.PendingApproval = &ApprovalRequest{
 		ID:      "approval-1",
 		Kind:    ApprovalCommand,
@@ -1294,6 +1754,12 @@ type stubAgent struct {
 func (s *stubAgent) Respond(_ context.Context, input AgentInput) (AgentResponse, error) {
 	s.lastInput = input
 	return s.response, s.err
+}
+
+func setPrimaryExecutionForTest(controller *LocalController, execution CommandExecution) {
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	controller.registerExecutionLocked(execution)
 }
 
 type stubRunner struct {
@@ -1323,6 +1789,22 @@ func (s *stubRunner) ResolveTrackedPane(_ context.Context, paneID string) (strin
 	return paneID, nil
 }
 
+type ownedExecutionRunner struct {
+	stubRunner
+	ownedPane    shell.OwnedExecutionPane
+	startDir     string
+	cleanupCalls int
+}
+
+func (o *ownedExecutionRunner) CreateOwnedExecutionPane(_ context.Context, startDir string) (shell.OwnedExecutionPane, func(context.Context) error, error) {
+	o.startDir = startDir
+	cleanup := func(context.Context) error {
+		o.cleanupCalls++
+		return nil
+	}
+	return o.ownedPane, cleanup, nil
+}
+
 type blockingRunner struct {
 	started chan struct{}
 	release chan struct{}
@@ -1341,6 +1823,8 @@ func (b *blockingRunner) RunTrackedCommand(_ context.Context, _ string, _ string
 type monitoringRunner struct {
 	monitor       *manualMonitor
 	attachMonitor *manualMonitor
+	attachFunc    func(context.Context, string) (shell.CommandMonitor, error)
+	attachCalls   int
 	commands      []string
 	started       chan struct{}
 }
@@ -1360,7 +1844,11 @@ func (m *monitoringRunner) StartTrackedCommand(_ context.Context, _ string, comm
 	return m.monitor, nil
 }
 
-func (m *monitoringRunner) AttachForegroundCommand(_ context.Context, _ string) (shell.CommandMonitor, error) {
+func (m *monitoringRunner) AttachForegroundCommand(ctx context.Context, paneID string) (shell.CommandMonitor, error) {
+	m.attachCalls++
+	if m.attachFunc != nil {
+		return m.attachFunc(ctx, paneID)
+	}
 	if m.attachMonitor == nil {
 		return nil, nil
 	}
@@ -1420,7 +1908,7 @@ func (m *manualMonitor) finish(result shell.TrackedExecution, err error) {
 }
 
 func TestLocalControllerRunnerError(t *testing.T) {
-	controller := New(nil, &stubRunner{err: errors.New("boom")}, nil, SessionContext{TopPaneID: "%0"})
+	controller := New(nil, &stubRunner{err: errors.New("boom")}, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 	events, err := controller.SubmitShellCommand(context.Background(), "ls")
 	if err != nil {
 		t.Fatalf("SubmitShellCommand() error = %v", err)
@@ -1439,7 +1927,7 @@ func TestLocalControllerRefineClearsApproval(t *testing.T) {
 				Command: "rm -rf tmp",
 			},
 		},
-	}, nil, nil, SessionContext{TopPaneID: "%0"})
+	}, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	if _, err := controller.SubmitAgentPrompt(context.Background(), "remove tmp"); err != nil {
 		t.Fatalf("SubmitAgentPrompt() error = %v", err)
@@ -1461,7 +1949,7 @@ func TestLocalControllerSubmitRefinementIncludesApprovalContext(t *testing.T) {
 			Message: "Refinement noted.",
 		},
 	}
-	controller := New(agent, nil, nil, SessionContext{TopPaneID: "%0"})
+	controller := New(agent, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	approval := ApprovalRequest{
 		ID:      "approval-1",
@@ -1504,7 +1992,7 @@ func TestLocalControllerContinueAfterCommandUsesLastResultWithoutUserEvent(t *te
 		},
 	}, &stubContextReader{
 		output: "file.txt",
-	}, SessionContext{TopPaneID: "%0"})
+	}, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	if _, err := controller.SubmitShellCommand(context.Background(), "ls"); err != nil {
 		t.Fatalf("SubmitShellCommand() error = %v", err)
@@ -1547,7 +2035,7 @@ func TestLocalControllerContinueAfterCommandPrefersSerialFollowUpPrompt(t *testi
 		},
 	}, &stubContextReader{
 		output: "a.md\nb.md",
-	}, SessionContext{TopPaneID: "%0"})
+	}, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 	controller.task.PriorTranscript = append(controller.task.PriorTranscript, TranscriptEvent{
 		Kind:    EventUserMessage,
 		Payload: TextPayload{Text: "list all the markdown files in this directory. Then when you see the list, give me a tail of the last 20 lines of the shortest one. I want to do this in serial commands, don't lump them together."},
@@ -1588,7 +2076,7 @@ func TestLocalControllerContinueAfterCommandAdvancesActivePlan(t *testing.T) {
 		},
 	}, &stubContextReader{
 		output: "file.txt",
-	}, SessionContext{TopPaneID: "%0"})
+	}, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
 	if _, err := controller.SubmitAgentPrompt(context.Background(), "make a plan"); err != nil {
 		t.Fatalf("SubmitAgentPrompt() error = %v", err)
@@ -1638,7 +2126,7 @@ func TestLocalControllerContinueActivePlanUsesActivePlanContext(t *testing.T) {
 			},
 		},
 	}
-	controller := New(agent, nil, nil, SessionContext{TopPaneID: "%0"})
+	controller := New(agent, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 	controller.task.ActivePlan = &ActivePlan{
 		Summary: "Inspect and repair the workspace.",
 		Steps: []PlanStep{
@@ -1681,7 +2169,7 @@ func TestLocalControllerContinueAfterCommandClearsPlanWhenAgentDeclaresCompletio
 		},
 	}, &stubContextReader{
 		output: "./a.md: tail",
-	}, SessionContext{TopPaneID: "%0"})
+	}, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 	controller.task.ActivePlan = &ActivePlan{
 		Summary: "List every Markdown file and display the last line of each.",
 		Steps: []PlanStep{
@@ -1751,11 +2239,15 @@ type stubContextReader struct {
 	output         string
 	snapshot       string
 	context        shell.PromptContext
+	contexts       []shell.PromptContext
 	err            error
 	resolvedPaneID string
+	paneIDs        []string
+	contextCalls   int
 }
 
-func (s *stubContextReader) CaptureRecentOutput(context.Context, string, int) (string, error) {
+func (s *stubContextReader) CaptureRecentOutput(_ context.Context, paneID string, _ int) (string, error) {
+	s.paneIDs = append(s.paneIDs, paneID)
 	if s.err != nil {
 		return "", s.err
 	}
@@ -1769,6 +2261,14 @@ func (s *stubContextReader) CaptureRecentOutput(context.Context, string, int) (s
 func (s *stubContextReader) CaptureShellContext(context.Context, string) (shell.PromptContext, error) {
 	if s.err != nil {
 		return shell.PromptContext{}, s.err
+	}
+	if len(s.contexts) > 0 {
+		index := s.contextCalls
+		if index >= len(s.contexts) {
+			index = len(s.contexts) - 1
+		}
+		s.contextCalls++
+		return s.contexts[index], nil
 	}
 	if s.context.PromptLine() != "" || s.context.LastExitCode != nil {
 		return s.context, nil

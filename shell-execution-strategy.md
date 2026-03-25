@@ -91,6 +91,13 @@ What is still not done:
   - controller: execution lifecycle/state machine, agent-turn normalization, plan management, and tracked-shell ownership helpers
   - TUI: composer/input routing, transcript rendering, proposal/approval state, and handoff/fullscreen control
 
+Recent direction change on `semantic-shell-bootstrap`:
+- keep one persistent user shell pane as the continuity surface for cwd, `F2`, `$>`, and recent manual shell history
+- run approved agent shell commands in owned tmux execution panes by default
+- feed the agent structured recent manual commands/actions plus full command results, instead of forcing both concerns through one shared pane
+
+That hybrid model is now the intended baseline. The remaining work is to simplify controller execution state around it, not to go back to “everything happens in the tracked shell pane.”
+
 ## Recommended Direction
 
 Before adding any tiny local classifier, the next major architecture upgrade should be standards-based semantic shell integration:

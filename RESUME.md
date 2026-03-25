@@ -12,7 +12,7 @@ Current state:
 - local nested-shell bootstrap is in place and guarded by `SHUTTLE_SEMANTIC_SHELL_V1_PID`
 - manual foreground attach after `F2`/terminal handoff is implemented
 - tracked shell pane recovery now updates controller and TUI state instead of hiding pane aliases only inside the observer
-- controller/TUI/provider state now carries an explicit `TrackedShellTarget { session, pane }` instead of treating `TopPaneID` as the only ownership handle
+- controller/TUI/provider state now carries a single explicit `TrackedShellTarget { session, pane }` ownership handle
 - agent turn context now includes explicit `tracked_session` / `tracked_pane` metadata
 - controller now has a first-class execution registry with `PrimaryExecutionID`, per-execution tracked shell metadata, and ownership mode fields, but serial command submission is still enforced
 - command tracking remains single-owner for now: a second tracked shell command is rejected while another execution is active
@@ -46,7 +46,7 @@ Important implementation points:
 - `internal/shell/observer.go`
   - pane/session recovery, tracked pane resolution, semantic source precedence
 - `internal/controller/controller.go`
-  - controller now normalizes and syncs an explicit tracked shell target instead of relying on a single overloaded top-pane field
+  - controller now normalizes and syncs an explicit tracked shell target as the sole shell-ownership field
   - execution registry + serial ownership enforcement live here
   - continuation-turn plan suppression/completion logic now lives here too
 - `internal/controller/types.go`

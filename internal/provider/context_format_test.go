@@ -122,6 +122,7 @@ func TestBuildTurnContextIncludesExecutionMetadata(t *testing.T) {
 				ID:                 "cmd-1",
 				Command:            "ssh openclaw@openclaw",
 				State:              controller.CommandExecutionAwaitingInput,
+				TrackedShell:       controller.TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%9"},
 				ForegroundCommand:  "ssh",
 				SemanticShell:      true,
 				SemanticSource:     "state_file",
@@ -144,10 +145,40 @@ func TestBuildTurnContextIncludesExecutionMetadata(t *testing.T) {
 	if !strings.Contains(context, "elapsed_seconds=") {
 		t.Fatalf("expected elapsed_seconds metadata, got %q", context)
 	}
+	if !strings.Contains(context, "execution_session=shuttle-test") || !strings.Contains(context, "execution_pane=%9") {
+		t.Fatalf("expected execution target metadata, got %q", context)
+	}
 	if !strings.Contains(context, "prompt_before=jsmith@linuxdesktop ~/repo %") {
 		t.Fatalf("expected prompt_before metadata, got %q", context)
 	}
 	if !strings.Contains(context, "prompt_after=openclaw@openclaw ~ $") {
 		t.Fatalf("expected prompt_after metadata, got %q", context)
+	}
+}
+
+func TestBuildTurnContextIncludesRecentManualShellContext(t *testing.T) {
+	context := buildTurnContext(controller.AgentInput{
+		Prompt: "what changed?",
+		Session: controller.SessionContext{
+			TrackedShell: controller.TrackedShellTarget{
+				SessionName: "shuttle-test",
+				PaneID:      "%0",
+			},
+			RecentManualCommands: []string{
+				"mv foo.md foo_new.md",
+				"touch chicken.mmd",
+			},
+			RecentManualActions: []string{
+				"renamed foo.md -> foo_new.md",
+				"touched chicken.mmd",
+			},
+		},
+	})
+
+	if !strings.Contains(context, "Recent manual shell commands:\nmv foo.md foo_new.md\ntouch chicken.mmd") {
+		t.Fatalf("expected recent manual command section, got %q", context)
+	}
+	if !strings.Contains(context, "Recent manual shell actions:\nrenamed foo.md -> foo_new.md\ntouched chicken.mmd") {
+		t.Fatalf("expected recent manual action section, got %q", context)
 	}
 }

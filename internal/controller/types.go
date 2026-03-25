@@ -23,13 +23,15 @@ type TrackedShellTarget struct {
 }
 
 type SessionContext struct {
-	SessionName       string
-	TopPaneID         string
-	BottomPaneID      string
-	TrackedShell      TrackedShellTarget
-	WorkingDirectory  string
-	RecentShellOutput string
-	CurrentShell      *shell.PromptContext
+	SessionName          string
+	BottomPaneID         string
+	TrackedShell         TrackedShellTarget
+	WorkingDirectory     string
+	UserShellHistoryFile string
+	RecentShellOutput    string
+	RecentManualCommands []string
+	RecentManualActions  []string
+	CurrentShell         *shell.PromptContext
 }
 
 type TaskContext struct {
@@ -229,6 +231,7 @@ type Controller interface {
 	ContinueAfterCommand(ctx context.Context) ([]TranscriptEvent, error)
 	CheckActiveExecution(ctx context.Context) ([]TranscriptEvent, error)
 	ResumeAfterTakeControl(ctx context.Context) ([]TranscriptEvent, error)
+	RefreshActiveExecution(ctx context.Context) ([]TranscriptEvent, *CommandExecution, error)
 	SubmitShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error)
 	SubmitProposedShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error)
 	DecideApproval(ctx context.Context, approvalID string, decision ApprovalDecision, refineText string) ([]TranscriptEvent, error)
@@ -236,6 +239,5 @@ type Controller interface {
 	PeekShellTail(ctx context.Context, lines int) (string, error)
 	ActiveExecution() *CommandExecution
 	AbandonActiveExecution(reason string) *CommandExecution
-	TopPaneID() string
 	TrackedShellTarget() TrackedShellTarget
 }

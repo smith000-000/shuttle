@@ -24,6 +24,13 @@ func TailSuggestsPromptReturn(tail string, current PromptContext) bool {
 	return promptLooksLikeCurrentShell(line, current)
 }
 
+func captureHasCurrentPromptContext(captured string, current PromptContext) bool {
+	if current.PromptLine() == "" {
+		return false
+	}
+	return TailSuggestsPromptReturn(captured, current)
+}
+
 func lastNonEmptyLines(tail string, limit int) []string {
 	if limit <= 0 {
 		return nil

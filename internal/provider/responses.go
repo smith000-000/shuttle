@@ -515,9 +515,6 @@ func buildTurnContext(input controller.AgentInput) string {
 	if input.Session.WorkingDirectory != "" {
 		sessionLines = append(sessionLines, "cwd="+input.Session.WorkingDirectory)
 	}
-	if input.Session.TopPaneID != "" {
-		sessionLines = append(sessionLines, "top_pane="+input.Session.TopPaneID)
-	}
 	if input.Session.TrackedShell.PaneID != "" {
 		sessionLines = append(sessionLines, "tracked_pane="+input.Session.TrackedShell.PaneID)
 	}
@@ -531,6 +528,14 @@ func buildTurnContext(input controller.AgentInput) string {
 	recentOutput := compactShellOutput(input.Session.RecentShellOutput, 8, 4, 1200)
 	if shouldIncludeContextSnippet(seenSnippets, recentOutput) {
 		sections = append(sections, "Recent shell output:\n"+recentOutput)
+	}
+	if len(input.Session.RecentManualCommands) > 0 {
+		lines := append([]string(nil), input.Session.RecentManualCommands...)
+		sections = append(sections, "Recent manual shell commands:\n"+strings.Join(lines, "\n"))
+	}
+	if len(input.Session.RecentManualActions) > 0 {
+		lines := append([]string(nil), input.Session.RecentManualActions...)
+		sections = append(sections, "Recent manual shell actions:\n"+strings.Join(lines, "\n"))
 	}
 
 	if input.Task.LastCommandResult != nil {
@@ -576,6 +581,12 @@ func buildTurnContext(input controller.AgentInput) string {
 			"command=" + current.Command,
 			"origin=" + string(current.Origin),
 			"state=" + string(current.State),
+		}
+		if current.TrackedShell.SessionName != "" {
+			lines = append(lines, "execution_session="+current.TrackedShell.SessionName)
+		}
+		if current.TrackedShell.PaneID != "" {
+			lines = append(lines, "execution_pane="+current.TrackedShell.PaneID)
 		}
 		if strings.TrimSpace(current.ForegroundCommand) != "" {
 			lines = append(lines, "foreground_command="+current.ForegroundCommand)

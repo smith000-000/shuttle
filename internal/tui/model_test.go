@@ -378,12 +378,8 @@ func TestF2CancelsInFlightWorkAndStartsTakeControl(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected take-control command")
 	}
-	if len(next.entries) == 0 {
-		t.Fatal("expected take-control to append a transcript entry")
-	}
-	last := next.entries[len(next.entries)-1]
-	if last.Title != "system" || last.Body != "Taking control of the tracked shell pane." {
-		t.Fatalf("expected take-control system entry, got %#v", last)
+	if len(next.entries) != len(model.entries) {
+		t.Fatalf("expected take-control not to append transcript noise, got %d entries", len(next.entries))
 	}
 }
 
@@ -418,8 +414,33 @@ func TestF2DoesNotCancelActiveShellExecution(t *testing.T) {
 	}
 }
 
+func TestF2DoesNotMarkOwnedExecutionAsHandoff(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 15",
+		Origin:    controller.CommandOriginAgentProposal,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+		TrackedShell: controller.TrackedShellTarget{
+			SessionName: "shuttle-test",
+			PaneID:      "%9",
+		},
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF2})
+	next := updated.(Model)
+
+	if next.activeExecution == nil || next.activeExecution.State != controller.CommandExecutionRunning {
+		t.Fatalf("expected owned execution to remain running, got %#v", next.activeExecution)
+	}
+	if next.handoffVisible {
+		t.Fatal("expected owned execution not to enter handoff-visible state")
+	}
+}
+
 func TestTakeControlFinishedSyncsTrackedTopPane(t *testing.T) {
-	ctrl := &fakeController{sessionName: "shuttle-recovered", topPaneID: "%7"}
+	ctrl := &fakeController{sessionName: "shuttle-recovered", trackedPaneID: "%7"}
 	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
 
 	updated, _ := model.Update(takeControlFinishedMsg{})
@@ -440,22 +461,24 @@ func TestTakeControlFinishedSyncsTrackedTopPane(t *testing.T) {
 }
 
 func TestTakeControlFinishedResumesControllerWithoutLocalExecution(t *testing.T) {
+	activeExecution := &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 20",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+	}
 	ctrl := &fakeController{
 		continueEvents: []controller.TranscriptEvent{
 			{
 				Kind: controller.EventCommandStart,
 				Payload: controller.CommandStartPayload{
-					Command: "sleep 20",
-					Execution: controller.CommandExecution{
-						ID:        "cmd-1",
-						Command:   "sleep 20",
-						Origin:    controller.CommandOriginUserShell,
-						State:     controller.CommandExecutionRunning,
-						StartedAt: time.Now(),
-					},
+					Command:   "sleep 20",
+					Execution: *activeExecution,
 				},
 			},
 		},
+		activeExecution: activeExecution,
 	}
 	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
 
@@ -474,8 +497,49 @@ func TestTakeControlFinishedResumesControllerWithoutLocalExecution(t *testing.T)
 	}
 }
 
+func TestActiveExecutionReattachPreservesObservedStartTimeAcrossHandoff(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	startedAt := time.Now().Add(-12 * time.Second)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionHandoffActive,
+		StartedAt: startedAt,
+		TrackedShell: controller.TrackedShellTarget{
+			SessionName: "shuttle-test",
+			PaneID:      "%0",
+		},
+		OwnershipMode: controller.CommandOwnershipSharedObserver,
+	}
+	model.handoffVisible = true
+
+	updated, _ := model.Update(activeExecutionMsg{
+		execution: &controller.CommandExecution{
+			ID:        "cmd-2",
+			Command:   "sleep",
+			Origin:    controller.CommandOriginUserShell,
+			State:     controller.CommandExecutionRunning,
+			StartedAt: time.Now(),
+			TrackedShell: controller.TrackedShellTarget{
+				SessionName: "shuttle-test",
+				PaneID:      "%0",
+			},
+			OwnershipMode: controller.CommandOwnershipSharedObserver,
+		},
+	})
+	next := updated.(Model)
+
+	if next.activeExecution == nil {
+		t.Fatal("expected active execution to remain visible")
+	}
+	if !next.activeExecution.StartedAt.Equal(startedAt) {
+		t.Fatalf("expected preserved startedAt %v, got %v", startedAt, next.activeExecution.StartedAt)
+	}
+}
+
 func TestRefreshedShellContextSyncsTrackedTopPane(t *testing.T) {
-	ctrl := &fakeController{topPaneID: "%8"}
+	ctrl := &fakeController{trackedPaneID: "%8"}
 	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
 
 	updated, _ := model.Update(refreshedShellContextMsg{context: &shell.PromptContext{Directory: "/tmp"}})
@@ -651,6 +715,30 @@ func TestActiveExecutionCardShowsFullscreenKeyHintsWithoutKill(t *testing.T) {
 	}
 	if strings.Contains(card, "K attempt local interrupt") {
 		t.Fatalf("expected fullscreen card to suppress dangerous kill hint, got %q", card)
+	}
+}
+
+func TestActiveExecutionCardExplainsOwnedExecutionPane(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 20",
+		Origin:    controller.CommandOriginAgentProposal,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+		TrackedShell: controller.TrackedShellTarget{
+			SessionName: "shuttle-test",
+			PaneID:      "%9",
+		},
+		LatestOutputTail: "still running",
+	}
+
+	card := model.renderActiveExecutionCard(100)
+	if !strings.Contains(card, "owned execution pane") {
+		t.Fatalf("expected owned execution explanation, got %q", card)
+	}
+	if strings.Contains(card, "F2 take control") {
+		t.Fatalf("expected owned execution card not to advertise F2 takeover, got %q", card)
 	}
 }
 
@@ -918,6 +1006,49 @@ func TestTakeControlFinishedPreservesExecutionAcrossTransientNilPoll(t *testing.
 	}
 }
 
+func TestActiveExecutionNilPollRequiresConfirmationBeforeClear(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 15",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+	}
+
+	updated, cmd := model.Update(activeExecutionMsg{execution: nil})
+	next := updated.(Model)
+
+	if next.activeExecution == nil {
+		t.Fatal("expected first nil execution poll to preserve active execution pending confirmation")
+	}
+	if next.activeExecutionMissingSince.IsZero() {
+		t.Fatal("expected missing-execution confirmation window to start")
+	}
+	if cmd == nil {
+		t.Fatal("expected follow-up poll while confirming missing execution")
+	}
+}
+
+func TestActiveExecutionClearsAfterConfirmedMissingPolls(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 15",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+	}
+	model.activeExecutionMissingSince = time.Now().Add(-4 * time.Second)
+
+	updated, _ := model.Update(activeExecutionMsg{execution: nil})
+	next := updated.(Model)
+
+	if next.activeExecution != nil {
+		t.Fatalf("expected confirmed missing execution to clear, got %#v", next.activeExecution)
+	}
+}
+
 func TestMaybeExecutionCheckInCmdChecksInForAgentOwnedExecution(t *testing.T) {
 	ctrl := &fakeController{
 		checkInEvents: []controller.TranscriptEvent{
@@ -1044,21 +1175,18 @@ func TestShellSubmitEnablesShellTailPreview(t *testing.T) {
 	}
 }
 
-func TestShellSubmitCreatesActiveExecution(t *testing.T) {
+func TestShellSubmitWaitsForControllerToReportActiveExecution(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.input = "sleep 5"
 
 	updated, _ := model.submit()
 	next := updated.(Model)
 
-	if next.activeExecution == nil {
-		t.Fatal("expected active execution for shell submit")
+	if next.activeExecution != nil {
+		t.Fatalf("expected TUI to wait for controller execution state, got %#v", next.activeExecution)
 	}
-	if next.activeExecution.Command != "sleep 5" {
-		t.Fatalf("expected active command sleep 5, got %#v", next.activeExecution)
-	}
-	if next.activeExecution.Origin != controller.CommandOriginUserShell {
-		t.Fatalf("expected user-shell origin, got %#v", next.activeExecution)
+	if !next.busy {
+		t.Fatal("expected shell submit to remain busy while awaiting controller response")
 	}
 }
 
@@ -3459,10 +3587,11 @@ type fakeController struct {
 	continueCalls   int
 	checkInCalls    int
 	activeExecution *controller.CommandExecution
+	refreshEvents   []controller.TranscriptEvent
 	abandonReason   string
 	peekShellTail   string
 	sessionName     string
-	topPaneID       string
+	trackedPaneID   string
 }
 
 func (f *fakeController) SubmitAgentPrompt(_ context.Context, _ string) ([]controller.TranscriptEvent, error) {
@@ -3613,6 +3742,15 @@ func (f *fakeController) ActiveExecution() *controller.CommandExecution {
 	return &execution
 }
 
+func (f *fakeController) RefreshActiveExecution(_ context.Context) ([]controller.TranscriptEvent, *controller.CommandExecution, error) {
+	var execution *controller.CommandExecution
+	if f.activeExecution != nil {
+		copy := *f.activeExecution
+		execution = &copy
+	}
+	return append([]controller.TranscriptEvent(nil), f.refreshEvents...), execution, nil
+}
+
 func (f *fakeController) AbandonActiveExecution(reason string) *controller.CommandExecution {
 	f.abandonReason = reason
 	if f.activeExecution == nil {
@@ -3623,17 +3761,13 @@ func (f *fakeController) AbandonActiveExecution(reason string) *controller.Comma
 	return &execution
 }
 
-func (f *fakeController) TopPaneID() string {
-	return f.TrackedShellTarget().PaneID
-}
-
 func (f *fakeController) TrackedShellTarget() controller.TrackedShellTarget {
 	sessionName := strings.TrimSpace(f.sessionName)
 	if sessionName == "" {
 		sessionName = "shuttle-test"
 	}
-	if strings.TrimSpace(f.topPaneID) != "" {
-		return controller.TrackedShellTarget{SessionName: sessionName, PaneID: f.topPaneID}
+	if strings.TrimSpace(f.trackedPaneID) != "" {
+		return controller.TrackedShellTarget{SessionName: sessionName, PaneID: f.trackedPaneID}
 	}
 	return controller.TrackedShellTarget{SessionName: sessionName, PaneID: "%0"}
 }

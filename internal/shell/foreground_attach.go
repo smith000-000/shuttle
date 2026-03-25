@@ -22,8 +22,13 @@ func (o *Observer) AttachForegroundCommand(ctx context.Context, paneID string) (
 
 	currentPaneCommand := strings.TrimSpace(paneInfo.CurrentCommand)
 	command := attachedForegroundCommandLabel(currentPaneCommand)
-	tail := monitorTail(captured, "")
+	focusedCapture := focusAttachedForegroundCapture(captured, currentPaneCommand)
+	tail := monitorTail(focusedCapture, "")
 	promptContext, hasPromptContext := ParsePromptContextFromCapture(captured)
+	if hasPromptContext && !captureHasCurrentPromptContext(captured, promptContext) {
+		hasPromptContext = false
+		promptContext = PromptContext{}
+	}
 	state := classifyActiveMonitorState(command, tail, paneInfo.AlternateOn, currentPaneCommand)
 	if !shouldAttachForegroundMonitor(hasPromptContext, currentPaneCommand, state) {
 		return nil, nil
@@ -37,7 +42,7 @@ func (o *Observer) AttachForegroundCommand(ctx context.Context, paneID string) (
 	}
 	monitor.setState(state)
 
-	go o.runAttachedForegroundMonitor(ctx, monitor, paneID, command, captured)
+	go o.runAttachedForegroundMonitor(ctx, monitor, paneID, command, currentPaneCommand, focusedCapture)
 	return monitor, nil
 }
 
@@ -74,11 +79,11 @@ func shouldAttachForegroundMonitor(hasPromptContext bool, currentPaneCommand str
 	return !hasPromptContext
 }
 
-func (o *Observer) runAttachedForegroundMonitor(ctx context.Context, monitor *trackedCommandMonitor, paneID string, command string, initialCapture string) {
+func (o *Observer) runAttachedForegroundMonitor(ctx context.Context, monitor *trackedCommandMonitor, paneID string, command string, initialPaneCommand string, initialCapture string) {
 	lastCapture := initialCapture
 	lastPaneInfoCheck := time.Time{}
 	alternateOn := false
-	currentPaneCommand := ""
+	currentPaneCommand := strings.TrimSpace(initialPaneCommand)
 	paneTTY := ""
 
 	for {
@@ -92,16 +97,27 @@ func (o *Observer) runAttachedForegroundMonitor(ctx context.Context, monitor *tr
 			}, fmt.Errorf("capture pane for attached foreground command: %w", err), MonitorStateLost)
 			return
 		}
-		lastCapture = captured
-		tail := monitorTail(captured, "")
-		monitor.updateTail(tail)
+		focusedCapture := focusAttachedForegroundCapture(captured, currentPaneCommand)
+		lastCapture = focusedCapture
+		tail := monitorTail(focusedCapture, "")
 
 		var parsedShellContext PromptContext
 		hasParsedShellContext := false
 		if shellContext, ok := ParsePromptContextFromCapture(captured); ok {
-			parsedShellContext = shellContext
-			hasParsedShellContext = true
-			monitor.updateShellContext(shellContext)
+			if captureHasCurrentPromptContext(captured, shellContext) {
+				parsedShellContext = shellContext
+				hasParsedShellContext = true
+				monitor.updateShellContext(shellContext)
+			}
+		}
+		if hasParsedShellContext {
+			trimmedTail := stripEchoedForegroundCommand(strings.TrimSpace(tail), currentPaneCommand)
+			trimmedTail = stripTrailingPromptLine(trimmedTail, parsedShellContext)
+			if trimmedTail != "" {
+				monitor.updateTail(trimmedTail)
+			}
+		} else {
+			monitor.updateTail(tail)
 		}
 
 		if lastPaneInfoCheck.IsZero() || time.Since(lastPaneInfoCheck) >= 200*time.Millisecond {
@@ -137,9 +153,27 @@ func (o *Observer) runAttachedForegroundMonitor(ctx context.Context, monitor *tr
 			if promptContext.PromptLine() == "" {
 				promptContext = synthesizePromptContext(o.promptHint, semanticState)
 			}
-			cleanBody := strings.TrimSpace(tail)
+			if !captureHasCurrentPromptContext(captured, promptContext) {
+				select {
+				case <-ctx.Done():
+					monitor.finish(TrackedExecution{
+						Command:    command,
+						Cause:      CompletionCauseUnknown,
+						Confidence: ConfidenceLow,
+						Captured:   monitorTail(lastCapture, ""),
+					}, ctx.Err(), monitorStateFromError(ctx.Err()))
+					return
+				case <-time.After(50 * time.Millisecond):
+				}
+				continue
+			}
+			cleanBody := stripEchoedForegroundCommand(strings.TrimSpace(tail), currentPaneCommand)
 			if promptContext.PromptLine() != "" {
 				cleanBody = stripTrailingPromptLine(cleanBody, promptContext)
+			}
+			if cleanBody == "" {
+				snapshot := monitor.Snapshot()
+				cleanBody = stripEchoedForegroundCommand(strings.TrimSpace(snapshot.LatestOutputTail), command)
 			}
 			exitCode := 0
 			if semanticState.ExitCode != nil {
@@ -176,9 +210,13 @@ func (o *Observer) runAttachedForegroundMonitor(ctx context.Context, monitor *tr
 		}
 
 		if hasParsedShellContext && allowPromptReturnInference("", alternateOn, currentPaneCommand) {
-			cleanBody := strings.TrimSpace(tail)
+			cleanBody := stripEchoedForegroundCommand(strings.TrimSpace(tail), currentPaneCommand)
 			if parsedShellContext.PromptLine() != "" {
 				cleanBody = stripTrailingPromptLine(cleanBody, parsedShellContext)
+			}
+			if cleanBody == "" {
+				snapshot := monitor.Snapshot()
+				cleanBody = stripEchoedForegroundCommand(strings.TrimSpace(snapshot.LatestOutputTail), command)
 			}
 			confidence := ConfidenceMedium
 			if paneCommandAllowsPromptInference(currentPaneCommand) {
@@ -209,4 +247,67 @@ func (o *Observer) runAttachedForegroundMonitor(ctx context.Context, monitor *tr
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+}
+
+func focusAttachedForegroundCapture(captured string, currentPaneCommand string) string {
+	captured = sanitizeCapturedBody(captured)
+	currentPaneCommand = strings.TrimSpace(currentPaneCommand)
+	if captured == "" || currentPaneCommand == "" || paneCommandIsShell(currentPaneCommand) {
+		return captured
+	}
+
+	lines := strings.Split(strings.ReplaceAll(captured, "\r\n", "\n"), "\n")
+	for index := len(lines) - 1; index >= 0; index-- {
+		if !lineStartsForegroundCommand(lines[index], currentPaneCommand) {
+			continue
+		}
+		return strings.TrimSpace(strings.Join(lines[index:], "\n"))
+	}
+
+	return captured
+}
+
+func stripEchoedForegroundCommand(body string, currentPaneCommand string) string {
+	body = strings.TrimSpace(body)
+	currentPaneCommand = strings.TrimSpace(currentPaneCommand)
+	if body == "" || currentPaneCommand == "" {
+		return body
+	}
+
+	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
+	if len(lines) == 0 {
+		return body
+	}
+
+	startIndex := 0
+	if lineLooksLikePrompt(lines[0]) && len(lines) > 1 {
+		startIndex = 1
+	}
+	if !lineStartsForegroundCommand(lines[startIndex], currentPaneCommand) {
+		return body
+	}
+
+	return strings.TrimSpace(strings.Join(lines[startIndex+1:], "\n"))
+}
+
+func lineStartsForegroundCommand(line string, currentPaneCommand string) bool {
+	currentPaneCommand = strings.TrimSpace(currentPaneCommand)
+	if currentPaneCommand == "" {
+		return false
+	}
+
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return false
+	}
+	if lineLooksLikePrompt(trimmed) {
+		return false
+	}
+
+	fields := strings.Fields(trimmed)
+	if len(fields) == 0 {
+		return false
+	}
+
+	return strings.TrimSpace(fields[0]) == currentPaneCommand
 }

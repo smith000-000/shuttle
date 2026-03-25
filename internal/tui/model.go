@@ -53,6 +53,8 @@ type shellTailMsg struct {
 
 type activeExecutionMsg struct {
 	execution *controller.CommandExecution
+	events    []controller.TranscriptEvent
+	err       error
 }
 
 type activeExecutionCheckInMsg struct {
@@ -180,79 +182,80 @@ const (
 )
 
 type Model struct {
-	workspace               tmux.Workspace
-	ctrl                    controller.Controller
-	mode                    Mode
-	input                   string
-	cursor                  int
-	entries                 []Entry
-	selectedEntry           int
-	width                   int
-	height                  int
-	busy                    bool
-	busyStartedAt           time.Time
-	transcriptScroll        int
-	transcriptFollow        bool
-	detailOpen              bool
-	detailScroll            int
-	shellHistory            composerHistory
-	agentHistory            composerHistory
-	activePlan              *controller.ActivePlan
-	shellContext            shell.PromptContext
-	pendingApproval         *controller.ApprovalRequest
-	pendingProposal         *controller.ProposalPayload
-	startupNotice           *startupSecurityNotice
-	refiningApproval        *controller.ApprovalRequest
-	refiningProposal        *controller.ProposalPayload
-	editingProposal         *controller.ProposalPayload
-	approvalInFlight        bool
-	proposalRunPending      bool
-	directShellPending      bool
-	inFlightCancel          context.CancelFunc
-	suppressCancelErr       bool
-	resumeAfterHandoff      bool
-	handoffVisible          bool
-	handoffPriorState       controller.CommandExecutionState
-	handoffReturnGraceUntil time.Time
-	takeControl             takeControlConfig
-	liveShellTail           string
-	showShellTail           bool
-	activeExecution         *controller.CommandExecution
-	pendingFullscreen       *fullscreenAction
-	sendingFullscreenKeys   bool
-	lastFullscreenKeys      string
-	lastFullscreenKeysAt    time.Time
-	exitConfirmUntil        time.Time
-	exitConfirmToken        uint64
-	checkInInFlight         bool
-	lastCheckInAt           time.Time
-	lastInterruptNoticeID   string
-	activeProvider          provider.Profile
-	onboardingOpen          bool
-	onboardingStep          onboardingStep
-	onboardingIndex         int
-	onboardingChoices       []provider.OnboardingCandidate
-	onboardingSelected      *provider.OnboardingCandidate
-	onboardingForm          *onboardingFormState
-	onboardingModels        []provider.ModelOption
-	onboardingModelIdx      int
-	loadOnboarding          func() ([]provider.OnboardingCandidate, error)
-	loadModels              func(provider.Profile) ([]provider.ModelOption, error)
-	switchProvider          func(provider.Profile, *shell.PromptContext) (controller.Controller, provider.Profile, error)
-	saveProvider            func(provider.Profile) error
-	settingsOpen            bool
-	settingsStep            settingsStep
-	settingsIndex           int
-	settingsProviders       []settingsProviderEntry
-	settingsProviderIdx     int
-	settingsConfig          *onboardingFormState
-	settingsModelCatalog    []settingsModelChoice
-	settingsModels          []settingsModelChoice
-	settingsModelIdx        int
-	settingsModelFilter     string
-	settingsModelInfo       bool
-	lastModelInfo           *controller.AgentModelInfo
-	styles                  styles
+	workspace                   tmux.Workspace
+	ctrl                        controller.Controller
+	mode                        Mode
+	input                       string
+	cursor                      int
+	entries                     []Entry
+	selectedEntry               int
+	width                       int
+	height                      int
+	busy                        bool
+	busyStartedAt               time.Time
+	transcriptScroll            int
+	transcriptFollow            bool
+	detailOpen                  bool
+	detailScroll                int
+	shellHistory                composerHistory
+	agentHistory                composerHistory
+	activePlan                  *controller.ActivePlan
+	shellContext                shell.PromptContext
+	pendingApproval             *controller.ApprovalRequest
+	pendingProposal             *controller.ProposalPayload
+	startupNotice               *startupSecurityNotice
+	refiningApproval            *controller.ApprovalRequest
+	refiningProposal            *controller.ProposalPayload
+	editingProposal             *controller.ProposalPayload
+	approvalInFlight            bool
+	proposalRunPending          bool
+	directShellPending          bool
+	inFlightCancel              context.CancelFunc
+	suppressCancelErr           bool
+	resumeAfterHandoff          bool
+	handoffVisible              bool
+	handoffPriorState           controller.CommandExecutionState
+	handoffReturnGraceUntil     time.Time
+	activeExecutionMissingSince time.Time
+	takeControl                 takeControlConfig
+	liveShellTail               string
+	showShellTail               bool
+	activeExecution             *controller.CommandExecution
+	pendingFullscreen           *fullscreenAction
+	sendingFullscreenKeys       bool
+	lastFullscreenKeys          string
+	lastFullscreenKeysAt        time.Time
+	exitConfirmUntil            time.Time
+	exitConfirmToken            uint64
+	checkInInFlight             bool
+	lastCheckInAt               time.Time
+	lastInterruptNoticeID       string
+	activeProvider              provider.Profile
+	onboardingOpen              bool
+	onboardingStep              onboardingStep
+	onboardingIndex             int
+	onboardingChoices           []provider.OnboardingCandidate
+	onboardingSelected          *provider.OnboardingCandidate
+	onboardingForm              *onboardingFormState
+	onboardingModels            []provider.ModelOption
+	onboardingModelIdx          int
+	loadOnboarding              func() ([]provider.OnboardingCandidate, error)
+	loadModels                  func(provider.Profile) ([]provider.ModelOption, error)
+	switchProvider              func(provider.Profile, *shell.PromptContext) (controller.Controller, provider.Profile, error)
+	saveProvider                func(provider.Profile) error
+	settingsOpen                bool
+	settingsStep                settingsStep
+	settingsIndex               int
+	settingsProviders           []settingsProviderEntry
+	settingsProviderIdx         int
+	settingsConfig              *onboardingFormState
+	settingsModelCatalog        []settingsModelChoice
+	settingsModels              []settingsModelChoice
+	settingsModelIdx            int
+	settingsModelFilter         string
+	settingsModelInfo           bool
+	lastModelInfo               *controller.AgentModelInfo
+	styles                      styles
 }
 
 func NewModel(workspace tmux.Workspace, ctrl controller.Controller) Model {
@@ -284,11 +287,11 @@ func (m Model) WithShellContext(promptContext shell.PromptContext) Model {
 	return m
 }
 
-func (m Model) WithTakeControl(socketName string, sessionName string, topPaneID string, detachKey string) Model {
+func (m Model) WithTakeControl(socketName string, sessionName string, trackedPaneID string, detachKey string) Model {
 	m.takeControl = takeControlConfig{
 		SocketName:    socketName,
 		SessionName:   sessionName,
-		TrackedPaneID: topPaneID,
+		TrackedPaneID: trackedPaneID,
 		DetachKey:     detachKey,
 	}
 
@@ -453,7 +456,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					events: events,
 					err:    err,
 				}
-			}, tickBusy(), m.refreshShellContextCmd(), m.pollShellTailCmd(), m.pollActiveExecutionCmd())
+			}, tickBusy(), m.refreshShellContextCmd(), m.pollShellTailCmd())
 		}
 		m.handoffReturnGraceUntil = time.Time{}
 		return m, tea.Batch(followUpCmds...)
@@ -474,6 +477,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case activeExecutionMsg:
+		if msg.err != nil {
+			return m, nil
+		}
+		if len(msg.events) > 0 {
+			pinned := m.isTranscriptPinned()
+			m.entries = append(m.entries, eventsToEntries(msg.events, !m.directShellPending)...)
+			m.syncActionState(msg.events)
+			if pinned {
+				m.scrollTranscriptToBottom()
+			} else {
+				m.clampTranscriptScroll()
+			}
+			m.selectedEntry = len(m.entries) - 1
+			m.clampSelection()
+		}
 		if msg.execution == nil && m.shouldPreserveExecutionAfterHandoff() {
 			logging.Trace(
 				"tui.active_execution.preserve_after_handoff",
@@ -481,8 +499,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 			return m, tea.Batch(m.pollActiveExecutionAfter(150*time.Millisecond), m.pollShellTailCmd())
 		}
+		if msg.execution == nil && m.shouldConfirmMissingActiveExecution() {
+			if m.activeExecutionMissingSince.IsZero() {
+				m.activeExecutionMissingSince = time.Now()
+			}
+			logging.Trace(
+				"tui.active_execution.confirm_missing",
+				"execution_id", activeExecutionID(m.activeExecution),
+				"missing_for_ms", time.Since(m.activeExecutionMissingSince).Milliseconds(),
+			)
+			return m, tea.Batch(m.pollActiveExecutionAfter(250*time.Millisecond), m.pollShellTailCmd())
+		}
 		if msg.execution != nil {
 			m.handoffReturnGraceUntil = time.Time{}
+			m.activeExecutionMissingSince = time.Time{}
 		}
 		m.syncActiveExecution(msg.execution)
 		m.syncTrackedShellTarget()
@@ -1115,7 +1145,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		logging.Trace("tui.fullscreen_keys.submit", "keys", rawKeys)
 		m.sendingFullscreenKeys = false
 		m.setInput("")
-		return m, sendFullscreenKeysCmd(m.takeControl, rawKeys)
+		return m, sendFullscreenKeysCmd(m.takeControl, m.activeExecutionPaneID(), rawKeys)
 	}
 
 	recoveryAgentPrompt := m.mode == AgentMode && m.activeExecution != nil
@@ -1205,23 +1235,13 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	}
 
 	m.busy = true
-	m.busyStartedAt = time.Now()
-	m.directShellPending = true
-	m.showShellTail = true
 	command := text
 	logging.Trace("tui.submit.shell", "command", command)
-	m.syncActiveExecution(newLocalExecution(command, controller.CommandOriginUserShell))
-	ctx, cancel := context.WithCancel(context.Background())
-	m.inFlightCancel = cancel
-	return m, tea.Batch(func() tea.Msg {
-		defer cancel()
-
-		events, err := m.ctrl.SubmitShellCommand(ctx, command)
-		return controllerEventsMsg{
-			events: events,
-			err:    err,
-		}
-	}, tickBusy(), m.pollShellTailCmd(), m.pollActiveExecutionCmd())
+	return m.startTrackedShellRequest(func(next *Model) {
+		next.directShellPending = true
+	}, func(ctx context.Context) ([]controller.TranscriptEvent, error) {
+		return m.ctrl.SubmitShellCommand(ctx, command)
+	})
 }
 
 func (m Model) handleComposerCommand(text string) (bool, tea.Model, tea.Cmd) {
@@ -1234,6 +1254,27 @@ func (m Model) handleComposerCommand(text string) (bool, tea.Model, tea.Cmd) {
 	default:
 		return false, m, nil
 	}
+}
+
+func (m Model) startTrackedShellRequest(mark func(*Model), invoke func(context.Context) ([]controller.TranscriptEvent, error)) (tea.Model, tea.Cmd) {
+	m.busy = true
+	m.busyStartedAt = time.Now()
+	m.showShellTail = true
+	if mark != nil {
+		mark(&m)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	m.inFlightCancel = cancel
+	return m, tea.Batch(func() tea.Msg {
+		defer cancel()
+
+		events, err := invoke(ctx)
+		return controllerEventsMsg{
+			events: events,
+			err:    err,
+		}
+	}, tickBusy(), m.pollShellTailCmd(), m.pollActiveExecutionCmd())
 }
 
 func (m Model) primaryAction() (tea.Model, tea.Cmd) {
@@ -1262,41 +1303,26 @@ func (m Model) confirmFullscreenAction() (tea.Model, tea.Cmd) {
 
 	switch action.Kind {
 	case fullscreenActionShellSubmit:
-		m.busy = true
-		m.busyStartedAt = time.Now()
-		m.directShellPending = true
-		m.showShellTail = true
-		m.syncActiveExecution(newLocalExecution(action.Command, controller.CommandOriginUserShell))
 		m.setInput("")
-		ctx, cancel := context.WithCancel(context.Background())
-		m.inFlightCancel = cancel
-		return m, tea.Batch(func() tea.Msg {
-			defer cancel()
-			events, err := m.ctrl.SubmitShellCommand(ctx, action.Command)
-			return controllerEventsMsg{events: events, err: err}
-		}, tickBusy(), m.pollShellTailCmd(), m.pollActiveExecutionCmd())
+		return m.startTrackedShellRequest(func(next *Model) {
+			next.directShellPending = true
+		}, func(ctx context.Context) ([]controller.TranscriptEvent, error) {
+			return m.ctrl.SubmitShellCommand(ctx, action.Command)
+		})
 	case fullscreenActionProposalRun:
 		if m.pendingProposal == nil || strings.TrimSpace(m.pendingProposal.Command) == "" {
 			return m, nil
 		}
 		logging.Trace("tui.proposal.run", "command", m.pendingProposal.Command)
-		m.busy = true
-		m.busyStartedAt = time.Now()
-		m.proposalRunPending = true
-		m.showShellTail = true
 		command := m.pendingProposal.Command
 		m.pendingProposal = nil
 		m.refiningProposal = nil
 		m.editingProposal = nil
-		m.syncActiveExecution(newLocalExecution(command, controller.CommandOriginAgentProposal))
-		ctx, cancel := context.WithCancel(context.Background())
-		m.inFlightCancel = cancel
-
-		return m, tea.Batch(func() tea.Msg {
-			defer cancel()
-			events, err := m.ctrl.SubmitProposedShellCommand(ctx, command)
-			return controllerEventsMsg{events: events, err: err}
-		}, tickBusy(), m.pollShellTailCmd(), m.pollActiveExecutionCmd())
+		return m.startTrackedShellRequest(func(next *Model) {
+			next.proposalRunPending = true
+		}, func(ctx context.Context) ([]controller.TranscriptEvent, error) {
+			return m.ctrl.SubmitProposedShellCommand(ctx, command)
+		})
 	case fullscreenActionApprovalRun:
 		if m.pendingApproval == nil || m.pendingApproval.ID != action.ApprovalID {
 			return m, nil
@@ -1307,26 +1333,17 @@ func (m Model) confirmFullscreenAction() (tea.Model, tea.Cmd) {
 			"decision", controller.DecisionApprove,
 			"command", m.pendingApproval.Command,
 		)
-		m.busy = true
-		m.busyStartedAt = time.Now()
-		m.approvalInFlight = true
-		m.showShellTail = true
 		approvalID := m.pendingApproval.ID
-		command := m.pendingApproval.Command
 		m.pendingApproval = nil
 		m.pendingProposal = nil
 		m.refiningApproval = nil
 		m.refiningProposal = nil
 		m.editingProposal = nil
-		m.syncActiveExecution(newLocalExecution(command, controller.CommandOriginAgentApproval))
-		ctx, cancel := context.WithCancel(context.Background())
-		m.inFlightCancel = cancel
-
-		return m, tea.Batch(func() tea.Msg {
-			defer cancel()
-			events, err := m.ctrl.DecideApproval(ctx, approvalID, controller.DecisionApprove, "")
-			return controllerEventsMsg{events: events, err: err}
-		}, tickBusy(), m.pollShellTailCmd(), m.pollActiveExecutionCmd())
+		return m.startTrackedShellRequest(func(next *Model) {
+			next.approvalInFlight = true
+		}, func(ctx context.Context) ([]controller.TranscriptEvent, error) {
+			return m.ctrl.DecideApproval(ctx, approvalID, controller.DecisionApprove, "")
+		})
 	default:
 		return m, nil
 	}
@@ -1379,26 +1396,13 @@ func (m Model) takeControlNow() (tea.Model, tea.Cmd) {
 		"active_execution", activeExecutionID(m.activeExecution),
 		"resume_after_handoff", m.resumeAfterHandoff,
 	)
-	pinned := m.isTranscriptPinned()
-	m.entries = append(m.entries, Entry{
-		Title: "system",
-		Body:  "Taking control of the tracked shell pane.",
-	})
-	if pinned {
-		m.scrollTranscriptToBottom()
-	} else {
-		m.clampTranscriptScroll()
-	}
-	m.selectedEntry = len(m.entries) - 1
-	m.clampSelection()
-
 	if m.inFlightCancel != nil && m.activeExecution == nil {
 		m.resumeAfterHandoff = !m.directShellPending && (m.approvalInFlight || m.proposalRunPending || m.mode == AgentMode || m.activePlan != nil)
 		m.suppressCancelErr = true
 		m.inFlightCancel()
 		m.inFlightCancel = nil
 	}
-	if m.activeExecution != nil {
+	if m.activeExecution != nil && m.activeExecutionUsesTrackedShell() {
 		updated := *m.activeExecution
 		m.handoffPriorState = updated.State
 		updated.State = controller.CommandExecutionHandoffActive
@@ -1437,7 +1441,7 @@ func (m Model) interruptInFlight() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.showShellTail = true
-		return m, interruptShellCmd(m.takeControl)
+		return m, interruptShellCmd(m.takeControl, m.activeExecutionPaneID())
 	}
 
 	if m.inFlightCancel != nil {
@@ -1568,7 +1572,11 @@ func (m Model) pollActiveExecutionCmd() tea.Cmd {
 	}
 
 	return func() tea.Msg {
-		return activeExecutionMsg{execution: m.ctrl.ActiveExecution()}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		events, execution, err := m.ctrl.RefreshActiveExecution(ctx)
+		return activeExecutionMsg{execution: execution, events: events, err: err}
 	}
 }
 
@@ -1578,12 +1586,16 @@ func (m Model) pollActiveExecutionAfter(delay time.Duration) tea.Cmd {
 	}
 
 	return tea.Tick(delay, func(time.Time) tea.Msg {
-		return activeExecutionMsg{execution: m.ctrl.ActiveExecution()}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		events, execution, err := m.ctrl.RefreshActiveExecution(ctx)
+		return activeExecutionMsg{execution: execution, events: events, err: err}
 	})
 }
 
-func interruptShellCmd(config takeControlConfig) tea.Cmd {
-	if !config.enabled() {
+func interruptShellCmd(config takeControlConfig, paneID string) tea.Cmd {
+	if !config.enabled() || strings.TrimSpace(paneID) == "" {
 		return nil
 	}
 
@@ -1595,13 +1607,13 @@ func interruptShellCmd(config takeControlConfig) tea.Cmd {
 		if err != nil {
 			return shellInterruptMsg{err: err}
 		}
-		err = client.SendKeys(ctx, config.TrackedPaneID, "C-c", false)
+		err = client.SendKeys(ctx, paneID, "C-c", false)
 		return shellInterruptMsg{err: err}
 	}
 }
 
-func sendFullscreenKeysCmd(config takeControlConfig, keys string) tea.Cmd {
-	if !config.enabled() {
+func sendFullscreenKeysCmd(config takeControlConfig, paneID string, keys string) tea.Cmd {
+	if !config.enabled() || strings.TrimSpace(paneID) == "" {
 		return nil
 	}
 
@@ -1617,12 +1629,12 @@ func sendFullscreenKeysCmd(config takeControlConfig, keys string) tea.Cmd {
 		parts := strings.Split(strings.ReplaceAll(keys, "\r\n", "\n"), "\n")
 		for index, part := range parts {
 			if part != "" {
-				if err := client.SendLiteralKeys(ctx, config.TrackedPaneID, part); err != nil {
+				if err := client.SendLiteralKeys(ctx, paneID, part); err != nil {
 					return fullscreenKeysSentMsg{keys: keys, err: err}
 				}
 			}
 			if index < len(parts)-1 {
-				if err := client.SendKeys(ctx, config.TrackedPaneID, "Enter", false); err != nil {
+				if err := client.SendKeys(ctx, paneID, "Enter", false); err != nil {
 					return fullscreenKeysSentMsg{keys: keys, err: err}
 				}
 			}
@@ -1707,6 +1719,24 @@ func activeExecutionID(execution *controller.CommandExecution) string {
 	return execution.ID
 }
 
+func (m Model) activeExecutionPaneID() string {
+	if m.activeExecution != nil && strings.TrimSpace(m.activeExecution.TrackedShell.PaneID) != "" {
+		return strings.TrimSpace(m.activeExecution.TrackedShell.PaneID)
+	}
+	return strings.TrimSpace(m.takeControl.TrackedPaneID)
+}
+
+func (m Model) activeExecutionUsesTrackedShell() bool {
+	if m.activeExecution == nil {
+		return false
+	}
+	executionPane := strings.TrimSpace(m.activeExecution.TrackedShell.PaneID)
+	if executionPane == "" {
+		return true
+	}
+	return executionPane == strings.TrimSpace(m.takeControl.TrackedPaneID)
+}
+
 func errString(err error) string {
 	if err == nil {
 		return ""
@@ -1760,12 +1790,14 @@ func (m *Model) maybeExecutionCheckInCmd(now time.Time) tea.Cmd {
 
 func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 	currentID := ""
+	previous := m.activeExecution
 	if m.activeExecution != nil {
 		currentID = m.activeExecution.ID
 	}
 
 	if execution == nil {
 		m.handoffReturnGraceUntil = time.Time{}
+		m.activeExecutionMissingSince = time.Time{}
 		m.activeExecution = nil
 		m.pendingFullscreen = nil
 		m.lastFullscreenKeys = ""
@@ -1778,6 +1810,11 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 		return
 	}
 
+	if preserved := preserveObservedForegroundExecutionStart(previous, execution, m.handoffVisible || !m.handoffReturnGraceUntil.IsZero()); preserved != nil {
+		execution = preserved
+	}
+
+	m.activeExecutionMissingSince = time.Time{}
 	if currentID != execution.ID {
 		m.lastFullscreenKeys = ""
 		m.lastFullscreenKeysAt = time.Time{}
@@ -1805,6 +1842,37 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 		m.lastFullscreenKeys = ""
 		m.lastFullscreenKeysAt = time.Time{}
 	}
+}
+
+func preserveObservedForegroundExecutionStart(previous *controller.CommandExecution, next *controller.CommandExecution, handoffRelated bool) *controller.CommandExecution {
+	if previous == nil || next == nil || !handoffRelated {
+		return next
+	}
+	if previous.ID == next.ID {
+		return next
+	}
+	if previous.StartedAt.IsZero() || next.StartedAt.IsZero() || !next.StartedAt.After(previous.StartedAt) {
+		return next
+	}
+	if previous.Origin != controller.CommandOriginUserShell || next.Origin != controller.CommandOriginUserShell {
+		return next
+	}
+	if previous.OwnershipMode != controller.CommandOwnershipSharedObserver || next.OwnershipMode != controller.CommandOwnershipSharedObserver {
+		return next
+	}
+	if strings.TrimSpace(previous.Command) == "" || strings.TrimSpace(previous.Command) != strings.TrimSpace(next.Command) {
+		return next
+	}
+	if strings.TrimSpace(previous.TrackedShell.SessionName) != strings.TrimSpace(next.TrackedShell.SessionName) {
+		return next
+	}
+	if strings.TrimSpace(previous.TrackedShell.PaneID) != strings.TrimSpace(next.TrackedShell.PaneID) {
+		return next
+	}
+
+	executionCopy := *next
+	executionCopy.StartedAt = previous.StartedAt
+	return &executionCopy
 }
 
 func (m *Model) syncTrackedShellTarget() {
@@ -1849,6 +1917,20 @@ func (m Model) shouldPreserveExecutionAfterHandoff() bool {
 	default:
 		return true
 	}
+}
+
+func (m Model) shouldConfirmMissingActiveExecution() bool {
+	if m.activeExecution == nil {
+		return false
+	}
+	switch m.activeExecution.State {
+	case controller.CommandExecutionCompleted, controller.CommandExecutionFailed, controller.CommandExecutionCanceled, controller.CommandExecutionLost:
+		return false
+	}
+	if m.activeExecutionMissingSince.IsZero() {
+		return true
+	}
+	return time.Since(m.activeExecutionMissingSince) < 3*time.Second
 }
 
 func (m Model) formatShellError(err error) string {
@@ -2846,22 +2928,36 @@ func (m Model) renderActiveExecutionCard(width int) string {
 		fmt.Sprintf("elapsed: %s", humanizeExecutionElapsed(m.activeExecution.StartedAt)),
 		"command: " + m.activeExecution.Command,
 	}
+	usesTrackedShell := m.activeExecutionUsesTrackedShell()
 	if m.activeExecution.State == controller.CommandExecutionInteractiveFullscreen {
 		body = append(body, "Fullscreen terminal app detected.")
 		if strings.TrimSpace(m.lastFullscreenKeys) != "" {
 			body = append(body, "last keys: "+previewFullscreenKeys(m.lastFullscreenKeys))
 		}
-		body = append(body, "F2 take control  S send keys")
-		body = append(body, "Exit or control the fullscreen app manually from the shell view.")
+		if usesTrackedShell {
+			body = append(body, "F2 take control  S send keys")
+			body = append(body, "Exit or control the fullscreen app manually from the shell view.")
+		} else {
+			body = append(body, "S send keys")
+			body = append(body, "This command is running in an owned execution pane. F2 opens the persistent user shell.")
+		}
 	} else if strings.TrimSpace(m.activeExecution.LatestOutputTail) != "" {
 		lines := strings.Split(strings.TrimSpace(m.activeExecution.LatestOutputTail), "\n")
 		if len(lines) > 2 {
 			lines = lines[len(lines)-2:]
 		}
 		body = append(body, "tail: "+strings.Join(lines, " | "))
-		body = append(body, "F2 take control")
+		if usesTrackedShell {
+			body = append(body, "F2 take control")
+		} else {
+			body = append(body, "Running in owned execution pane. F2 opens the persistent user shell.")
+		}
 	} else {
-		body = append(body, "F2 take control")
+		if usesTrackedShell {
+			body = append(body, "F2 take control")
+		} else {
+			body = append(body, "Running in owned execution pane. F2 opens the persistent user shell.")
+		}
 	}
 
 	content := lipgloss.JoinVertical(
@@ -4117,27 +4213,15 @@ func (m Model) runProposalCommand() (tea.Model, tea.Cmd) {
 	}
 
 	logging.Trace("tui.proposal.run", "command", m.pendingProposal.Command)
-	m.busy = true
-	m.busyStartedAt = time.Now()
-	m.proposalRunPending = true
-	m.showShellTail = true
 	command := m.pendingProposal.Command
 	m.pendingProposal = nil
 	m.refiningProposal = nil
 	m.editingProposal = nil
-	m.syncActiveExecution(newLocalExecution(command, controller.CommandOriginAgentProposal))
-	ctx, cancel := context.WithCancel(context.Background())
-	m.inFlightCancel = cancel
-
-	return m, tea.Batch(func() tea.Msg {
-		defer cancel()
-
-		events, err := m.ctrl.SubmitProposedShellCommand(ctx, command)
-		return controllerEventsMsg{
-			events: events,
-			err:    err,
-		}
-	}, tickBusy(), m.pollShellTailCmd(), m.pollActiveExecutionCmd())
+	return m.startTrackedShellRequest(func(next *Model) {
+		next.proposalRunPending = true
+	}, func(ctx context.Context) ([]controller.TranscriptEvent, error) {
+		return m.ctrl.SubmitProposedShellCommand(ctx, command)
+	})
 }
 
 func (m Model) runProposalKeys() (tea.Model, tea.Cmd) {
@@ -4151,7 +4235,7 @@ func (m Model) runProposalKeys() (tea.Model, tea.Cmd) {
 	m.refiningProposal = nil
 	m.editingProposal = nil
 	m.setInput("")
-	return m, sendFullscreenKeysCmd(m.takeControl, keys)
+	return m, sendFullscreenKeysCmd(m.takeControl, m.activeExecutionPaneID(), keys)
 }
 
 func (m Model) decideApproval(decision controller.ApprovalDecision) (tea.Model, tea.Cmd) {
@@ -4165,14 +4249,6 @@ func (m Model) decideApproval(decision controller.ApprovalDecision) (tea.Model, 
 		"decision", decision,
 		"command", m.pendingApproval.Command,
 	)
-	m.busy = true
-	m.busyStartedAt = time.Now()
-	m.approvalInFlight = true
-	m.showShellTail = decision == controller.DecisionApprove
-	if !m.showShellTail {
-		m.liveShellTail = ""
-		m.syncActiveExecution(nil)
-	}
 	approvalID := m.pendingApproval.ID
 	command := m.pendingApproval.Command
 	if decision == controller.DecisionApprove && m.shouldConfirmFullscreenBeforeShellAction() {
@@ -4189,8 +4265,19 @@ func (m Model) decideApproval(decision controller.ApprovalDecision) (tea.Model, 
 		m.refiningApproval = nil
 		m.refiningProposal = nil
 		m.editingProposal = nil
-		m.syncActiveExecution(newLocalExecution(command, controller.CommandOriginAgentApproval))
+		return m.startTrackedShellRequest(func(next *Model) {
+			next.approvalInFlight = true
+		}, func(ctx context.Context) ([]controller.TranscriptEvent, error) {
+			return m.ctrl.DecideApproval(ctx, approvalID, decision, "")
+		})
 	}
+
+	m.busy = true
+	m.busyStartedAt = time.Now()
+	m.approvalInFlight = true
+	m.showShellTail = false
+	m.liveShellTail = ""
+	m.syncActiveExecution(nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	m.inFlightCancel = cancel
 
@@ -4319,9 +4406,8 @@ func (m *Model) syncActionState(events []controller.TranscriptEvent) {
 	if modelInfo := latestModelInfo(events); modelInfo != nil {
 		m.lastModelInfo = modelInfo
 	}
-
-	if execution := latestActiveExecution(events); execution != nil {
-		m.syncActiveExecution(execution)
+	if containsEventKind(events, controller.EventCommandStart) && m.ctrl != nil {
+		m.syncActiveExecution(m.ctrl.ActiveExecution())
 	}
 
 	newPlan := latestPlan(events)
@@ -4648,24 +4734,6 @@ func isActionableProposalPayload(payload controller.ProposalPayload) bool {
 	return strings.TrimSpace(payload.Command) != "" || payload.Keys != ""
 }
 
-func latestActiveExecution(events []controller.TranscriptEvent) *controller.CommandExecution {
-	for index := len(events) - 1; index >= 0; index-- {
-		if events[index].Kind != controller.EventCommandStart {
-			continue
-		}
-
-		payload, ok := events[index].Payload.(controller.CommandStartPayload)
-		if !ok || payload.Execution.ID == "" {
-			continue
-		}
-
-		execution := payload.Execution
-		return &execution
-	}
-
-	return nil
-}
-
 func latestModelInfo(events []controller.TranscriptEvent) *controller.AgentModelInfo {
 	for index := len(events) - 1; index >= 0; index-- {
 		if events[index].Kind != controller.EventModelInfo {
@@ -4682,17 +4750,6 @@ func latestModelInfo(events []controller.TranscriptEvent) *controller.AgentModel
 	}
 
 	return nil
-}
-
-func newLocalExecution(command string, origin controller.CommandOrigin) *controller.CommandExecution {
-	return &controller.CommandExecution{
-		ID:            "local-pending",
-		Command:       command,
-		Origin:        origin,
-		OwnershipMode: controller.CommandOwnershipExclusive,
-		State:         controller.CommandExecutionRunning,
-		StartedAt:     time.Now(),
-	}
 }
 
 func isAgentOwnedExecution(origin controller.CommandOrigin) bool {

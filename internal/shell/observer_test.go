@@ -342,6 +342,106 @@ func TestAttachForegroundCommandAttachesToManualForegroundProcess(t *testing.T) 
 	if result.Command != "sleep" {
 		t.Fatalf("expected foreground command label sleep, got %#v", result)
 	}
+	if result.Captured != "working" {
+		t.Fatalf("expected attached foreground output delta, got %q", result.Captured)
+	}
+}
+
+func TestAttachForegroundCommandQuietProcessDoesNotReturnPaneScrollback(t *testing.T) {
+	client := &fakeSemanticPaneClient{
+		pane: tmux.Pane{ID: "%0", CurrentCommand: "sleep", TTY: "/dev/pts/23"},
+		panes: []tmux.Pane{
+			{ID: "%0", CurrentCommand: "sleep", TTY: "/dev/pts/23"},
+			{ID: "%0", CurrentCommand: "zsh", TTY: "/dev/pts/23"},
+		},
+		captures: []string{
+			"ls\nREADME.md\nsleep 30",
+			"jsmith@linuxdesktop ~/source/repos/aiterm %",
+		},
+	}
+	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
+
+	monitor, err := observer.AttachForegroundCommand(context.Background(), "%0")
+	if err != nil {
+		t.Fatalf("AttachForegroundCommand() error = %v", err)
+	}
+	if monitor == nil {
+		t.Fatal("expected active foreground monitor")
+	}
+	result, err := monitor.Wait()
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if result.Captured != "" {
+		t.Fatalf("expected quiet foreground command not to replay pane scrollback, got %q", result.Captured)
+	}
+}
+
+func TestCaptureShellContextIgnoresHistoricalPromptWhileForegroundCommandActive(t *testing.T) {
+	client := &fakeSemanticPaneClient{
+		pane:    tmux.Pane{ID: "%0", CurrentCommand: "sleep", TTY: "/dev/pts/26"},
+		capture: "jsmith@linuxdesktop ~/source/repos/aiterm %\n. '/run/user/1000/shuttle/shell-integration/zsh-pane0.sh'\nsleep 20",
+	}
+	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
+
+	context, err := observer.CaptureShellContext(context.Background(), "%0")
+	if err != nil {
+		t.Fatalf("CaptureShellContext() error = %v", err)
+	}
+	if context.PromptLine() != "" {
+		t.Fatalf("expected stale prompt scrollback to be ignored, got %#v", context)
+	}
+}
+
+func TestCaptureShellContextReturnsTrailingPrompt(t *testing.T) {
+	client := &fakeSemanticPaneClient{
+		pane:    tmux.Pane{ID: "%0", CurrentCommand: "zsh", TTY: "/dev/pts/27"},
+		capture: "sleep 20\njsmith@linuxdesktop ~/source/repos/aiterm %",
+	}
+	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
+
+	context, err := observer.CaptureShellContext(context.Background(), "%0")
+	if err != nil {
+		t.Fatalf("CaptureShellContext() error = %v", err)
+	}
+	if got := context.PromptLine(); got != "jsmith@linuxdesktop ~/source/repos/aiterm %" {
+		t.Fatalf("expected trailing prompt context, got %#v", context)
+	}
+}
+
+func TestAttachForegroundCommandIgnoresHistoricalPromptScrollback(t *testing.T) {
+	client := &fakeSemanticPaneClient{
+		pane: tmux.Pane{ID: "%0", CurrentCommand: "sleep", TTY: "/dev/pts/28"},
+		panes: []tmux.Pane{
+			{ID: "%0", CurrentCommand: "sleep", TTY: "/dev/pts/28"},
+			{ID: "%0", CurrentCommand: "sleep", TTY: "/dev/pts/28"},
+			{ID: "%0", CurrentCommand: "zsh", TTY: "/dev/pts/28"},
+		},
+		captures: []string{
+			"jsmith@linuxdesktop ~/source/repos/aiterm %\n. '/run/user/1000/shuttle/shell-integration/zsh-pane0.sh'\nsleep 20",
+			"jsmith@linuxdesktop ~/source/repos/aiterm %\n. '/run/user/1000/shuttle/shell-integration/zsh-pane0.sh'\nsleep 20",
+			"jsmith@linuxdesktop ~/source/repos/aiterm %",
+		},
+	}
+	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
+
+	monitor, err := observer.AttachForegroundCommand(context.Background(), "%0")
+	if err != nil {
+		t.Fatalf("AttachForegroundCommand() error = %v", err)
+	}
+	if monitor == nil {
+		t.Fatal("expected active foreground monitor")
+	}
+	result, err := monitor.Wait()
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if result.State != MonitorStateCompleted {
+		t.Fatalf("expected completed attached command, got %#v", result)
+	}
+	if result.Captured != "" {
+		t.Fatalf("expected historical prompt scrollback to be ignored, got %q", result.Captured)
+	}
 }
 
 func TestAttachForegroundCommandSkipsIdleRemotePrompt(t *testing.T) {

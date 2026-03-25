@@ -9,20 +9,24 @@ This note is intentionally implementation-facing. It describes how the current s
 
 # 1. Core Model
 
-Shuttle tracks one primary shell target at a time.
+Shuttle now has two distinct shell surfaces:
+- one persistent user shell target
+- zero or one active owned execution panes for agent-approved commands
 
-That tracked shell target is:
+The persistent user shell target is:
 - a tmux session name
 - a tmux pane ID
-- represented in controller state as `TrackedShellTarget`
+- represented in controller state as `SessionContext.TrackedShell`
 
 Current design rule:
-- the tracked shell target is the pane Shuttle reads from, writes to, and monitors
-- the TUI is not the source of truth for that target
-- the shell observer is the source of truth for low-level pane recovery
-- the controller is the source of truth for product state built on top of that recovered pane identity
+- the persistent tracked shell is the continuity surface for `$>`, `F2`, cwd, recent manual commands, and recent manual file-affecting actions
+- approved agent commands no longer need to run inside that persistent shell pane
+- agent-approved commands can run in detached owned tmux panes and are tracked through their own `CommandExecution.TrackedShell`
+- the TUI is not the source of truth for either target
+- the shell observer is the source of truth for low-level pane recovery and owned-pane provisioning
+- the controller is the source of truth for product state built on top of those targets
 
-This is the current foundation for future parallel command tracking. Right now the product still behaves as a single tracked-shell system even though some internals are now explicit enough to split later.
+This is the foundation for future multi-card work. The product still enforces serial command execution, but it no longer assumes “active command pane” and “persistent user shell pane” are always the same thing.
 
 ---
 
@@ -109,10 +113,13 @@ Responsibilities:
 - emit transcript events
 - reconcile shell state after handoff
 - synchronize the tracked shell target before reads and writes
+- summarize recent manual user-shell commands and file-affecting actions from shell history
+- provision owned execution panes for agent-approved commands when the runner supports them
 
 Important state:
 - `SessionContext.TrackedShell`
-- `SessionContext.TopPaneID`
+- `SessionContext.RecentManualCommands`
+- `SessionContext.RecentManualActions`
 - `TaskContext.PrimaryExecutionID`
 - `TaskContext.ExecutionRegistry`
 - `TaskContext.CurrentExecution`
@@ -120,8 +127,9 @@ Important state:
 
 Current rule:
 - `TrackedShellTarget` is the explicit ownership field
-- `TopPaneID` still exists as a compatibility field for older call sites and context formatting
-- the controller normalizes them so they stay aligned
+- `SessionContext` describes the persistent user shell
+- `CommandExecution.TrackedShell` describes where the active command is actually running
+- owned execution results do not overwrite persistent user-shell cwd or prompt context
 
 ## 2.5 TUI and Handoff
 
@@ -132,20 +140,52 @@ Relevant files:
 Responsibilities:
 - render transcript and shell state
 - start `F2` handoff into the tracked shell pane
-- route `KEYS>` and local interrupts to the tracked shell pane
+- route `F2` to the persistent tracked shell pane
+- route `KEYS>` and local interrupts to the active execution pane when one exists
 - mirror controller-tracked pane/session updates into local UI state
 
 Important rule:
 - the TUI does not decide which pane is authoritative
 - it asks the controller for the current tracked shell target and mirrors that into handoff config
+- the TUI does not invent durable active-command records anymore; active command state comes from controller `CommandStart` events and `ActiveExecution()` polling
+- `F2` is only a command handoff when the active execution actually lives in the persistent tracked shell pane
+- when the active execution runs in an owned pane, `F2` opens the user shell while the command keeps running in the background
 
 ---
 
 # 3. Command Tracking Modes
 
-The current system supports three practical categories of shell tracking.
+Current fallback ladder:
+- use the controller's currently tracked execution when one exists
+- on `F2` return, only reconcile prompt state when that execution actually lives in the tracked user shell pane
+- if no execution reconciles, ask the controller to attach to a manually started foreground command
+- if neither applies, treat the shell as having no active tracked command
 
-## 3.1 Shuttle-Started Tracked Commands
+Important presentation rule:
+- the live shell tail preview is only for in-flight commands
+- once Shuttle emits a terminal `command_result` or `error`, transcript ownership takes over and the live tail preview is cleared
+
+The current system supports four practical categories of shell tracking.
+
+## 3.1 Persistent User Shell Context
+
+This is the long-lived shell Shuttle treats as “your shell”.
+
+Responsibilities:
+- preserve cwd continuity
+- preserve recent manual shell output
+- preserve recent manual commands and file-affecting actions
+- own `$>` direct commands
+- own `F2` terminal handoff
+
+This context is refreshed from:
+- prompt capture
+- recent pane output
+- the tmux-backed shell history file configured for the session
+
+That is what lets later prompts like “see the file I just renamed” work even when the actual rename happened manually in the user shell rather than inside an agent-owned command pane.
+
+## 3.2 Shuttle-Started Tracked Commands In The User Shell
 
 Path:
 - controller submits command
@@ -158,7 +198,23 @@ This is the strongest path because Shuttle knows:
 - when tracking started
 - what command ID and sentinels belong to it
 
-## 3.2 Manually Started Foreground Commands
+## 3.3 Owned Agent Execution Panes
+
+Path:
+- controller chooses an owned execution pane for agent proposal / approval commands
+- observer provisions a detached tmux window in the current session
+- tracked transport runs in that owned pane
+- controller keeps the owned pane on the `CommandExecution` record
+- controller cleans up the owned window when the execution completes or is abandoned
+
+Important rule:
+- owned execution results belong to `LastCommandResult` and the execution record
+- they do not replace persistent user-shell cwd or prompt state
+- `F2` does not jump into the owned execution pane in this slice
+
+This makes agent command tracking dramatically more stable because command lifecycle no longer depends on inferring what is happening inside the shared user shell pane.
+
+## 3.4 Manually Started Foreground Commands
 
 Path:
 - user starts a command directly in the shell pane or during handoff
@@ -171,7 +227,7 @@ This path is weaker than fully tracked transport because the command was not lau
 - keep showing output
 - reconcile completion back into `LastCommandResult`
 
-## 3.3 Context-Transition Commands
+## 3.5 Context-Transition Commands
 
 Examples:
 - `bash`
@@ -271,7 +327,7 @@ Current invariants:
 - controller synchronizes this target before important shell reads and writes
 - TUI handoff config mirrors this target
 - provider context includes it as `tracked_session` and `tracked_pane`
-- compatibility field `TopPaneID` remains aligned with `TrackedShellTarget.PaneID`
+- controller/provider/TUI state no longer carries a separate `TopPaneID` compatibility field
 
 ## 5.3 What This Does Not Mean Yet
 
@@ -368,7 +424,6 @@ The current architecture is much stronger than the earlier one-off fixes, but a 
 - parallel command tracking is not implemented yet
 - controller projects a single primary `CurrentExecution` even though it now keeps an internal execution registry
 - serial submission is enforced; the registry is future-facing ownership scaffolding, not permission for overlap
-- some compatibility code still carries `TopPaneID` alongside `TrackedShellTarget`
 - remote/container semantic bootstrap is intentionally incomplete
 - interactive/fullscreen classification still relies partly on tmux metadata and heuristics
 - semantic signal quality still depends on shell support and tmux behavior
@@ -395,12 +450,14 @@ Contributors should avoid assuming the current tracked-shell ownership model alr
 Implementation:
 - `internal/shell/observer.go`
 - `internal/shell/foreground_attach.go`
+- `internal/shell/owned_execution.go`
 - `internal/shell/semantic.go`
 - `internal/shell/semantic_collect.go`
 - `internal/shell/semantic_stream.go`
 - `internal/shell/transition.go`
 - `internal/controller/controller.go`
 - `internal/controller/types.go`
+- `internal/controller/user_shell_context.go`
 - `internal/tui/model.go`
 - `internal/tui/handoff.go`
 - `internal/tmux/workspace.go`

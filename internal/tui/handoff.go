@@ -64,7 +64,7 @@ func (c *tmuxTakeControlCommand) SetStderr(w io.Writer) {
 }
 
 func (c *tmuxTakeControlCommand) Run() error {
-	targetPaneID, err := c.resolveTopPaneID(c.config.TrackedPaneID)
+	targetPaneID, err := c.resolveTrackedPaneID(c.config.TrackedPaneID)
 	if err != nil {
 		return err
 	}
@@ -116,7 +116,7 @@ func (c *tmuxTakeControlCommand) Run() error {
 	return command.Run()
 }
 
-func (c *tmuxTakeControlCommand) resolveTopPaneID(paneID string) (string, error) {
+func (c *tmuxTakeControlCommand) resolveTrackedPaneID(paneID string) (string, error) {
 	if err := c.runTmux("select-pane", "-t", paneID); err == nil {
 		return paneID, nil
 	} else if shouldRecoverTakeControlSession(err) {
@@ -126,7 +126,7 @@ func (c *tmuxTakeControlCommand) resolveTopPaneID(paneID string) (string, error)
 			"requested_pane", paneID,
 			"reason", err.Error(),
 		)
-		return c.recoverTopPaneID()
+		return c.recoverTrackedPaneID()
 	} else if !strings.Contains(strings.ToLower(err.Error()), "can't find pane") {
 		return "", fmt.Errorf("select shell pane: %w", err)
 	}
@@ -134,12 +134,12 @@ func (c *tmuxTakeControlCommand) resolveTopPaneID(paneID string) (string, error)
 	output, err := c.captureTmux("list-panes", "-t", c.config.SessionName, "-F", "#{pane_id}\t#{pane_top}\t#{pane_left}")
 	if err != nil {
 		if shouldRecoverTakeControlSession(err) {
-			return c.recoverTopPaneID()
+			return c.recoverTrackedPaneID()
 		}
 		return "", fmt.Errorf("resolve replacement shell pane: %w", err)
 	}
 
-	bestID := pickTopPaneID(output)
+	bestID := pickPreferredPaneID(output)
 	if bestID == "" {
 		return "", fmt.Errorf("select shell pane: can't find pane: %s", paneID)
 	}
@@ -152,7 +152,7 @@ func (c *tmuxTakeControlCommand) resolveTopPaneID(paneID string) (string, error)
 	return bestID, nil
 }
 
-func (c *tmuxTakeControlCommand) recoverTopPaneID() (string, error) {
+func (c *tmuxTakeControlCommand) recoverTrackedPaneID() (string, error) {
 	if err := c.ensureWorkspace(); err != nil {
 		return "", fmt.Errorf("recover shell workspace: %w", err)
 	}
@@ -162,7 +162,7 @@ func (c *tmuxTakeControlCommand) recoverTopPaneID() (string, error) {
 		return "", fmt.Errorf("resolve recovered shell pane: %w", err)
 	}
 
-	bestID := pickTopPaneID(output)
+	bestID := pickPreferredPaneID(output)
 	if bestID == "" {
 		return "", fmt.Errorf("select shell pane: can't find pane in session %s", c.config.SessionName)
 	}
@@ -217,7 +217,7 @@ func (c *tmuxTakeControlCommand) ensureWorkspace() error {
 	return nil
 }
 
-func pickTopPaneID(output string) string {
+func pickPreferredPaneID(output string) string {
 	bestID := ""
 	bestTop := 0
 	bestLeft := 0

@@ -102,11 +102,12 @@ type AgentInput struct {
 }
 
 type SessionContext struct {
-    SessionName        string
-    TopPaneID          string
-    BottomPaneID       string
-    WorkingDirectory   string
-    RecentShellOutput  string
+    SessionName         string
+    BottomPaneID        string
+    TrackedShell        TrackedShellTarget
+    WorkingDirectory    string
+    RecentShellOutput   string
+    RecentManualActions []string
 }
 
 type TaskContext struct {

@@ -158,22 +158,30 @@ func (o *Observer) CaptureShellContext(ctx context.Context, paneID string) (Prom
 		return PromptContext{}, fmt.Errorf("capture shell context: %w", err)
 	}
 
+	paneInfo, paneErr := o.paneInfo(ctx, paneID)
+	hasPaneInfo := paneErr == nil
+
 	context, ok := ParsePromptContextFromCapture(captured)
-	if ok {
-		if paneInfo, paneErr := o.paneInfo(ctx, paneID); paneErr == nil {
+	if ok && captureHasCurrentPromptContext(captured, context) {
+		if hasPaneInfo {
 			if semanticState, _, semanticOK := o.captureSemanticShellState(ctx, paneID, paneInfo.TTY, "", strings.TrimSpace(paneInfo.CurrentCommand), context); semanticOK {
-				context = synthesizePromptContext(context, semanticState)
+				synthesized := synthesizePromptContext(context, semanticState)
+				if captureHasCurrentPromptContext(captured, synthesized) {
+					context = synthesized
+				}
 			}
 		}
 		o.promptHint = context
 		return context, nil
 	}
 
-	if paneInfo, paneErr := o.paneInfo(ctx, paneID); paneErr == nil {
+	if hasPaneInfo {
 		if semanticState, _, semanticOK := o.captureSemanticShellState(ctx, paneID, paneInfo.TTY, "", strings.TrimSpace(paneInfo.CurrentCommand), o.promptHint); semanticOK {
 			context = synthesizePromptContext(o.promptHint, semanticState)
-			o.promptHint = context
-			return context, nil
+			if captureHasCurrentPromptContext(captured, context) {
+				o.promptHint = context
+				return context, nil
+			}
 		}
 	}
 
