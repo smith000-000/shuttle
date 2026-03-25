@@ -224,7 +224,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 					AllowPlaintextFallback: a.cfg.AllowPlaintextProviderSecrets,
 				})
 			})
-		program := tea.NewProgram(model, tea.WithAltScreen())
+		program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 		_, runErr := program.Run()
 		cleanupErr := cleanupTUISession(created, client, workspace.SessionName)
 		if runErr != nil {
