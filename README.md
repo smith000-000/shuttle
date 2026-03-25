@@ -218,22 +218,6 @@ The TUI is intentionally keyboard-first. Current behavior is still evolving, so 
 - [requirements-mvp.md](requirements-mvp.md)
 - [patch-apply-research.md](patch-apply-research.md)
 
-## Worktrees
-
-This repo is currently being developed with multiple git worktrees.
-
-Primary interactive execution branch:
-- `/home/jsmith/source/repos/aiterm`
-
-Secondary onboarding/provider branch:
-- `/home/jsmith/source/repos/aiterm-model-onboarding`
-
-List them with:
-
-```bash
-git worktree list
-```
-
 ## Current Limitations
 
 - patch proposals still require explicit user apply/approval; there is no auto-apply mode
