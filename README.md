@@ -56,6 +56,11 @@ What is still in progress:
 
 ## Requirements
 
+To run Shuttle from a release:
+- `tmux` installed and available in `PATH`
+- a normal terminal environment capable of running Bubble Tea
+
+To build Shuttle from source:
 - Go `1.25.0`
 - `tmux` installed and available in `PATH`
 - a normal terminal environment capable of running Bubble Tea
@@ -65,6 +70,28 @@ Optional:
 - `OPENROUTER_API_KEY` for the OpenRouter preset
 
 ## Quick Start
+
+Run Shuttle from a release:
+
+1. Install the latest release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/smith000-000/shuttle/main/scripts/install-release.sh | bash
+```
+
+2. Confirm the installed build:
+
+```bash
+shuttle --version
+```
+
+3. Launch Shuttle from the project you want to work in:
+
+```bash
+shuttle --tui
+```
+
+Build and run Shuttle from source:
 
 1. Create a local env file:
 
@@ -142,7 +169,7 @@ Integration-only tests:
 make test-integration
 ```
 
-Run without the launcher:
+Run from source without the launcher:
 
 ```bash
 go run ./cmd/shuttle --tui
