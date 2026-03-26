@@ -10,7 +10,7 @@ import (
 )
 
 func TestParseSemanticShellStateFromOSCCapture(t *testing.T) {
-	raw := "\x1b]133;B\x07run\n\x1b]7;file://linuxdesktop/home/jsmith/source/repos/aiterm\x07\x1b]133;D;130\x07\x1b]133;A\x07"
+	raw := "\x1b]133;B\x07run\n\x1b]7;file://workstation/workspace/project\x07\x1b]133;D;130\x07\x1b]133;A\x07"
 	state, ok := parseSemanticShellStateFromOSCCapture(raw)
 	if !ok {
 		t.Fatal("expected osc semantic state to parse")
@@ -21,7 +21,7 @@ func TestParseSemanticShellStateFromOSCCapture(t *testing.T) {
 	if state.ExitCode == nil || *state.ExitCode != 130 {
 		t.Fatalf("expected exit code 130, got %#v", state.ExitCode)
 	}
-	if state.Directory != "/home/jsmith/source/repos/aiterm" {
+	if state.Directory != "/workspace/project" {
 		t.Fatalf("unexpected directory %#v", state)
 	}
 }

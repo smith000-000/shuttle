@@ -320,9 +320,9 @@ func (f *fakeController) RefreshShellContext(_ context.Context) (*shell.PromptCo
 		return &contextCopy, nil
 	}
 	return &shell.PromptContext{
-		User:      "jsmith",
-		Host:      "linuxdesktop",
-		Directory: "/home/jsmith/source/repos/aiterm",
+		User:      "localuser",
+		Host:      "workstation",
+		Directory: "/workspace/project",
 	}, nil
 }
 

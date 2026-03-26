@@ -794,11 +794,11 @@ func TestCanAttemptLocalInterruptPrefersCurrentRemoteShellContext(t *testing.T) 
 		Origin:  controller.CommandOriginUserShell,
 		State:   controller.CommandExecutionInteractiveFullscreen,
 		ShellContextBefore: &shell.PromptContext{
-			User:         "jsmith",
-			Host:         "linuxdesktop",
-			Directory:    "/home/jsmith/source/repos/aiterm",
+			User:         "localuser",
+			Host:         "workstation",
+			Directory:    "/workspace/project",
 			PromptSymbol: "%",
-			RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+			RawLine:      "localuser@workstation ~/workspace/project %",
 		},
 	}
 
@@ -815,11 +815,11 @@ func TestCanAttemptLocalInterruptRemoteEvidenceWinsOverStaleLocalContext(t *test
 		Origin:  controller.CommandOriginUserShell,
 		State:   controller.CommandExecutionInteractiveFullscreen,
 		ShellContextBefore: &shell.PromptContext{
-			User:         "jsmith",
-			Host:         "linuxdesktop",
-			Directory:    "/home/jsmith/source/repos/aiterm",
+			User:         "localuser",
+			Host:         "workstation",
+			Directory:    "/workspace/project",
 			PromptSymbol: "%",
-			RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+			RawLine:      "localuser@workstation ~/workspace/project %",
 		},
 		ShellContextAfter: &shell.PromptContext{
 			User:         "openclaw",
@@ -839,11 +839,11 @@ func TestCanAttemptLocalInterruptRemoteEvidenceWinsOverStaleLocalContext(t *test
 func TestActiveExecutionCardShowsFullscreenKeyHintsWithoutKill(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.shellContext = shell.PromptContext{
-		User:         "jsmith",
-		Host:         "linuxdesktop",
-		Directory:    "/home/jsmith/source/repos/aiterm",
+		User:         "localuser",
+		Host:         "workstation",
+		Directory:    "/workspace/project",
 		PromptSymbol: "%",
-		RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+		RawLine:      "localuser@workstation ~/workspace/project %",
 	}
 	model.activeExecution = &controller.CommandExecution{
 		ID:        "cmd-1",
@@ -1108,7 +1108,7 @@ func TestCanceledControllerEventSuppressedAfterTakeControl(t *testing.T) {
 
 func TestControllerErrorIncludesShellTail(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
-	model.liveShellTail = "[sudo] password for jsmith:"
+	model.liveShellTail = "[sudo] password for localuser:"
 	model.showShellTail = true
 
 	updated, _ := model.Update(controllerEventsMsg{err: context.DeadlineExceeded})
@@ -1121,7 +1121,7 @@ func TestControllerErrorIncludesShellTail(t *testing.T) {
 	if !strings.Contains(last.Body, "context deadline exceeded") {
 		t.Fatalf("expected error body to include deadline, got %q", last.Body)
 	}
-	if !strings.Contains(last.Body, "[sudo] password for jsmith:") {
+	if !strings.Contains(last.Body, "[sudo] password for localuser:") {
 		t.Fatalf("expected error body to include shell tail, got %q", last.Body)
 	}
 }

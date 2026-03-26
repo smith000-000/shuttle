@@ -98,8 +98,8 @@ func TestBuildTurnContextIncludesRecoverySnapshot(t *testing.T) {
 
 func TestBuildTurnContextIncludesExecutionMetadata(t *testing.T) {
 	before := shell.PromptContext{
-		User:         "jsmith",
-		Host:         "linuxdesktop",
+		User:         "localuser",
+		Host:         "workstation",
 		Directory:    "~/repo",
 		PromptSymbol: "%",
 	}
@@ -148,7 +148,7 @@ func TestBuildTurnContextIncludesExecutionMetadata(t *testing.T) {
 	if !strings.Contains(context, "execution_session=shuttle-test") || !strings.Contains(context, "execution_pane=%9") {
 		t.Fatalf("expected execution target metadata, got %q", context)
 	}
-	if !strings.Contains(context, "prompt_before=jsmith@linuxdesktop ~/repo %") {
+	if !strings.Contains(context, "prompt_before=localuser@workstation ~/repo %") {
 		t.Fatalf("expected prompt_before metadata, got %q", context)
 	}
 	if !strings.Contains(context, "prompt_after=openclaw@openclaw ~ $") {
@@ -188,12 +188,12 @@ func TestBuildTurnContextIncludesWorkspaceRootAndPatchResult(t *testing.T) {
 		Prompt: "what changed?",
 		Session: controller.SessionContext{
 			WorkingDirectory:   "/tmp/remote",
-			LocalWorkspaceRoot: "/home/jsmith/source/repos/aiterm",
+			LocalWorkspaceRoot: "/workspace/project",
 			ApprovalMode:       controller.ApprovalModeAuto,
 		},
 		Task: controller.TaskContext{
 			LastPatchApplyResult: &controller.PatchApplySummary{
-				WorkspaceRoot: "/home/jsmith/source/repos/aiterm",
+				WorkspaceRoot: "/workspace/project",
 				Validation:    "native+git_apply_check",
 				Applied:       true,
 				Created:       1,
@@ -206,7 +206,7 @@ func TestBuildTurnContextIncludesWorkspaceRootAndPatchResult(t *testing.T) {
 		},
 	})
 
-	if !strings.Contains(context, "workspace_root=/home/jsmith/source/repos/aiterm") {
+	if !strings.Contains(context, "workspace_root=/workspace/project") {
 		t.Fatalf("expected workspace root, got %q", context)
 	}
 	if !strings.Contains(context, "approval_mode=auto") {

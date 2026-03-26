@@ -3,30 +3,18 @@ package shell
 import "testing"
 
 func TestTailSuggestsPromptReturnForTrailingPrompt(t *testing.T) {
-	current := PromptContext{
-		User:         "jsmith",
-		Host:         "linuxdesktop",
-		Directory:    "~/source/repos/aiterm",
-		GitBranch:    "main",
-		PromptSymbol: "%",
-	}
+	current := shellTestLocalPromptContext(t)
 
-	tail := "some tool exited unexpectedly\njsmith@linuxdesktop ~/source/repos/aiterm git:(main) %"
+	tail := "some tool exited unexpectedly\n" + current.PromptLine()
 	if !TailSuggestsPromptReturn(tail, current) {
 		t.Fatal("expected trailing prompt to be recognized")
 	}
 }
 
 func TestTailSuggestsPromptReturnIgnoresEarlierPromptHistory(t *testing.T) {
-	current := PromptContext{
-		User:         "jsmith",
-		Host:         "linuxdesktop",
-		Directory:    "~/source/repos/aiterm",
-		GitBranch:    "main",
-		PromptSymbol: "%",
-	}
+	current := shellTestLocalPromptContext(t)
 
-	tail := "jsmith@linuxdesktop ~/source/repos/aiterm git:(main) %\n. '/tmp/cmd.sh'\n1\n2\n3"
+	tail := current.PromptLine() + "\n. '/tmp/cmd.sh'\n1\n2\n3"
 	if TailSuggestsPromptReturn(tail, current) {
 		t.Fatal("expected earlier prompt history to be ignored")
 	}

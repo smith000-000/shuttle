@@ -213,9 +213,9 @@ func (s *stubContextReader) CaptureShellContext(context.Context, string) (shell.
 	}
 
 	return shell.PromptContext{
-		User:      "jsmith",
-		Host:      "linuxdesktop",
-		Directory: "/home/jsmith/source/repos/aiterm",
+		User:      "localuser",
+		Host:      "workstation",
+		Directory: "/workspace/project",
 	}, nil
 }
 

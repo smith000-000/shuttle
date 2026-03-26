@@ -877,7 +877,7 @@ func TestStatusLineShowsLastReplyModel(t *testing.T) {
 	)
 	model.width = 100
 	model.height = 20
-	model.shellContext = shell.PromptContext{User: "jsmith", Host: "linuxdesktop", Directory: "~/source/repos/aiterm", PromptSymbol: "%"}
+	model.shellContext = shell.PromptContext{User: "localuser", Host: "workstation", Directory: "~/workspace/project", PromptSymbol: "%"}
 	updated, _ := model.Update(controllerEventsMsg{events: []controller.TranscriptEvent{{Kind: controller.EventModelInfo, Payload: controller.AgentModelInfo{ProviderPreset: "openrouter", RequestedModel: "openrouter/auto", ResponseModel: "openai/gpt-5-nano-2025-08-07"}}}})
 	model = updated.(Model)
 	if !strings.Contains(model.View(), "APR confirm  MODEL OpenRouter / openai/gpt-5-nano-2025-08-07") {

@@ -78,7 +78,7 @@ func TestCodexCLIAgentRequiresLoginForCodexAuth(t *testing.T) {
 func TestCodexCLIAgentRedactsPromptFromCLIError(t *testing.T) {
 	script := writeFakeCodexCLI(t)
 	t.Setenv("FAKE_CODEX_LOGIN_STATUS", "Logged in using ChatGPT")
-	t.Setenv("FAKE_CODEX_ERROR_OUTPUT", "OpenAI Codex v0.116.0 (research preview)\n--------\nworkdir: /home/jsmith\nuser\nYou are the Shuttle agent runtime.")
+	t.Setenv("FAKE_CODEX_ERROR_OUTPUT", "OpenAI Codex v0.116.0 (research preview)\n--------\nworkdir: /workspace\nuser\nYou are the Shuttle agent runtime.")
 
 	agent, err := NewCodexCLIAgent(Profile{
 		BackendFamily: BackendCLIAgent,

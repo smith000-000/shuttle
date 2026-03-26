@@ -25,7 +25,7 @@ func TestSanitizeCapturedBody(t *testing.T) {
 }
 
 func TestSanitizeCapturedBodyStripsSemanticBootstrapNoise(t *testing.T) {
-	body := "jsmith@linuxdesktop ~/source/repos/aiterm % [ -n \"$SHUTTLE_SEMANTIC_SHELL_V1\" ] || . '/run/user/1000/shuttle/shell-integration/zsh-pane0.sh' >/dev/null 2>&1\njsmith@linuxdesktop ~/source/repos/aiterm % .\n '/run/user/1000/shuttle/commands/cmd-1.sh'\n1\n2\n^C"
+	body := "localuser@workstation ~/workspace/project % [ -n \"$SHUTTLE_SEMANTIC_SHELL_V1\" ] || . '/run/user/1000/shuttle/shell-integration/zsh-pane0.sh' >/dev/null 2>&1\nlocaluser@workstation ~/workspace/project % .\n '/run/user/1000/shuttle/commands/cmd-1.sh'\n1\n2\n^C"
 
 	got := sanitizeCapturedBody(body)
 	want := "1\n2\n^C"
@@ -38,17 +38,17 @@ func TestSanitizeCapturedBodyStripsSemanticBootstrapNoise(t *testing.T) {
 func TestSanitizeCapturedBodyStripsWrappedShuttleProtocolNoise(t *testing.T) {
 	body := `.sh'"'"' >/dev/null 2>&1')"; __shuttle_status=$?; printf '%s%s\n' '__SHUTTLE_E__
 :abc123:' "$__shuttle_status"
-jsmith@linuxdesktop ~/source/repos/aiterm % bas
+localuser@workstation ~/workspace/project % bas
 h
 ull || id -un 2>/dev/null)"' 'printf '"'"'__SHUTTLE_CTX_HOST__=%s\n'"'"' "$(hostname 2>/dev/null || uname -n 2>/dev/null)"'
 __SHUTTLE_CTX_EXIT__=0
-__SHUTTLE_CTX_USER__=jsmith
+__SHUTTLE_CTX_USER__=localuser
 1
 2
 ^C`
 
 	got := sanitizeCapturedBody(body)
-	want := "jsmith@linuxdesktop ~/source/repos/aiterm % bas\nh\n1\n2\n^C"
+	want := "localuser@workstation ~/workspace/project % bas\nh\n1\n2\n^C"
 
 	if got != want {
 		t.Fatalf("sanitizeCapturedBody() = %q, want %q", got, want)
@@ -56,7 +56,7 @@ __SHUTTLE_CTX_USER__=jsmith
 }
 
 func TestSanitizeCapturedBodyPreservesTrackedCommandScriptErrors(t *testing.T) {
-	body := ". '/run/user/1000/shuttle/commands/cmd-1.sh'\n__SHUTTLE_B__:cmd-1\n/run/user/1000/shuttle/commands/cmd-1.sh:2: command not found: apply_patch\njsmith@linuxdesktop ~/source/repos/aiterm %"
+	body := ". '/run/user/1000/shuttle/commands/cmd-1.sh'\n__SHUTTLE_B__:cmd-1\n/run/user/1000/shuttle/commands/cmd-1.sh:2: command not found: apply_patch\nlocaluser@workstation ~/workspace/project %"
 
 	got := sanitizeCapturedBody(body)
 	if !strings.Contains(got, "command not found: apply_patch") {
@@ -65,7 +65,7 @@ func TestSanitizeCapturedBodyPreservesTrackedCommandScriptErrors(t *testing.T) {
 }
 
 func TestStripEchoedSingleLineCommand(t *testing.T) {
-	body := "jsmith@host % ls\nfile-a\nfile-b"
+	body := "localuser@devbox % ls\nfile-a\nfile-b"
 
 	got := stripEchoedCommand(body, "ls")
 	want := "file-a\nfile-b"
@@ -76,11 +76,11 @@ func TestStripEchoedSingleLineCommand(t *testing.T) {
 }
 
 func TestStripEchoedMultiLineQuotedCommand(t *testing.T) {
-	body := "jsmith@host % bash -lc '\nquote> set -e\nquote> printf \"## PWD\\n\"; pwd\nquote> '\n## PWD\n/home/jsmith/source/repos/aiterm"
+	body := "localuser@devbox % bash -lc '\nquote> set -e\nquote> printf \"## PWD\\n\"; pwd\nquote> '\n## PWD\n/workspace/project"
 	command := "bash -lc '\nset -e\nprintf \"## PWD\\n\"; pwd\n'"
 
 	got := stripEchoedCommand(body, command)
-	want := "## PWD\n/home/jsmith/source/repos/aiterm"
+	want := "## PWD\n/workspace/project"
 
 	if got != want {
 		t.Fatalf("stripEchoedCommand() = %q, want %q", got, want)
@@ -88,8 +88,8 @@ func TestStripEchoedMultiLineQuotedCommand(t *testing.T) {
 }
 
 func TestStripEchoedCommandWithPromptLineBeforeTransportCommand(t *testing.T) {
-	body := "jsmith@linuxdesktop ~/source/repos/aiterm git:(main) %\n. '/home/jsmith/source/repos/aiterm/.shuttle/commands/cmd-1.sh'\n1\n2\n3"
-	command := ". '/home/jsmith/source/repos/aiterm/.shuttle/commands/cmd-1.sh'"
+	body := "localuser@workstation ~/workspace/project git:(main) %\n. '/workspace/project/.shuttle/commands/cmd-1.sh'\n1\n2\n3"
+	command := ". '/workspace/project/.shuttle/commands/cmd-1.sh'"
 
 	got := stripEchoedCommand(body, command)
 	want := "1\n2\n3"
@@ -100,8 +100,8 @@ func TestStripEchoedCommandWithPromptLineBeforeTransportCommand(t *testing.T) {
 }
 
 func TestStripEchoedWrappedTransportCommand(t *testing.T) {
-	body := "jsmith@linuxdesktop ~/source/repos/aiterm git:(main) %\n. \n '/home/jsmith/source/repos/aiterm/.shuttle/commands/cmd-1.sh'\n1\n2\n3"
-	command := ". '/home/jsmith/source/repos/aiterm/.shuttle/commands/cmd-1.sh'"
+	body := "localuser@workstation ~/workspace/project git:(main) %\n. \n '/workspace/project/.shuttle/commands/cmd-1.sh'\n1\n2\n3"
+	command := ". '/workspace/project/.shuttle/commands/cmd-1.sh'"
 
 	got := stripEchoedCommand(body, command)
 	want := "1\n2\n3"
@@ -145,7 +145,7 @@ func TestCommandTimeout(t *testing.T) {
 }
 
 func TestClassifyActiveMonitorStateTreatsInteractiveCommandAsAwaitingInput(t *testing.T) {
-	if got := classifyActiveMonitorState("sudo ls", "[sudo] password for jsmith:", false, "sudo"); got != MonitorStateAwaitingInput {
+	if got := classifyActiveMonitorState("sudo ls", "[sudo] password for localuser:", false, "sudo"); got != MonitorStateAwaitingInput {
 		t.Fatalf("classifyActiveMonitorState(sudo ls) = %s, want %s", got, MonitorStateAwaitingInput)
 	}
 }
@@ -214,8 +214,8 @@ func TestCaptureSemanticShellStatePrefersOSCCaptureOverStateFile(t *testing.T) {
 	dir := t.TempDir()
 	client := &fakeSemanticPaneClient{
 		pane:    tmux.Pane{ID: "%0", CurrentCommand: "zsh", TTY: "/dev/pts/12"},
-		capture: "jsmith@linuxdesktop ~/source/repos/aiterm %",
-		escaped: "\x1b]133;C\x1b\\\x1b]7;file://linuxdesktop/home/jsmith/source/repos/aiterm\x1b\\",
+		capture: shellTestProjectPrompt(t),
+		escaped: "\x1b]133;C\x1b\\\x1b]7;file://workstation/workspace/project\x1b\\",
 	}
 	statePath := semanticStatePath(dir, client.pane.TTY)
 	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
@@ -236,7 +236,7 @@ func TestCaptureSemanticShellStatePrefersOSCCaptureOverStateFile(t *testing.T) {
 	if state.Event != semanticEventCommand {
 		t.Fatalf("expected command event, got %#v", state)
 	}
-	if state.Directory != "/home/jsmith/source/repos/aiterm" {
+	if state.Directory != "/workspace/project" {
 		t.Fatalf("expected osc capture cwd, got %#v", state)
 	}
 }
@@ -245,7 +245,7 @@ func TestCaptureSemanticShellStatePrefersStreamOverOSCCaptureAndStateFile(t *tes
 	dir := t.TempDir()
 	client := &fakeSemanticPaneClient{
 		pane:    tmux.Pane{ID: "%0", CurrentCommand: "zsh", TTY: "/dev/pts/14"},
-		escaped: "\x1b]133;C\x1b\\\x1b]7;file://linuxdesktop/tmp/capture-fallback\x1b\\",
+		escaped: "\x1b]133;C\x1b\\\x1b]7;file://workstation/tmp/capture-fallback\x1b\\",
 		stream:  "\x1b]133;B\x1b\\\x1b]133;C\x1b\\\x1b]7;file://localhost/tmp/stream-primary\x1b\\\x1b]133;D;7\x1b\\\x1b]133;A\x1b\\",
 	}
 	statePath := semanticStatePath(dir, client.pane.TTY)
@@ -292,7 +292,7 @@ func TestCaptureSemanticShellStatePrefersStreamOverOSCCaptureAndStateFile(t *tes
 func TestStartTrackedCommandEnsuresLocalShellIntegrationBeforeLaunching(t *testing.T) {
 	client := &fakeSemanticPaneClient{
 		pane:    tmux.Pane{ID: "%0", CurrentCommand: "bash", TTY: "/dev/pts/22"},
-		capture: "jsmith@linuxdesktop ~/source/repos/aiterm %",
+		capture: shellTestProjectPrompt(t),
 	}
 	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
 
@@ -326,7 +326,7 @@ func TestAttachForegroundCommandAttachesToManualForegroundProcess(t *testing.T) 
 		captures: []string{
 			"sleep 30\nworking",
 			"sleep 30\nworking",
-			"jsmith@linuxdesktop ~/source/repos/aiterm %",
+			shellTestProjectPrompt(t),
 		},
 	}
 	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
@@ -365,7 +365,7 @@ func TestAttachForegroundCommandQuietProcessDoesNotReturnPaneScrollback(t *testi
 		},
 		captures: []string{
 			"ls\nREADME.md\nsleep 30",
-			"jsmith@linuxdesktop ~/source/repos/aiterm %",
+			shellTestProjectPrompt(t),
 		},
 	}
 	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
@@ -389,7 +389,7 @@ func TestAttachForegroundCommandQuietProcessDoesNotReturnPaneScrollback(t *testi
 func TestCaptureShellContextIgnoresHistoricalPromptWhileForegroundCommandActive(t *testing.T) {
 	client := &fakeSemanticPaneClient{
 		pane:    tmux.Pane{ID: "%0", CurrentCommand: "sleep", TTY: "/dev/pts/26"},
-		capture: "jsmith@linuxdesktop ~/source/repos/aiterm %\n. '/run/user/1000/shuttle/shell-integration/zsh-pane0.sh'\nsleep 20",
+		capture: shellTestProjectPrompt(t) + "\n. '/run/user/1000/shuttle/shell-integration/zsh-pane0.sh'\nsleep 20",
 	}
 	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
 
@@ -405,7 +405,7 @@ func TestCaptureShellContextIgnoresHistoricalPromptWhileForegroundCommandActive(
 func TestCaptureShellContextReturnsTrailingPrompt(t *testing.T) {
 	client := &fakeSemanticPaneClient{
 		pane:    tmux.Pane{ID: "%0", CurrentCommand: "zsh", TTY: "/dev/pts/27"},
-		capture: "sleep 20\njsmith@linuxdesktop ~/source/repos/aiterm %",
+		capture: "sleep 20\n" + shellTestProjectPrompt(t),
 	}
 	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
 
@@ -413,7 +413,7 @@ func TestCaptureShellContextReturnsTrailingPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CaptureShellContext() error = %v", err)
 	}
-	if got := context.PromptLine(); got != "jsmith@linuxdesktop ~/source/repos/aiterm %" {
+	if got := context.PromptLine(); got != shellTestProjectPrompt(t) {
 		t.Fatalf("expected trailing prompt context, got %#v", context)
 	}
 }
@@ -427,9 +427,9 @@ func TestAttachForegroundCommandIgnoresHistoricalPromptScrollback(t *testing.T) 
 			{ID: "%0", CurrentCommand: "zsh", TTY: "/dev/pts/28"},
 		},
 		captures: []string{
-			"jsmith@linuxdesktop ~/source/repos/aiterm %\n. '/run/user/1000/shuttle/shell-integration/zsh-pane0.sh'\nsleep 20",
-			"jsmith@linuxdesktop ~/source/repos/aiterm %\n. '/run/user/1000/shuttle/shell-integration/zsh-pane0.sh'\nsleep 20",
-			"jsmith@linuxdesktop ~/source/repos/aiterm %",
+			shellTestProjectPrompt(t) + "\n. '/run/user/1000/shuttle/shell-integration/zsh-pane0.sh'\nsleep 20",
+			shellTestProjectPrompt(t) + "\n. '/run/user/1000/shuttle/shell-integration/zsh-pane0.sh'\nsleep 20",
+			shellTestProjectPrompt(t),
 		},
 	}
 	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
@@ -507,12 +507,12 @@ func TestRunTrackedMonitorCompletesOnPromptReturnEvenWithNonPromptSemanticState(
 	client := &fakeSemanticPaneClient{
 		pane: tmux.Pane{ID: "%0", CurrentCommand: "zsh", TTY: "/dev/pts/31"},
 		capture: strings.Join([]string{
-			"jsmith@linuxdesktop ~/source/repos/aiterm %",
+			shellTestProjectPrompt(t),
 			markers.BeginLine,
 			"/run/user/1000/shuttle/commands/cmd-1.sh:2: command not found: apply_patch",
-			"jsmith@linuxdesktop ~/source/repos/aiterm %",
+			shellTestProjectPrompt(t),
 		}, "\n"),
-		escaped: "\x1b]133;C\x1b\\\x1b]7;file://localhost/home/jsmith/source/repos/aiterm\x1b\\",
+		escaped: "\x1b]133;C\x1b\\\x1b]7;file://localhost/workspace/project\x1b\\",
 	}
 	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
 	monitor := newTrackedCommandMonitor(markers.CommandID, command)
@@ -526,7 +526,7 @@ func TestRunTrackedMonitorCompletesOnPromptReturnEvenWithNonPromptSemanticState(
 		command,
 		". '/run/user/1000/shuttle/commands/cmd-1.sh'",
 		250*time.Millisecond,
-		"jsmith@linuxdesktop ~/source/repos/aiterm %",
+		shellTestProjectPrompt(t),
 		markers,
 		func() {},
 	)
@@ -685,8 +685,8 @@ func TestParseShellContextProbeOutput(t *testing.T) {
 }
 
 func TestTrackedCommandLikelyStarted(t *testing.T) {
-	before := "jsmith@host %"
-	after := "jsmith@host % printf '__SHUTTLE_B__'\nalpha"
+	before := "localuser@devbox %"
+	after := "localuser@devbox % printf '__SHUTTLE_B__'\nalpha"
 
 	if !trackedCommandLikelyStarted(before, after) {
 		t.Fatal("expected changed pane capture to infer command start")
@@ -700,8 +700,8 @@ func TestInferTrackedCommandResultFromEndMarker(t *testing.T) {
 		EndPrefix: "__SHUTTLE_E__:cmd-1:",
 	}
 
-	before := "jsmith@host %"
-	after := "jsmith@host % rg -n -H -e foo ~\nalpha\nbeta\n__SHUTTLE_E__:cmd-1:0\njsmith@host %"
+	before := "localuser@devbox %"
+	after := "localuser@devbox % rg -n -H -e foo ~\nalpha\nbeta\n__SHUTTLE_E__:cmd-1:0\nlocaluser@devbox %"
 
 	result, complete, err := inferTrackedCommandResultFromEndMarker(after, before, "rg -n -H -e foo ~", markers)
 	if err != nil {
@@ -713,7 +713,7 @@ func TestInferTrackedCommandResultFromEndMarker(t *testing.T) {
 	if result.ExitCode != 0 {
 		t.Fatalf("expected exit code 0, got %d", result.ExitCode)
 	}
-	if result.Body != "alpha\nbeta\njsmith@host %" {
+	if result.Body != "alpha\nbeta\nlocaluser@devbox %" {
 		t.Fatalf("unexpected inferred body %q", result.Body)
 	}
 }

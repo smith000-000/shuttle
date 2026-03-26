@@ -118,7 +118,7 @@ func TestLocalControllerSubmitShellCommandCanceledReturnsResultEvent(t *testing.
 			Cause:      shell.CompletionCausePromptReturn,
 			Confidence: shell.ConfidenceMedium,
 			ExitCode:   shell.InterruptedExitCode,
-			Captured:   "^C\njsmith@host % ",
+			Captured:   "^C\nlocaluser@host % ",
 		},
 	}, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
 
@@ -161,13 +161,13 @@ func TestLocalControllerSubmitShellCommandCanceledReturnsResultEvent(t *testing.
 func TestLocalControllerResumeAfterTakeControlReconcilesUserShellPromptReturn(t *testing.T) {
 	exitCode := shell.InterruptedExitCode
 	reader := &stubContextReader{
-		snapshot: "^C\njsmith@linuxdesktop ~/source/repos/aiterm %",
+		snapshot: "^C\nlocaluser@workstation ~/workspace/project %",
 		context: shell.PromptContext{
-			User:         "jsmith",
-			Host:         "linuxdesktop",
-			Directory:    "/home/jsmith/source/repos/aiterm",
+			User:         "localuser",
+			Host:         "workstation",
+			Directory:    "/workspace/project",
 			PromptSymbol: "%",
-			RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+			RawLine:      "localuser@workstation ~/workspace/project %",
 			LastExitCode: &exitCode,
 		},
 	}
@@ -201,13 +201,13 @@ func TestLocalControllerResumeAfterTakeControlReconcilesUserShellPromptReturn(t 
 
 func TestLocalControllerResumeAfterTakeControlInfersCanceledWhenPromptReturnedWithoutExitCode(t *testing.T) {
 	reader := &stubContextReader{
-		snapshot: "^C\njsmith@linuxdesktop ~/source/repos/aiterm %",
+		snapshot: "^C\nlocaluser@workstation ~/workspace/project %",
 		context: shell.PromptContext{
-			User:         "jsmith",
-			Host:         "linuxdesktop",
-			Directory:    "/home/jsmith/source/repos/aiterm",
+			User:         "localuser",
+			Host:         "workstation",
+			Directory:    "/workspace/project",
 			PromptSymbol: "%",
-			RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+			RawLine:      "localuser@workstation ~/workspace/project %",
 		},
 	}
 	controller := New(nil, nil, reader, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
@@ -246,7 +246,7 @@ func TestLocalControllerResumeAfterTakeControlInfersCanceledWhenPromptReturnedWi
 
 func TestLocalControllerResumeAfterTakeControlDoesNotReconcileWithoutCurrentPrompt(t *testing.T) {
 	reader := &stubContextReader{
-		snapshot: "jsmith@linuxdesktop ~/source/repos/aiterm %\n. '/run/user/1000/shuttle/shell-integration/zsh-pane0.sh'\nsleep 20",
+		snapshot: "localuser@workstation ~/workspace/project %\n. '/run/user/1000/shuttle/shell-integration/zsh-pane0.sh'\nsleep 20",
 		contexts: []shell.PromptContext{{}},
 	}
 	controller := New(nil, nil, reader, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
@@ -274,13 +274,13 @@ func TestLocalControllerResumeAfterTakeControlDoesNotReconcileWithoutCurrentProm
 func TestLocalControllerResumeAfterTakeControlPrefersAttachedExecutionTail(t *testing.T) {
 	exitCode := 0
 	reader := &stubContextReader{
-		snapshot: "jsmith@linuxdesktop ~/source/repos/go_learn %\n. '/run/user/1000/shuttle/commands/noisy.sh'",
+		snapshot: "localuser@workstation ~/workspace/other-project %\n. '/run/user/1000/shuttle/commands/noisy.sh'",
 		context: shell.PromptContext{
-			User:         "jsmith",
-			Host:         "linuxdesktop",
-			Directory:    "~/source/repos/go_learn",
+			User:         "localuser",
+			Host:         "workstation",
+			Directory:    "~/workspace/other-project",
 			PromptSymbol: "%",
-			RawLine:      "jsmith@linuxdesktop ~/source/repos/go_learn %",
+			RawLine:      "localuser@workstation ~/workspace/other-project %",
 			LastExitCode: &exitCode,
 		},
 	}
@@ -323,14 +323,14 @@ func TestLocalControllerResumeAfterTakeControlPrefersAttachedExecutionTail(t *te
 func TestLocalControllerResumeAfterTakeControlReturnsTrackedShellChangeNotice(t *testing.T) {
 	exitCode := shell.InterruptedExitCode
 	reader := &stubContextReader{
-		snapshot:       "^C\njsmith@linuxdesktop ~/source/repos/aiterm %",
+		snapshot:       "^C\nlocaluser@workstation ~/workspace/project %",
 		resolvedPaneID: "%5",
 		context: shell.PromptContext{
-			User:         "jsmith",
-			Host:         "linuxdesktop",
-			Directory:    "/home/jsmith/source/repos/aiterm",
+			User:         "localuser",
+			Host:         "workstation",
+			Directory:    "/workspace/project",
 			PromptSymbol: "%",
-			RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+			RawLine:      "localuser@workstation ~/workspace/project %",
 			LastExitCode: &exitCode,
 		},
 	}
@@ -501,11 +501,11 @@ func TestLocalControllerSubmitProposedShellCommandUsesOwnedExecutionPane(t *test
 		TrackedShell:     TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
 		WorkingDirectory: "/tmp/project",
 		CurrentShell: &shell.PromptContext{
-			User:         "jsmith",
-			Host:         "linuxdesktop",
+			User:         "localuser",
+			Host:         "workstation",
 			Directory:    "/tmp/project",
 			PromptSymbol: "%",
-			RawLine:      "jsmith@linuxdesktop /tmp/project %",
+			RawLine:      "localuser@workstation /tmp/project %",
 		},
 	})
 
@@ -556,7 +556,7 @@ func TestLocalControllerSubmitProposedShellCommandUsesTrackedShellWhenUserShellR
 	controller := New(nil, runner, nil, SessionContext{
 		SessionName:      "shuttle-test",
 		TrackedShell:     TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
-		WorkingDirectory: "/home/jsmith",
+		WorkingDirectory: "/workspace/home",
 		CurrentShell: &shell.PromptContext{
 			User:         "openclaw",
 			Host:         "openclaw",
@@ -592,11 +592,11 @@ func TestLocalControllerOwnedExecutionDoesNotOverwriteUserShellContext(t *testin
 				ExitCode:  0,
 				Captured:  "/tmp/owned",
 				ShellContext: shell.PromptContext{
-					User:         "jsmith",
-					Host:         "linuxdesktop",
+					User:         "localuser",
+					Host:         "workstation",
 					Directory:    "/tmp/owned",
 					PromptSymbol: "%",
-					RawLine:      "jsmith@linuxdesktop /tmp/owned %",
+					RawLine:      "localuser@workstation /tmp/owned %",
 				},
 			},
 		},
@@ -609,13 +609,13 @@ func TestLocalControllerOwnedExecutionDoesNotOverwriteUserShellContext(t *testin
 	controller := New(nil, runner, nil, SessionContext{
 		SessionName:      "shuttle-test",
 		TrackedShell:     TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
-		WorkingDirectory: "/home/jsmith/source/repos/aiterm",
+		WorkingDirectory: "/workspace/project",
 		CurrentShell: &shell.PromptContext{
-			User:         "jsmith",
-			Host:         "linuxdesktop",
-			Directory:    "/home/jsmith/source/repos/aiterm",
+			User:         "localuser",
+			Host:         "workstation",
+			Directory:    "/workspace/project",
 			PromptSymbol: "%",
-			RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+			RawLine:      "localuser@workstation ~/workspace/project %",
 		},
 	})
 
@@ -625,10 +625,10 @@ func TestLocalControllerOwnedExecutionDoesNotOverwriteUserShellContext(t *testin
 
 	controller.mu.Lock()
 	defer controller.mu.Unlock()
-	if controller.session.WorkingDirectory != "/home/jsmith/source/repos/aiterm" {
+	if controller.session.WorkingDirectory != "/workspace/project" {
 		t.Fatalf("expected user-shell cwd to remain unchanged, got %q", controller.session.WorkingDirectory)
 	}
-	if controller.session.CurrentShell == nil || controller.session.CurrentShell.Directory != "/home/jsmith/source/repos/aiterm" {
+	if controller.session.CurrentShell == nil || controller.session.CurrentShell.Directory != "/workspace/project" {
 		t.Fatalf("expected user-shell prompt context to remain unchanged, got %#v", controller.session.CurrentShell)
 	}
 	if controller.task.LastCommandResult == nil || controller.task.LastCommandResult.Summary != "/tmp/owned" {
@@ -641,7 +641,7 @@ func TestLocalControllerDirectShellCommandRefreshesTrackedUserShellContext(t *te
 	if err != nil {
 		t.Fatalf("UserHomeDir() error = %v", err)
 	}
-	goLearnDirectory := filepath.Join(homeDirectory, "source/repos/go_learn")
+	goLearnDirectory := filepath.Join(homeDirectory, "workspace", "other-project")
 
 	runner := &ownedExecutionRunner{
 		stubRunner: stubRunner{
@@ -659,25 +659,25 @@ func TestLocalControllerDirectShellCommandRefreshesTrackedUserShellContext(t *te
 	reader := &stubContextReader{
 		contexts: []shell.PromptContext{
 			{
-				User:         "jsmith",
-				Host:         "linuxdesktop",
-				Directory:    "~/source/repos",
+				User:         "localuser",
+				Host:         "workstation",
+				Directory:    "~/workspace",
 				PromptSymbol: "%",
-				RawLine:      "jsmith@linuxdesktop ~/source/repos %",
+				RawLine:      "localuser@workstation ~/workspace %",
 			},
 			{
-				User:         "jsmith",
-				Host:         "linuxdesktop",
-				Directory:    "~/source/repos/go_learn",
+				User:         "localuser",
+				Host:         "workstation",
+				Directory:    "~/workspace/other-project",
 				PromptSymbol: "%",
-				RawLine:      "jsmith@linuxdesktop ~/source/repos/go_learn %",
+				RawLine:      "localuser@workstation ~/workspace/other-project %",
 			},
 			{
-				User:         "jsmith",
-				Host:         "linuxdesktop",
-				Directory:    "~/source/repos/go_learn",
+				User:         "localuser",
+				Host:         "workstation",
+				Directory:    "~/workspace/other-project",
 				PromptSymbol: "%",
-				RawLine:      "jsmith@linuxdesktop ~/source/repos/go_learn %",
+				RawLine:      "localuser@workstation ~/workspace/other-project %",
 			},
 		},
 	}
@@ -686,11 +686,11 @@ func TestLocalControllerDirectShellCommandRefreshesTrackedUserShellContext(t *te
 		TrackedShell:     TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
 		WorkingDirectory: filepath.Join(homeDirectory, "source/repos"),
 		CurrentShell: &shell.PromptContext{
-			User:         "jsmith",
-			Host:         "linuxdesktop",
-			Directory:    "~/source/repos",
+			User:         "localuser",
+			Host:         "workstation",
+			Directory:    "~/workspace",
 			PromptSymbol: "%",
-			RawLine:      "jsmith@linuxdesktop ~/source/repos %",
+			RawLine:      "localuser@workstation ~/workspace %",
 		},
 	})
 
@@ -703,7 +703,7 @@ func TestLocalControllerDirectShellCommandRefreshesTrackedUserShellContext(t *te
 		controller.mu.Unlock()
 		t.Fatalf("expected refreshed working directory %q, got %q", goLearnDirectory, controller.session.WorkingDirectory)
 	}
-	if controller.session.CurrentShell == nil || controller.session.CurrentShell.Directory != "~/source/repos/go_learn" {
+	if controller.session.CurrentShell == nil || controller.session.CurrentShell.Directory != "~/workspace/other-project" {
 		controller.mu.Unlock()
 		t.Fatalf("expected refreshed prompt context, got %#v", controller.session.CurrentShell)
 	}

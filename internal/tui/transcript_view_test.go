@@ -418,9 +418,9 @@ func TestBusyStatusLineRendersAboveComposer(t *testing.T) {
 	model.busy = true
 	model.busyStartedAt = time.Now()
 	model.shellContext = shell.PromptContext{
-		User:         "jsmith",
-		Host:         "linuxdesktop",
-		Directory:    "~/source/repos/aiterm",
+		User:         "localuser",
+		Host:         "workstation",
+		Directory:    "~/workspace/project",
 		GitBranch:    "main",
 		PromptSymbol: "%",
 	}
@@ -429,7 +429,7 @@ func TestBusyStatusLineRendersAboveComposer(t *testing.T) {
 	if !strings.Contains(view, "Working (") {
 		t.Fatalf("expected busy status line, got %q", view)
 	}
-	if !strings.Contains(view, "jsmith@linuxdesktop ~/source/repos/aiterm git:(main) %") {
+	if !strings.Contains(view, "localuser@workstation ~/workspace/project git:(main) %") {
 		t.Fatalf("expected shell context line, got %q", view)
 	}
 }
@@ -676,7 +676,7 @@ func TestSilentDirectoryChangeResultShowsUpdatedDirectory(t *testing.T) {
 				State:    controller.CommandExecutionCompleted,
 				Summary:  "(no output)",
 				ShellContext: &shell.PromptContext{
-					Directory: "~/source/repos/go_learn",
+					Directory: "~/workspace/other-project",
 				},
 			},
 		},
@@ -685,7 +685,7 @@ func TestSilentDirectoryChangeResultShowsUpdatedDirectory(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("expected one entry, got %d", len(entries))
 	}
-	if entries[0].Body != "~/source/repos/go_learn" {
+	if entries[0].Body != "~/workspace/other-project" {
 		t.Fatalf("expected updated directory in silent success body, got %q", entries[0].Body)
 	}
 }

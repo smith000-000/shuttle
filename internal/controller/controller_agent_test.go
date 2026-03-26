@@ -60,11 +60,11 @@ func TestLocalControllerSubmitAgentPromptIncludesRecentManualShellContext(t *tes
 	controller := New(agent, nil, &stubContextReader{
 		output: "recent shell output",
 		context: shell.PromptContext{
-			User:         "jsmith",
-			Host:         "linuxdesktop",
-			Directory:    "/home/jsmith/source/repos/aiterm",
+			User:         "localuser",
+			Host:         "workstation",
+			Directory:    "/workspace/project",
 			PromptSymbol: "%",
-			RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+			RawLine:      "localuser@workstation ~/workspace/project %",
 		},
 	}, SessionContext{
 		UserShellHistoryFile: historyFile,
