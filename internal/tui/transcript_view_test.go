@@ -107,19 +107,19 @@ func TestTranscriptScrollKeysMoveViewport(t *testing.T) {
 		t.Fatalf("expected transcript to move above bottom, got %d with max %d", model.transcriptScroll, maxScroll)
 	}
 
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlEnd})
 	model = updated.(Model)
 	if !model.transcriptFollow {
-		t.Fatal("expected End to return transcript to follow mode")
+		t.Fatal("expected Ctrl+End to return transcript to follow mode")
 	}
 	if model.transcriptScroll != model.maxTranscriptScroll() {
 		t.Fatalf("expected scroll at bottom, got %d", model.transcriptScroll)
 	}
 
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyHome})
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlHome})
 	model = updated.(Model)
 	if model.transcriptScroll != 0 {
-		t.Fatalf("expected Home to jump to top, got %d", model.transcriptScroll)
+		t.Fatalf("expected Ctrl+Home to jump to top, got %d", model.transcriptScroll)
 	}
 }
 
@@ -234,6 +234,45 @@ func TestMainFooterStaysOnBottomRow(t *testing.T) {
 	last := lines[len(lines)-1]
 	if !strings.Contains(last, "quit") {
 		t.Fatalf("expected footer on last rendered line, got %q", last)
+	}
+}
+
+func TestShortTranscriptSitsAboveComposer(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.width = 80
+	model.height = 20
+	model.entries = []Entry{{Title: "system", Body: "one visible line"}}
+	model.selectedEntry = 0
+
+	window := model.transcriptWindow(model.transcriptLines(model.currentTranscriptWidth()), model.currentTranscriptHeight())
+	if got := strings.TrimSpace(window[len(window)-1]); !strings.Contains(got, "one visible line") {
+		t.Fatalf("expected transcript window to bottom-align final line, got last=%q full=%#v", got, window)
+	}
+
+	lines := strings.Split(model.View(), "\n")
+	anchor := -1
+	for index, line := range lines {
+		if strings.Contains(line, "one visible line") {
+			anchor = index
+			break
+		}
+	}
+	if anchor < 0 {
+		t.Fatalf("expected transcript line in view, got %q", model.View())
+	}
+
+	composer := -1
+	for index, line := range lines {
+		if strings.Contains(line, "$>") || strings.Contains(line, "#>") || strings.Contains(line, "Œ>") {
+			composer = index
+			break
+		}
+	}
+	if composer < 0 {
+		t.Fatalf("expected composer line in view, got %q", model.View())
+	}
+	if anchor != composer-1 {
+		t.Fatalf("expected short transcript to sit directly above composer, got transcript line %d composer line %d", anchor, composer)
 	}
 }
 

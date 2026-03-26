@@ -189,6 +189,7 @@ func TestBuildTurnContextIncludesWorkspaceRootAndPatchResult(t *testing.T) {
 		Session: controller.SessionContext{
 			WorkingDirectory:   "/tmp/remote",
 			LocalWorkspaceRoot: "/home/jsmith/source/repos/aiterm",
+			ApprovalMode:       controller.ApprovalModeAuto,
 		},
 		Task: controller.TaskContext{
 			LastPatchApplyResult: &controller.PatchApplySummary{
@@ -207,6 +208,9 @@ func TestBuildTurnContextIncludesWorkspaceRootAndPatchResult(t *testing.T) {
 
 	if !strings.Contains(context, "workspace_root=/home/jsmith/source/repos/aiterm") {
 		t.Fatalf("expected workspace root, got %q", context)
+	}
+	if !strings.Contains(context, "approval_mode=auto") {
+		t.Fatalf("expected approval mode, got %q", context)
 	}
 	if !strings.Contains(context, "Last patch apply result:\n") {
 		t.Fatalf("expected last patch apply section, got %q", context)

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"aiterm/internal/logging"
@@ -77,24 +78,24 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 	)
 	c.refreshUserShellContext(ctx, true)
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	events := make([]TranscriptEvent, 0, 4)
+
+	c.mu.Lock()
 	if emitUserMessage {
 		events = append(events, c.newEvent(EventUserMessage, TextPayload{Text: userPrompt}))
 	}
-
 	if c.agent == nil {
 		errEvent := c.newEvent(EventError, TextPayload{Text: "agent runtime is not configured"})
 		c.appendEvents(events...)
 		c.appendEvents(errEvent)
+		c.mu.Unlock()
 		return append(append([]TranscriptEvent(nil), events...), errEvent), nil
 	}
 
 	session := c.session
 	task := c.task
 	task.RecoverySnapshot = c.captureRecoverySnapshot(ctx, executionTarget(task.CurrentExecution, session.TrackedShell).PaneID, task.CurrentExecution)
+	c.mu.Unlock()
 
 	input := AgentInput{
 		Session: session,
@@ -114,6 +115,8 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 			"user_prompt", userPrompt,
 			"agent_prompt_preview", logging.Preview(agentPrompt, 800),
 		)
+		c.mu.Lock()
+		defer c.mu.Unlock()
 		if errors.Is(err, context.Canceled) {
 			c.appendEvents(events...)
 			return append([]TranscriptEvent(nil), events...), err
@@ -124,10 +127,21 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 		return append(append([]TranscriptEvent(nil), events...), errEvent), nil
 	}
 	response = normalizeAgentResponse(response)
+
+	c.mu.Lock()
 	if shouldSuppressReturnedPlan(response.Plan, emitUserMessage, userPrompt, c.task.ActivePlan) {
 		response.Plan = nil
 	}
 	completedPlan := completionPlanFromContinuation(response, emitUserMessage, c.task.ActivePlan)
+	autoAction := automaticActionFromResponse(c.session, response)
+	if autoAction.command != "" || autoAction.patch != "" {
+		if response.Approval != nil {
+			response.Approval = nil
+			response.Proposal = nil
+		} else {
+			response.Proposal = nil
+		}
+	}
 
 	newEvents := append([]TranscriptEvent(nil), events...)
 
@@ -166,8 +180,19 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 		c.task.PendingApproval = &approvalCopy
 		newEvents = append(newEvents, c.newEvent(EventApproval, approvalCopy))
 	}
+	if autoAction.command != "" {
+		notice := autoRunNotice(autoAction.command)
+		if c.session.ApprovalMode == ApprovalModeDanger {
+			notice = fmt.Sprintf("Auto-running agent command under /approvals dangerous: %s", strings.TrimSpace(autoAction.command))
+		}
+		newEvents = append(newEvents, c.newEvent(EventSystemNotice, TextPayload{Text: notice}))
+	}
+	if autoAction.patch != "" {
+		newEvents = append(newEvents, c.newEvent(EventSystemNotice, TextPayload{Text: "Auto-applying agent patch under /approvals dangerous."}))
+	}
 
 	c.appendEvents(newEvents...)
+	c.mu.Unlock()
 	logging.Trace(
 		"controller.agent_turn.complete",
 		"event_kinds", eventKinds(newEvents),
@@ -176,6 +201,24 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 		"has_proposal", response.Proposal != nil,
 		"has_approval", response.Approval != nil,
 	)
+	if autoAction.patch != "" {
+		patchEvents, patchErr := c.applyPatch(ctx, autoAction.patch)
+		newEvents = append(newEvents, patchEvents...)
+		if patchErr != nil {
+			return newEvents, patchErr
+		}
+	}
+	if autoAction.command != "" {
+		origin := CommandOriginAgentAuto
+		if c.session.ApprovalMode == ApprovalModeDanger {
+			origin = CommandOriginAgentAuto
+		}
+		commandEvents, commandErr := c.submitShellCommand(ctx, autoAction.command, origin)
+		newEvents = append(newEvents, commandEvents...)
+		if commandErr != nil {
+			return newEvents, commandErr
+		}
+	}
 	return newEvents, nil
 }
 

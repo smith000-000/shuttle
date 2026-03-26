@@ -21,6 +21,9 @@ Recently landed on `main`:
 - behavior-oriented controller and TUI test splits
 - interactive tmux harness coverage for patch apply, patch retry, command auto-continue, and multi-step plan loops
 - repo-level agent instructions that require doc review, including `README.md`, before PR creation
+- task-context controls for `/new` and `/compact`, including controller-owned task reset/compaction paths
+- session-local approval-mode control via `/approvals`, with bounded auto-run for safe local inspection and test commands
+- lower-right model status showing approximate live context-window usage
 
 Execution-monitor redesign / semantic shell hardening status on `semantic-shell-bootstrap`:
 - implemented: first-class command monitor, local managed shell transport, `awaiting_input` detection, `interactive_fullscreen` detection, `lost` execution state, `F2` handoff/reconciliation, raw `KEYS>` terminal input, remote prompt-return reconciliation, and agent-driven `keys` proposals
@@ -32,7 +35,7 @@ Execution-monitor redesign / semantic shell hardening status on `semantic-shell-
 - implemented on `semantic-shell-bootstrap`: hybrid shell execution model with a persistent user shell context, structured recent manual-shell commands/actions from shell history, owned tmux execution panes for agent-approved commands, owned-pane cleanup, and TUI interrupt/key routing that targets the active execution pane instead of always targeting the persistent user shell
 - implemented on `semantic-shell-bootstrap`: prompt-validation hardening so stale scrollback cannot reconcile running commands as completed after `F2`, plus compact exit-aware transcript result rendering
 - the shell-tracking redesign is now in a stable-enough state on `main` that the next branch can focus on task-context controls and longer-session usability
-- next: keep the serial tracking model stable, add more integration-style regression coverage opportunistically, implement `/new` and `/compact`, and defer any parallel-command UI work to a later branch
+- next: keep the serial tracking model stable, add more integration-style regression coverage opportunistically, and defer any parallel-command UI work to a later branch
 
 Security hardening branch scope on `security-hardening-runtime`:
 - audit runtime artifact placement, permissions, and retention now that `main` includes both execution-monitor and provider-onboarding work
@@ -88,7 +91,6 @@ Milestone 5 still needs:
 - integration-style tests for tracked-command recovery flows, not just per-layer unit tests
 - pane-stream/fullscreen detection beyond tmux alternate-screen heuristics so aliases, wrappers, and remote fullscreen apps can be recognized from terminal behavior instead of command-name lists alone
 - richer state-aware agent recovery actions for ambiguous shell takeovers, including deciding when to propose raw terminal input versus simple recovery guidance
-- context management commands for starting a fresh task and compacting a long-running conversation without losing shell continuity
 - broader semantic shell integration and subshell/bootstrap support using signals such as `OSC 133` and `OSC 7`
 - any richer bootstrap or injected helper mode should come later, after the standards-based marker path exists
 - before touching richer subshell/bootstrap behavior for `ssh`, `docker exec -it`, or nested shells, run the manual regression checklist in [shell-execution-strategy.md](shell-execution-strategy.md) to avoid regressing the current moderately functional context-transition path
@@ -116,30 +118,42 @@ Milestone 5 still needs:
 Goal:
 - add explicit context-management controls so long-running Shuttle sessions can either start a fresh task or compress old task history without losing shell continuity
 
-Scope for the next branch:
+Status:
+- implemented on `main`:
+  - `/new` resets task state while preserving Shuttle session continuity, tracked shell state, and provider selection
+  - `/compact` stores a model-generated task summary and trims live transcript context to a recent tail
+  - `/approvals` switches the current session between `confirm`, bounded `auto`, and explicit-confirmation `dangerous` command-execution policy
+  - `F10` settings now expose a session-local approval-mode selector plus clearer provider/model menu entry points
+  - provider detail editing now supports `F7` health/auth tests and `F8` save-and-activate
+  - multiline composer navigation now uses `Up/Down`, `Home/End`, and `Insert`, while transcript bounds move to `Ctrl+Home/Ctrl+End`
+  - the lower-right model status now shows an approximate live context-usage estimate, and shows the selected model limit when available
+
+Implemented scope:
+- `/approvals`: change how aggressively Shuttle auto-runs safe agent commands in the current session
 - `/new`: start a fresh task in the current Shuttle session
 - `/compact`: summarize and compress the current task context while preserving enough state for the next turn
+- `F10` settings: expose session approval mode, provider configuration/testing, active provider switching, and model selection explicitly
+- composer navigation: make multiline editing behave like a real text field without losing transcript scrolling
 
 Design rules:
+- `/approvals` is session-preserving, not task-preserving; `/new` and `/compact` must not reset it
+- `/approvals auto` only applies to controller-classified safe local shell commands; patches, remote shells, and risky actions remain explicit
+- `/approvals dangerous` must require an explicit confirmation warning before activation
 - `/new` resets task state, not session state
 - `/new` must preserve the active Shuttle workspace, tracked shell target, working-directory context, provider selection, and remote-shell continuity
 - `/compact` is task-preserving, not task-resetting
 - `/compact` should prefer a model-generated compact summary plus a recent transcript tail over keeping the full raw transcript forever
 - neither command should silently discard an active approval, running execution, or other high-risk state without an explicit guardrail
 
-Planned implementation slices:
-1. Add slash-command plumbing for `/new` and `/compact` in the TUI composer flow.
-2. Add a controller-owned `StartNewTask` path that replaces `TaskContext` with a fresh task ID while preserving `SessionContext`.
-3. Define compacted task state, likely as a durable summary field on `TaskContext`, and teach provider prompt construction to render compacted context plus recent tail events.
-4. Add a controller-owned `CompactTask` path that asks the model for a structured summary of the current task, stores it, and trims transcript state safely.
-5. Add guardrails:
-   - block or confirm `/new` when there is a live execution, pending approval, or unresolved recovery state
-   - block or confirm `/compact` when the current task is mid-action and compaction would hide required detail
-6. Add tests:
-   - controller unit tests for task reset and compaction state
-   - provider-context tests for compact-summary rendering
-   - TUI tests for slash-command routing and guardrail messaging
-   - at least one integration-harness scenario proving an agent loop can continue correctly after compaction
+Delivered implementation slices:
+1. Added slash-command plumbing for `/approvals`, `/new`, and `/compact` in the TUI composer flow.
+2. Added session-local approval-mode state plus a controller-owned classifier for bounded auto-run of safe local inspection and test commands, and a separate explicit-confirmation `dangerous` mode.
+3. Added a controller-owned `StartNewTask` path that replaces `TaskContext` with a fresh task ID while preserving `SessionContext`.
+4. Added compacted task state as a durable summary field on `TaskContext`, and taught provider prompt construction to render compacted context plus a recent tail.
+5. Added a controller-owned `CompactTask` path that asks the model for a structured summary, stores it, and trims transcript state safely.
+6. Added guardrails that block `/new` and `/compact` while a live execution or pending approval is still active.
+7. Added `F10` session/provider/model settings refinements, provider test/save+activate flows, and multiline composer navigation improvements.
+8. Added controller, provider-context, and TUI tests for approval mode, task reset, compaction, status-line rendering, provider settings actions, and multiline composer navigation.
 
 Exit criteria:
 - a user can start a fresh task without restarting Shuttle or losing shell continuity

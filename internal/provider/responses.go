@@ -498,6 +498,7 @@ func buildTurnContext(input controller.AgentInput) string {
 	sections := make([]string, 0, 5)
 	sections = append(sections, "User prompt:\n"+strings.TrimSpace(input.Prompt))
 	seenSnippets := make(map[string]struct{})
+	options := turnContextOptionsForTask(input.Task)
 
 	sessionLines := []string{}
 	if input.Session.CurrentShell != nil && strings.TrimSpace(input.Session.CurrentShell.PromptLine()) != "" {
@@ -518,6 +519,9 @@ func buildTurnContext(input controller.AgentInput) string {
 	if input.Session.LocalWorkspaceRoot != "" {
 		sessionLines = append(sessionLines, "workspace_root="+input.Session.LocalWorkspaceRoot)
 	}
+	if input.Session.ApprovalMode != "" {
+		sessionLines = append(sessionLines, "approval_mode="+string(input.Session.ApprovalMode))
+	}
 	if input.Session.TrackedShell.PaneID != "" {
 		sessionLines = append(sessionLines, "tracked_pane="+input.Session.TrackedShell.PaneID)
 	}
@@ -528,7 +532,7 @@ func buildTurnContext(input controller.AgentInput) string {
 		sections = append(sections, "Session:\n"+strings.Join(sessionLines, "\n"))
 	}
 
-	recentOutput := compactShellOutput(input.Session.RecentShellOutput, 8, 4, 1200)
+	recentOutput := compactShellOutput(input.Session.RecentShellOutput, options.recentShellHeadLines, options.recentShellTailLines, options.recentShellMaxChars)
 	if shouldIncludeContextSnippet(seenSnippets, recentOutput) {
 		sections = append(sections, "Recent shell output:\n"+recentOutput)
 	}
@@ -560,7 +564,7 @@ func buildTurnContext(input controller.AgentInput) string {
 		if strings.TrimSpace(last.SemanticSource) != "" {
 			lines = append(lines, "semantic_source="+last.SemanticSource)
 		}
-		if summary := compactShellOutput(last.Summary, 8, 4, 800); shouldIncludeContextSnippet(seenSnippets, summary) {
+		if summary := compactShellOutput(last.Summary, options.commandSummaryHeadLines, options.commandSummaryTailLines, options.commandSummaryMaxChars); shouldIncludeContextSnippet(seenSnippets, summary) {
 			lines = append(lines, "summary="+summary)
 		}
 		sections = append(sections, "Last command result:\n"+strings.Join(lines, "\n"))
@@ -641,13 +645,13 @@ func buildTurnContext(input controller.AgentInput) string {
 		if current.ShellContextAfter != nil && strings.TrimSpace(current.ShellContextAfter.PromptLine()) != "" {
 			lines = append(lines, "prompt_after="+current.ShellContextAfter.PromptLine())
 		}
-		if tail := compactShellOutput(current.LatestOutputTail, 6, 3, 600); shouldIncludeContextSnippet(seenSnippets, tail) {
+		if tail := compactShellOutput(current.LatestOutputTail, options.activeTailHeadLines, options.activeTailTailLines, options.activeTailMaxChars); shouldIncludeContextSnippet(seenSnippets, tail) {
 			lines = append(lines, "latest_output="+tail)
 		}
 		sections = append(sections, "Current active command:\n"+strings.Join(lines, "\n"))
 	}
 
-	if snapshot := compactShellOutput(input.Task.RecoverySnapshot, 20, 20, 4000); shouldIncludeContextSnippet(seenSnippets, snapshot) {
+	if snapshot := compactShellOutput(input.Task.RecoverySnapshot, options.snapshotHeadLines, options.snapshotTailLines, options.snapshotMaxChars); shouldIncludeContextSnippet(seenSnippets, snapshot) {
 		sections = append(sections, "Recovery terminal snapshot:\n"+snapshot)
 	}
 
@@ -672,11 +676,67 @@ func buildTurnContext(input controller.AgentInput) string {
 		sections = append(sections, "Pending approval under refinement:\n"+strings.Join(approvalLines, "\n"))
 	}
 
-	if transcript := summarizeTranscript(input.Task.PriorTranscript, 8); transcript != "" {
+	if summary := strings.TrimSpace(input.Task.CompactedSummary); summary != "" {
+		sections = append(sections, "Compacted task summary:\n"+summary)
+	}
+
+	if transcript := summarizeTranscript(input.Task.PriorTranscript, options.transcriptMaxEvents); transcript != "" {
 		sections = append(sections, "Recent transcript:\n"+transcript)
 	}
 
 	return strings.Join(sections, "\n\n")
+}
+
+type turnContextOptions struct {
+	recentShellHeadLines    int
+	recentShellTailLines    int
+	recentShellMaxChars     int
+	commandSummaryHeadLines int
+	commandSummaryTailLines int
+	commandSummaryMaxChars  int
+	activeTailHeadLines     int
+	activeTailTailLines     int
+	activeTailMaxChars      int
+	snapshotHeadLines       int
+	snapshotTailLines       int
+	snapshotMaxChars        int
+	transcriptMaxEvents     int
+}
+
+func turnContextOptionsForTask(task controller.TaskContext) turnContextOptions {
+	if strings.TrimSpace(task.CompactedSummary) != "" {
+		return turnContextOptions{
+			recentShellHeadLines:    4,
+			recentShellTailLines:    2,
+			recentShellMaxChars:     600,
+			commandSummaryHeadLines: 4,
+			commandSummaryTailLines: 2,
+			commandSummaryMaxChars:  400,
+			activeTailHeadLines:     4,
+			activeTailTailLines:     2,
+			activeTailMaxChars:      300,
+			snapshotHeadLines:       8,
+			snapshotTailLines:       8,
+			snapshotMaxChars:        1200,
+			transcriptMaxEvents:     6,
+		}
+	}
+
+	return turnContextOptions{
+		recentShellHeadLines:    8,
+		recentShellTailLines:    4,
+		recentShellMaxChars:     1200,
+		commandSummaryHeadLines: 8,
+		commandSummaryTailLines: 4,
+		commandSummaryMaxChars:  800,
+		activeTailHeadLines:     6,
+		activeTailTailLines:     3,
+		activeTailMaxChars:      600,
+		snapshotHeadLines:       20,
+		snapshotTailLines:       20,
+		snapshotMaxChars:        4000,
+		transcriptMaxEvents:     16,
+	}
 }
 
 func summarizeTranscript(events []controller.TranscriptEvent, maxEvents int) string {
@@ -889,6 +949,8 @@ Rules:
 - If you propose sending a small raw key sequence to an already-active prompt or fullscreen app, set "proposal_kind" to "keys" and fill "proposal_keys". Use a literal newline in "proposal_keys" when Enter should be sent.
 - If you propose a patch, set "proposal_kind" to "patch" and fill "proposal_patch".
 - If no proposal is needed, leave proposal fields empty.
+- If the session context says "approval_mode=auto", safe local inspection or verification commands may be auto-executed by Shuttle. In that mode, prefer "proposal_command" for safe local commands and reserve approvals for writes, destructive actions, patches, remote work, network/process-control, or other user-confirmed steps.
+- If the session context says "approval_mode=dangerous", Shuttle may auto-run agent commands and auto-apply agent patches without confirmation. Only rely on that for clearly intended task work in a trusted workspace, and still avoid destructive or unnecessary actions.
 - If an action is destructive, risky, or should be user-confirmed, leave proposal fields empty and fill the approval fields instead.
 - For approvals, set "approval_kind" to "command", "patch", or "plan" and set "approval_risk" to "low", "medium", or "high".
 - If the task is a refinement of a pending approval, preserve the original command or patch unless the context clearly requires changing it.

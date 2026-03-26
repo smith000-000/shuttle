@@ -25,9 +25,11 @@ What is working now:
 - foreground attach and handoff reconciliation for manually started shell commands
 - real OpenAI Responses API path with API-key auth
 - provider settings UI with:
+  - session-local approval-mode selection
   - active provider switching
   - active model switching
   - provider detail editing
+  - `F7` provider health/auth test from provider details
   - `F8` save-and-activate from provider details
 - saved provider profiles and startup reloading
 - provider secret handling with:
@@ -37,6 +39,9 @@ What is working now:
 - safer runtime state and trace defaults
 - Codex CLI login-based provider support
 - Codex CLI model suggestions sourced from the OpenAI models catalog when available, with free-text entry still allowed
+- task-context controls for `/new` and `/compact`
+- session-local `/approvals` control with `confirm`, bounded `auto`, and explicit-confirmation `dangerous` modes
+- lower-right model status showing approximate live context-window usage
 
 What is still in progress:
 - broader semantic shell integration (`OSC 133` / `OSC 7`) consumption and subshell/bootstrap support
@@ -193,15 +198,40 @@ Core controls:
 - `Right Arrow`: accept the current ghost-text completion
 - `Enter`: submit composer input
 - `Ctrl+J`: insert newline in the composer
+- `Home` / `End`: move to the start or end of the current composer line
+- `Ctrl+Home` / `Ctrl+End`: jump the transcript to the top or bottom
+- `Insert`: toggle composer overwrite mode
 - `Esc`: clear composer or interrupt active work, depending on state
 - `F2`: take control of the live shell pane
 - `S`: enter `KEYS>` mode when the active terminal is waiting for input or a fullscreen app owns the pane
 - `Ctrl+O`: inspect the selected transcript entry
+- `F10`: open settings
+
+Slash commands in agent mode:
+- `/approvals`: show or change the current session approval mode
+- `/new`: start a fresh task without restarting Shuttle or losing shell continuity
+- `/compact`: summarize older task context and keep a shorter live context window
+- `/onboard`, `/provider`, `/model`, `/quit`: existing provider/settings/session commands
+
+Approval modes:
+- `confirm`: current default; safe commands stay as explicit proposals and risky actions still require approval
+- `auto`: Shuttle auto-runs controller-classified safe local inspection and test commands, but still requires approval for writes, patches, remote work, network/process-control, and other risky actions
+- `dangerous`: after an explicit warning confirmation, Shuttle auto-runs agent commands and auto-applies agent patches for the current session
+- `/approvals` without an argument shows the current session mode; `/approvals confirm`, `/approvals auto`, and `/approvals dangerous` switch it
+
+Settings notes:
+- `F10` opens a menu with `Session Settings`, `Configure Providers`, `Change Active Provider`, and `Select Model`
+- provider detail editing supports `F7` to test the provider config and `F8` to save and activate it immediately
 
 Transcript result notes:
 - successful silent commands collapse to a compact result line instead of showing `exit=0` and `(no output)`
 - silent directory-changing commands can show the resulting cwd
 - result tags are exit-aware: nonzero exits no longer render as green success entries
+
+Status line notes:
+- the lower-right status can show the current approvals mode, especially when `auto` is active
+- the lower-right model label now includes an approximate live context-usage estimate
+- when Shuttle knows the selected model's context window, the estimate is shown against that limit
 
 The TUI is intentionally keyboard-first. Current behavior is still evolving, so see [ui-scratchpad.md](ui-scratchpad.md) for active UX backlog notes.
 

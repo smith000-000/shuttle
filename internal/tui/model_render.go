@@ -15,20 +15,7 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
-func (m Model) View() string {
-	if m.helpOpen {
-		return m.renderScreen(m.renderHelpView())
-	}
-	if m.settingsOpen {
-		return m.renderScreen(m.renderSettingsView())
-	}
-	if m.onboardingOpen {
-		return m.renderScreen(m.renderOnboardingView())
-	}
-	if m.detailOpen {
-		return m.renderScreen(m.renderDetailView())
-	}
-
+func (m Model) renderMainView() string {
 	width := m.width
 	if width <= 0 {
 		width = 100
@@ -53,8 +40,7 @@ func (m Model) View() string {
 		screenHeight = 24
 	}
 
-	transcriptHeight := m.transcriptViewportHeight(actionCard, planCard, activeExecutionCard, statusLine, shellTail, composer, footer, screenHeight)
-
+	transcriptHeight := m.resolvedTranscriptHeight(transcriptWidth, screenHeight, actionCard, planCard, activeExecutionCard, statusLine, shellTail, composer, footer)
 	transcript := m.renderTranscript(transcriptWidth, transcriptHeight)
 
 	sections := []string{transcript}
@@ -74,13 +60,29 @@ func (m Model) View() string {
 		sections = append(sections, shellTail)
 	}
 	footerSections := []string{composer, footer}
-	bodyHeight := lipgloss.Height(strings.Join(append(append([]string(nil), sections...), footerSections...), "\n"))
-	if fillerHeight := screenHeight - bodyHeight; fillerHeight > 0 {
-		sections = append(sections, blankBlock(fillerHeight))
-	}
 	sections = append(sections, footerSections...)
 
-	return m.renderScreen(lipgloss.JoinVertical(lipgloss.Left, sections...))
+	return lipgloss.JoinVertical(lipgloss.Left, sections...)
+}
+
+func (m Model) View() string {
+	if m.pendingDangerousConfirm != nil {
+		return m.renderScreen(m.renderMainView())
+	}
+	if m.helpOpen {
+		return m.renderScreen(m.renderHelpView())
+	}
+	if m.settingsOpen {
+		return m.renderScreen(m.renderSettingsView())
+	}
+	if m.onboardingOpen {
+		return m.renderScreen(m.renderOnboardingView())
+	}
+	if m.detailOpen {
+		return m.renderScreen(m.renderDetailView())
+	}
+
+	return m.renderScreen(m.renderMainView())
 }
 
 func (m Model) currentShellContext() *shell.PromptContext {
@@ -230,6 +232,18 @@ func (m Model) currentActionCardSpec() *actionCardSpec {
 				{label: "Y continue", action: actionCardContinueStartup},
 			},
 			borderColor: lipgloss.Color("214"),
+		}
+	}
+
+	if m.pendingDangerousConfirm != nil {
+		return &actionCardSpec{
+			title: "Enable Dangerous Mode",
+			body:  []string{controller.DangerousModeWarning()},
+			buttons: []actionCardButton{
+				{label: "Y enable dangerous", action: actionCardConfirmDangerous},
+				{label: "N cancel", action: actionCardCancelDangerous},
+			},
+			borderColor: lipgloss.Color("160"),
 		}
 	}
 
@@ -440,7 +454,7 @@ func (m Model) renderComposer(width int) string {
 	inputStyle := m.styles.input.Copy().Background(composerStyle.GetBackground())
 	ghostStyle := m.styles.inputGhost.Copy().Background(composerStyle.GetBackground())
 	cursorStyle := inputStyle.Copy().Reverse(true)
-	lines := composerDisplayLines(m.input, m.cursor, m.currentCompletionGhostText())
+	lines := composerViewportLines(composerDisplayLines(m.input, m.cursor, m.currentCompletionGhostText()), composerMaxVisibleLines)
 	prefixWidth := lipgloss.Width(prompt)
 	rendered := make([]string, 0, len(lines))
 	for index, line := range lines {
@@ -477,22 +491,8 @@ func (m Model) renderStatusLine(width int) string {
 	if m.shellContext.Remote {
 		rightParts = append(rightParts, m.styles.statusRemote.Render("REMOTE"))
 	}
-	if m.lastModelInfo != nil {
-		label := strings.TrimSpace(m.lastModelInfo.ResponseModel)
-		if label == "" {
-			label = strings.TrimSpace(m.lastModelInfo.RequestedModel)
-		}
-		if label != "" {
-			providerLabel := strings.TrimSpace(m.lastModelInfo.ProviderPreset)
-			if providerLabel != "" {
-				providerLabel = settingsProviderLabel(provider.ProviderPreset(providerLabel))
-			}
-			if providerLabel != "" {
-				rightParts = append(rightParts, m.styles.statusRemote.Render("MODEL "+providerLabel+" / "+label))
-			} else {
-				rightParts = append(rightParts, m.styles.statusRemote.Render("MODEL "+label))
-			}
-		}
+	if modelStatus := m.renderModelStatus(); modelStatus != "" {
+		rightParts = append(rightParts, m.styles.statusRemote.Render(modelStatus))
 	}
 	if m.busy {
 		elapsed := 0
@@ -525,6 +525,121 @@ func (m Model) renderStatusLine(width int) string {
 	}
 
 	return m.styles.status.Render(left + strings.Repeat(" ", padding) + right)
+}
+
+func (m Model) renderModelStatus() string {
+	label, providerLabel := m.statusModelLabel()
+	approvalLabel := m.renderApprovalModeLabel(label != "")
+	if label == "" && approvalLabel == "" {
+		return ""
+	}
+
+	parts := make([]string, 0, 3)
+	if approvalLabel != "" {
+		parts = append(parts, approvalLabel)
+	}
+	if label != "" {
+		modelText := "MODEL "
+		if providerLabel != "" {
+			modelText += providerLabel + " / " + label
+		} else {
+			modelText += label
+		}
+		parts = append(parts, modelText)
+	}
+	text := strings.Join(parts, "  ")
+	if usageLabel := m.renderContextUsageLabel(); usageLabel != "" {
+		text += "  " + usageLabel
+	}
+	return text
+}
+
+func (m Model) renderApprovalModeLabel(includeDefault bool) string {
+	if m.ctrl == nil {
+		return ""
+	}
+	mode := m.ctrl.ApprovalMode()
+	if mode != controller.ApprovalModeAuto && mode != controller.ApprovalModeDanger && !includeDefault {
+		return ""
+	}
+	return controller.ApprovalModeStatusLabel(mode)
+}
+
+func (m Model) statusModelLabel() (string, string) {
+	if m.lastModelInfo != nil {
+		label := strings.TrimSpace(m.lastModelInfo.ResponseModel)
+		if label == "" {
+			label = strings.TrimSpace(m.lastModelInfo.RequestedModel)
+		}
+		providerLabel := strings.TrimSpace(m.lastModelInfo.ProviderPreset)
+		if providerLabel != "" {
+			providerLabel = settingsProviderLabel(provider.ProviderPreset(providerLabel))
+		}
+		if label != "" {
+			return label, providerLabel
+		}
+	}
+
+	label := strings.TrimSpace(m.activeProvider.Model)
+	if label == "" {
+		return "", ""
+	}
+	return label, settingsProviderLabel(m.activeProvider.Preset)
+}
+
+func (m Model) renderContextUsageLabel() string {
+	if m.ctrl == nil {
+		return ""
+	}
+
+	usage := m.ctrl.EstimateContextUsage(m.contextUsagePrompt())
+	if usage.ApproxPromptTokens <= 0 {
+		return ""
+	}
+
+	label := "CTX ~" + formatStatusTokenCount(usage.ApproxPromptTokens)
+	if window := currentModelContextWindow(m.activeProvider); window > 0 {
+		label += "/" + formatStatusTokenCount(window)
+	}
+	return label
+}
+
+func (m Model) contextUsagePrompt() string {
+	if m.mode != AgentMode {
+		return ""
+	}
+
+	text := strings.TrimSpace(m.input)
+	if strings.HasPrefix(text, "/") {
+		return ""
+	}
+	return text
+}
+
+func currentModelContextWindow(profile provider.Profile) int {
+	if profile.SelectedModel == nil {
+		return 0
+	}
+	if profile.SelectedModel.ContextWindow > 0 {
+		return profile.SelectedModel.ContextWindow
+	}
+	if profile.SelectedModel.TopProvider.ContextWindow > 0 {
+		return profile.SelectedModel.TopProvider.ContextWindow
+	}
+	return 0
+}
+
+func formatStatusTokenCount(value int) string {
+	switch {
+	case value >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(value)/1_000_000)
+	case value >= 10_000:
+		return fmt.Sprintf("%dk", value/1000)
+	case value >= 1000:
+		return fmt.Sprintf("%.1fk", float64(value)/1000)
+	default:
+		return fmt.Sprintf("%d", value)
+	}
 }
 
 func (m Model) renderShellTail(width int) string {
@@ -622,7 +737,7 @@ func (m Model) footerParts(width int) []string {
 		return parts
 	}
 
-	parts := []string{"[F1] help", "[Ctrl+]] mode", "[Tab] cycle/tab", "[→] accept", "[Up/Down] history", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Ctrl+U/D] half-page", "[Home/End] bounds", "[Enter] submit", escHint, "[Ctrl+J] newline", "[F2] shell", "[F10] settings"}
+	parts := []string{"[F1] help", "[Ctrl+]] mode", "[Tab] cycle/tab", "[→] accept", "[Ctrl+O] detail", "[Enter] submit", escHint, "[Ctrl+J] newline", "[F2] shell", "[F10] settings"}
 	if m.canSendActiveKeys() {
 		parts = append(parts, "[S] send keys")
 	}
@@ -708,6 +823,33 @@ func blankBlock(height int) string {
 	}
 	lines := make([]string, height)
 	return strings.Join(lines, "\n")
+}
+
+func (m Model) resolvedTranscriptHeight(transcriptWidth int, screenHeight int, actionCard string, planCard string, activeExecutionCard string, statusLine string, shellTail string, composer string, footer string) int {
+	transcriptHeight := m.transcriptViewportHeight(actionCard, planCard, activeExecutionCard, statusLine, shellTail, composer, footer, screenHeight)
+	transcript := m.renderTranscript(transcriptWidth, transcriptHeight)
+	sections := []string{transcript}
+	if actionCard != "" {
+		sections = append(sections, actionCard)
+	}
+	if planCard != "" {
+		sections = append(sections, planCard)
+	}
+	if activeExecutionCard != "" {
+		sections = append(sections, activeExecutionCard)
+	}
+	if statusLine != "" {
+		sections = append(sections, statusLine)
+	}
+	if shellTail != "" {
+		sections = append(sections, shellTail)
+	}
+	sections = append(sections, composer, footer)
+	bodyHeight := lipgloss.Height(strings.Join(sections, "\n"))
+	if fillerHeight := screenHeight - bodyHeight; fillerHeight > 0 {
+		transcriptHeight += fillerHeight
+	}
+	return transcriptHeight
 }
 
 func (m Model) renderDetailView() string {
@@ -829,18 +971,25 @@ func (m Model) renderSettingsView() string {
 		m.styles.detailTitle.Render("SETTINGS"),
 		m.styles.detailMeta.Render("Manage providers and choose the active model"),
 	}
+	if strings.TrimSpace(m.settingsBanner) != "" {
+		lines = append(lines, m.styles.detailMeta.Render(m.settingsBanner), "")
+	}
 
 	switch m.settingsStep {
+	case settingsStepSession:
+		lines = append(lines, m.styles.detailBody.Render("Session Settings"))
+		lines = append(lines, m.styles.detailMeta.Render("Adjust session-local behavior such as approval level."))
+		lines = append(lines, m.renderSettingsApprovalModes(contentWidth)...)
 	case settingsStepProviders:
-		lines = append(lines, m.styles.detailBody.Render("Providers"))
+		lines = append(lines, m.styles.detailBody.Render("Configure Providers"))
 		lines = append(lines, m.styles.detailMeta.Render("Edit provider settings and save them for future sessions."))
 		lines = append(lines, m.renderSettingsProviders(contentWidth)...)
 	case settingsStepActiveProvider:
-		lines = append(lines, m.styles.detailBody.Render("Active Provider"))
+		lines = append(lines, m.styles.detailBody.Render("Change Active Provider"))
 		lines = append(lines, m.styles.detailMeta.Render("Choose which configured provider Shuttle should use right now."))
 		lines = append(lines, m.renderSettingsProviders(contentWidth)...)
 	case settingsStepActiveModels:
-		lines = append(lines, m.styles.detailBody.Render("Active Model"))
+		lines = append(lines, m.styles.detailBody.Render("Select Model"))
 		lines = append(lines, m.styles.detailMeta.Render("Choose the provider/model Shuttle should use right now."))
 		lines = append(lines, m.renderSettingsModels(contentWidth)...)
 	case settingsStepProviderForm:
@@ -862,6 +1011,13 @@ func (m Model) renderSettingsView() string {
 func helpContentLines(width int, mode Mode, canSendKeys bool) []string {
 	lines := []string{
 		"# Slash Commands",
+		"/help: open the in-app help view",
+		"/approvals: show the current session approval mode",
+		"/approvals confirm: keep safe commands as proposals and require approval for risky actions",
+		"/approvals auto: auto-run safe local inspection and test commands during agent work",
+		"/approvals dangerous: disable Shuttle approval gating for agent commands and patches in this session",
+		"/new: start a fresh task without restarting Shuttle or losing shell continuity",
+		"/compact: summarize older task context and keep a shorter live context window",
 		"/onboard or /onboarding: open provider onboarding",
 		"/provider or /providers: open the active provider picker",
 		"/model or /models: open the active model picker",
@@ -877,16 +1033,18 @@ func helpContentLines(width int, mode Mode, canSendKeys bool) []string {
 		"Ctrl+O: open the selected transcript entry in the full detail view",
 		"PgUp/PgDn: scroll transcript",
 		"Ctrl+U / Ctrl+D: half-page transcript scroll",
-		"Home / End: jump transcript to top or bottom",
+		"Ctrl+Home / Ctrl+End: jump transcript to top or bottom",
 		"Alt+Up / Alt+Down: move transcript selection",
 	}
 	if mode == ShellMode {
-		lines = append(lines, "Up / Down: shell command history")
+		lines = append(lines, "Up / Down: shell command history, or move within multiline composer text")
 	} else {
-		lines = append(lines, "Up / Down: agent prompt history")
+		lines = append(lines, "Up / Down: agent prompt history, or move within multiline composer text")
 	}
 	lines = append(lines,
+		"Home / End: move to the start or end of the current composer line",
 		"Right Arrow: accept the current ghost-text completion",
+		"Insert: toggle composer overwrite mode",
 		"Esc: clear the composer, collapse inline transcript detail, or interrupt active work",
 		"",
 		"# Composer",
@@ -912,7 +1070,8 @@ func helpContentLines(width int, mode Mode, canSendKeys bool) []string {
 		"Click a transcript icon/tag: expand or collapse inline detail for that entry",
 		"Mouse wheel over transcript: scroll transcript",
 		"Click shell label in the shell-tail block: same as F2 take control",
-		"Shift-select: use terminal selection/copy while Bubble Tea mouse mode is active",
+		"Shift-drag: use your terminal's normal text selection while Bubble Tea mouse mode is active",
+		"Ctrl+Shift+C / Ctrl+Shift+V: use your terminal copy and paste shortcuts for selected text and pasted input",
 		"",
 		"# Modes",
 		"Shell mode: direct shell commands from $>",
@@ -943,6 +1102,22 @@ func (m Model) renderSettingsMenu(contentWidth int) []string {
 	if contentWidth > 0 {
 		lines = append(lines, m.styles.detailMeta.Render("Current model: "+currentProviderModelLabel(m.activeProvider)))
 	}
+	return lines
+}
+
+func (m Model) renderSettingsApprovalModes(contentWidth int) []string {
+	entries := settingsApprovalEntries()
+	lines := make([]string, 0, len(entries)*3)
+	currentMode := controller.ApprovalModeConfirm
+	if m.ctrl != nil {
+		currentMode = m.ctrl.ApprovalMode()
+	}
+	for index, entry := range entries {
+		current := entry.mode == currentMode
+		lines = append(lines, m.renderSettingsRow(entry.label, index == m.settingsApprovalIdx, current, false))
+		lines = append(lines, m.renderSettingsMetaLine(controller.ApprovalModeStatusBody(entry.mode), index == m.settingsApprovalIdx, current, false))
+	}
+	_ = contentWidth
 	return lines
 }
 
@@ -1323,9 +1498,18 @@ func currentProviderModelLabel(profile provider.Profile) string {
 
 func settingsMenuEntries() []settingsMenuEntry {
 	return []settingsMenuEntry{
-		{label: "Providers"},
-		{label: "Active Provider"},
-		{label: "Active Model"},
+		{label: "Session Settings"},
+		{label: "Configure Providers"},
+		{label: "Change Active Provider"},
+		{label: "Select Model"},
+	}
+}
+
+func settingsApprovalEntries() []settingsApprovalEntry {
+	return []settingsApprovalEntry{
+		{label: "Confirm", mode: controller.ApprovalModeConfirm},
+		{label: "Auto", mode: controller.ApprovalModeAuto},
+		{label: "Dangerous", mode: controller.ApprovalModeDanger},
 	}
 }
 
@@ -1529,7 +1713,7 @@ func layoutActionCardButtons(buttons []actionCardButton, width int) []actionCard
 					hits: []actionCardButtonHit{{
 						action: button.action,
 						start:  0,
-						end:    segmentWidth,
+						end:    segmentWidth + 1,
 					}},
 				})
 			}
@@ -1554,8 +1738,8 @@ func layoutActionCardButtons(buttons []actionCardButton, width int) []actionCard
 		current.text += label
 		current.hits = append(current.hits, actionCardButtonHit{
 			action: button.action,
-			start:  start,
-			end:    start + labelWidth,
+			start:  max(0, start-1),
+			end:    start + labelWidth + 1,
 		})
 		currentWidth = start + labelWidth
 	}
@@ -1639,6 +1823,8 @@ func onboardingFooter(width int, step onboardingStep) string {
 func settingsFooter(width int, step settingsStep) string {
 	if width < 72 {
 		switch step {
+		case settingsStepSession:
+			return "Enter set mode  Esc back  Up/Down move  F2 shell  F10 close"
 		case settingsStepProviders:
 			return "Enter edit  Esc back  Up/Down move  F2 shell  F10 close"
 		case settingsStepActiveProvider:
@@ -1646,13 +1832,15 @@ func settingsFooter(width int, step settingsStep) string {
 		case settingsStepActiveModels:
 			return "Type filter  Shift+I info  Enter activate  Esc clear/back  Pg page  F2 shell  F10 close"
 		case settingsStepProviderForm:
-			return "Type edit  Tab next  Enter save  F8 save+activate  Esc back  F2 shell  F10 close"
+			return "Type edit  Tab next  Enter save  F7 test  F8 save+activate  Esc back  F2 shell  F10 close"
 		default:
 			return "Enter open  Esc close  Up/Down move  F2 shell  F10 close"
 		}
 	}
 
 	switch step {
+	case settingsStepSession:
+		return "Enter set session approval mode  Esc back  Up/Down move  F2 shell  F10 close"
 	case settingsStepProviders:
 		return "Enter edit provider settings  Esc back  Up/Down move  F2 shell  F10 close"
 	case settingsStepActiveProvider:
@@ -1660,7 +1848,7 @@ func settingsFooter(width int, step settingsStep) string {
 	case settingsStepActiveModels:
 		return "Type to filter models  Shift+I toggle info  Enter switch active model  Esc clear filter/back  Up/Down move  PgUp/PgDn page  F2 shell  F10 close"
 	case settingsStepProviderForm:
-		return "Type to edit fields  Tab/Up/Down move  Enter save settings  F8 save and activate  Esc back  F2 shell  F10 close"
+		return "Type to edit fields  Tab/Up/Down move  Enter save settings  F7 test provider  F8 save and activate  Esc back  F2 shell  F10 close"
 	default:
 		return "Enter open section  Esc close  Up/Down move  F2 shell  F10 close"
 	}

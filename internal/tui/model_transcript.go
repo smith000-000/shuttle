@@ -114,7 +114,12 @@ func (m Model) renderBodyStyle(entry Entry) lipgloss.Style {
 
 func (m Model) renderTranscript(width int, height int) string {
 	lines := m.transcriptWindow(m.transcriptLines(width), height)
-	return m.styles.transcript.Width(width).Height(height).MaxWidth(width).Render(strings.Join(lines, "\n"))
+	for index, line := range lines {
+		if line == "" {
+			lines[index] = strings.Repeat(" ", max(1, width))
+		}
+	}
+	return m.styles.transcript.Width(width).MaxWidth(width).Render(strings.Join(lines, "\n"))
 }
 
 func (m Model) transcriptViewportHeight(actionCard string, planCard string, activeExecutionCard string, statusLine string, shellTail string, composer string, footer string, screenHeight int) int {
@@ -149,7 +154,7 @@ func (m Model) transcriptWindow(lines []string, height int) []string {
 	window := append([]string(nil), lines[start:end]...)
 	if len(window) < height {
 		padding := make([]string, height-len(window))
-		window = append(window, padding...)
+		window = append(padding, window...)
 	}
 
 	return window
@@ -179,7 +184,7 @@ func (m Model) transcriptWindowDisplay(lines []transcriptRenderLine, height int)
 		for i := len(window); i < height; i++ {
 			padding = append(padding, transcriptRenderLine{entryIndex: -1})
 		}
-		window = append(window, padding...)
+		window = append(padding, window...)
 	}
 
 	return window
@@ -228,7 +233,7 @@ func (m Model) currentTranscriptHeight() int {
 		screenHeight = 24
 	}
 
-	return m.transcriptViewportHeight(actionCard, planCard, activeExecutionCard, statusLine, shellTail, composer, footer, screenHeight)
+	return m.resolvedTranscriptHeight(width, screenHeight, actionCard, planCard, activeExecutionCard, statusLine, shellTail, composer, footer)
 }
 
 func (m Model) currentTranscriptWidth() int {
@@ -321,14 +326,10 @@ func (m Model) inlineDetailLines(entry Entry, width int) []string {
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	switch msg.Button {
 	case tea.MouseButtonWheelUp:
-		if m.mouseInTranscript(msg.X, msg.Y) {
-			m.scrollTranscriptBy(-3)
-		}
+		m.scrollTranscriptBy(-3)
 		return m, nil
 	case tea.MouseButtonWheelDown:
-		if m.mouseInTranscript(msg.X, msg.Y) {
-			m.scrollTranscriptBy(3)
-		}
+		m.scrollTranscriptBy(3)
 		return m, nil
 	}
 
@@ -441,6 +442,11 @@ func (m Model) performActionCardAction(action actionCardAction) (tea.Model, tea.
 	switch action {
 	case actionCardContinueStartup:
 		m.startupNotice = nil
+		return m, nil
+	case actionCardConfirmDangerous:
+		return m.confirmDangerousApprovalMode()
+	case actionCardCancelDangerous:
+		m.pendingDangerousConfirm = nil
 		return m, nil
 	case actionCardConfirmFullscreen:
 		return m.confirmFullscreenAction()

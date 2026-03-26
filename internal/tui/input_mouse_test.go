@@ -40,16 +40,26 @@ func TestF1OpensAndClosesHelpView(t *testing.T) {
 }
 
 func TestHelpViewContainsSlashCommandsAndShortcuts(t *testing.T) {
-	model := NewModel(fakeWorkspace(), nil)
-	model.width = 100
-	model.height = 48
-	model.helpOpen = true
-
-	view := model.View()
-	for _, fragment := range []string{"HELP", "/onboard", "/provider", "/model", "/quit", "Ctrl+]", "F2", "Shift-select"} {
+	view := strings.Join(helpContentLines(120, ShellMode, false), "\n")
+	for _, fragment := range []string{"/help", "/approvals", "/approvals dangerous", "/new", "/compact", "/onboard", "/provider", "/model", "/quit", "Ctrl+]", "F2", "Shift-drag", "Ctrl+Shift+C / Ctrl+Shift+V"} {
 		if !strings.Contains(view, fragment) {
 			t.Fatalf("expected help view to contain %q, got %q", fragment, view)
 		}
+	}
+}
+
+func TestSlashHelpOpensHelpView(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.mode = AgentMode
+	model.input = "/help"
+
+	updated, cmd := model.submit()
+	next := updated.(Model)
+	if cmd != nil {
+		t.Fatal("expected /help to open synchronously")
+	}
+	if !next.helpOpen {
+		t.Fatal("expected /help to open the help view")
 	}
 }
 
@@ -277,6 +287,46 @@ func TestMouseWheelScrollsTranscript(t *testing.T) {
 	}
 	if next.transcriptScroll >= next.maxTranscriptScroll() {
 		t.Fatalf("expected wheel up to move transcript above the bottom, got scroll=%d max=%d", next.transcriptScroll, next.maxTranscriptScroll())
+	}
+}
+
+func TestMouseWheelOverComposerStillScrollsTranscript(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.width = 80
+	model.height = 8
+	model.entries = []Entry{
+		{Title: "system", Body: "one"},
+		{Title: "system", Body: "two"},
+		{Title: "system", Body: "three"},
+		{Title: "system", Body: "four"},
+		{Title: "system", Body: "five"},
+		{Title: "system", Body: "six"},
+		{Title: "system", Body: "seven"},
+		{Title: "system", Body: "eight"},
+		{Title: "system", Body: "nine"},
+		{Title: "system", Body: "ten"},
+	}
+	model.mode = AgentMode
+	model.setInput("draft prompt")
+	model.agentHistory.entries = []string{"older prompt"}
+
+	composerY := model.currentTranscriptHeight() + 1
+	updated, _ := model.Update(tea.MouseMsg{
+		X:      2,
+		Y:      composerY,
+		Button: tea.MouseButtonWheelUp,
+		Action: tea.MouseActionPress,
+	})
+	next := updated.(Model)
+
+	if next.transcriptFollow {
+		t.Fatal("expected wheel over composer to unpin transcript follow")
+	}
+	if next.transcriptScroll >= next.maxTranscriptScroll() {
+		t.Fatalf("expected wheel over composer to move transcript above bottom, got scroll=%d max=%d", next.transcriptScroll, next.maxTranscriptScroll())
+	}
+	if next.input != "draft prompt" {
+		t.Fatalf("expected composer input to remain unchanged, got %q", next.input)
 	}
 }
 
@@ -540,6 +590,101 @@ func TestMouseClickApprovalRefineBeginsRefinement(t *testing.T) {
 	if next.refiningApproval == nil || next.mode != AgentMode {
 		t.Fatalf("expected approval refine mode from mouse click, got refining=%#v mode=%s", next.refiningApproval, next.mode)
 	}
+}
+
+func TestMouseClickPatchApprovalButtonsWork(t *testing.T) {
+	t.Run("approve", func(t *testing.T) {
+		ctrl := &fakeController{}
+		model := NewModel(fakeWorkspace(), ctrl)
+		model.width = 80
+		model.height = 24
+		model.pendingApproval = &controller.ApprovalRequest{
+			ID:      "approval-1",
+			Kind:    controller.ApprovalPatch,
+			Title:   "Apply patch?",
+			Summary: strings.Repeat("This patch updates several files and should still leave the card wrapped correctly. ", 2),
+			Patch:   "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+		}
+
+		x, y := actionCardButtonPoint(t, model, 0)
+		updated, cmd := model.Update(tea.MouseMsg{
+			X:      x,
+			Y:      y,
+			Button: tea.MouseButtonLeft,
+			Action: tea.MouseActionPress,
+		})
+		model = updated.(Model)
+		msg := controllerEventsFromCmd(t, cmd)
+		if len(ctrl.decisions) != 1 || ctrl.decisions[0].decision != controller.DecisionApprove {
+			t.Fatalf("expected patch approve decision from mouse click, got %#v", ctrl.decisions)
+		}
+		updated, _ = model.Update(msg)
+		model = updated.(Model)
+		if model.pendingApproval != nil {
+			t.Fatalf("expected patch approval to clear after approve, got %#v", model.pendingApproval)
+		}
+	})
+
+	t.Run("reject", func(t *testing.T) {
+		ctrl := &fakeController{}
+		model := NewModel(fakeWorkspace(), ctrl)
+		model.width = 80
+		model.height = 24
+		model.pendingApproval = &controller.ApprovalRequest{
+			ID:      "approval-1",
+			Kind:    controller.ApprovalPatch,
+			Title:   "Apply patch?",
+			Summary: "Need approval",
+			Patch:   "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+		}
+
+		x, y := actionCardButtonPoint(t, model, 1)
+		updated, cmd := model.Update(tea.MouseMsg{
+			X:      x,
+			Y:      y,
+			Button: tea.MouseButtonLeft,
+			Action: tea.MouseActionPress,
+		})
+		model = updated.(Model)
+		msg := controllerEventsFromCmd(t, cmd)
+		if len(ctrl.decisions) != 1 || ctrl.decisions[0].decision != controller.DecisionReject {
+			t.Fatalf("expected patch reject decision from mouse click, got %#v", ctrl.decisions)
+		}
+		updated, _ = model.Update(msg)
+		model = updated.(Model)
+		if model.pendingApproval != nil {
+			t.Fatalf("expected patch approval to clear after reject, got %#v", model.pendingApproval)
+		}
+	})
+
+	t.Run("refine", func(t *testing.T) {
+		ctrl := &fakeController{}
+		model := NewModel(fakeWorkspace(), ctrl)
+		model.width = 80
+		model.height = 24
+		model.pendingApproval = &controller.ApprovalRequest{
+			ID:      "approval-1",
+			Kind:    controller.ApprovalPatch,
+			Title:   "Apply patch?",
+			Summary: "Need approval",
+			Patch:   "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+		}
+
+		x, y := actionCardButtonPoint(t, model, 2)
+		updated, cmd := model.Update(tea.MouseMsg{
+			X:      x,
+			Y:      y,
+			Button: tea.MouseButtonLeft,
+			Action: tea.MouseActionPress,
+		})
+		next := updated.(Model)
+		if cmd == nil {
+			t.Fatal("expected patch approval refine click to return command")
+		}
+		if next.refiningApproval == nil || next.mode != AgentMode {
+			t.Fatalf("expected patch approval refine mode from mouse click, got refining=%#v mode=%s", next.refiningApproval, next.mode)
+		}
+	})
 }
 
 func TestMouseClickProposalApproveRunsCommand(t *testing.T) {

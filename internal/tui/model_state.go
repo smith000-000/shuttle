@@ -848,6 +848,19 @@ func (m Model) currentSettingsProviderIndex() int {
 	return 0
 }
 
+func currentSettingsApprovalIndex(ctrl controller.Controller) int {
+	mode := controller.ApprovalModeConfirm
+	if ctrl != nil {
+		mode = ctrl.ApprovalMode()
+	}
+	for index, entry := range settingsApprovalEntries() {
+		if entry.mode == mode {
+			return index
+		}
+	}
+	return 0
+}
+
 func (m Model) currentSettingsModelIndex() int {
 	for index, choice := range m.settingsModels {
 		if choice.profile.Preset == m.activeProvider.Preset && choice.model.ID == m.activeProvider.Model {
