@@ -47,6 +47,8 @@ type Config struct {
 	ProviderAPIKey                string
 	ProviderAPIKeyEnvVar          string
 	ProviderCLICommand            string
+	RuntimeType                   string
+	RuntimeCommand                string
 	AllowPlaintextProviderSecrets bool
 	ProviderFlagsSet              bool
 }
@@ -77,6 +79,8 @@ func Parse(args []string) (Config, error) {
 	providerAuthMethod := envOrDefault("SHUTTLE_AUTH", "auto")
 	providerModel := os.Getenv("SHUTTLE_MODEL")
 	providerBaseURL := os.Getenv("SHUTTLE_BASE_URL")
+	runtimeType := envOrDefault("SHUTTLE_RUNTIME", "builtin")
+	runtimeCommand := os.Getenv("SHUTTLE_RUNTIME_COMMAND")
 	traceMode, err := resolveTraceMode(os.Getenv("SHUTTLE_TRACE"), os.Getenv("SHUTTLE_TRACE_MODE"))
 	if err != nil {
 		return Config{}, err
@@ -103,11 +107,13 @@ func Parse(args []string) (Config, error) {
 	fs.StringVar(&cfg.Track, "track", "", "inject a tracked shell command into the top pane and wait for its result")
 	fs.BoolVar(&cfg.TUI, "tui", false, "run the minimal interactive TUI shell")
 	fs.BoolVar(&cfg.InjectEnter, "enter", true, "append Enter when injecting a command")
-	fs.StringVar(&cfg.ProviderType, "provider", providerType, "agent provider to use: mock, openai, openrouter, openwebui, anthropic, ollama, codex_cli, or custom")
-	fs.StringVar(&cfg.ProviderAuthMethod, "auth", providerAuthMethod, "auth method for the selected provider: auto, api_key, codex_login, or none")
+	fs.StringVar(&cfg.ProviderType, "provider", providerType, "inference provider to use: mock, openai, openrouter, openwebui, anthropic, ollama, codex_cli, or custom")
+	fs.StringVar(&cfg.ProviderAuthMethod, "auth", providerAuthMethod, "auth method for the selected provider: auto, api_key, codex_login, inherited_env, or none")
 	fs.StringVar(&cfg.ProviderModel, "model", providerModel, "model name for the selected provider")
 	fs.StringVar(&cfg.ProviderBaseURL, "base-url", providerBaseURL, "base URL for the selected provider API")
 	fs.StringVar(&cfg.ProviderCLICommand, "cli-command", providerCLICommand, "CLI command path for CLI-backed providers")
+	fs.StringVar(&cfg.RuntimeType, "runtime", runtimeType, "coding runtime to use: builtin, pi, codex_sdk, or auto")
+	fs.StringVar(&cfg.RuntimeCommand, "runtime-command", runtimeCommand, "command path for selected coding runtime")
 	fs.BoolVar(&cfg.AllowPlaintextProviderSecrets, "allow-plaintext-provider-secrets", allowPlaintextProviderSecrets, "allow less-secure local plaintext fallback for provider secrets when OS keyring is unavailable")
 
 	if err := fs.Parse(args); err != nil {
@@ -115,7 +121,7 @@ func Parse(args []string) (Config, error) {
 	}
 	fs.Visit(func(flag *flag.Flag) {
 		switch flag.Name {
-		case "provider", "auth", "model", "base-url", "cli-command":
+		case "provider", "auth", "model", "base-url", "cli-command", "runtime", "runtime-command":
 			cfg.ProviderFlagsSet = true
 		}
 	})
@@ -164,6 +170,7 @@ func Parse(args []string) (Config, error) {
 		return Config{}, errors.New("trace mode must be one of: off, safe, sensitive")
 	}
 	cfg.ProviderType = normalizeProviderType(cfg.ProviderType)
+	cfg.RuntimeType = normalizeRuntimeType(cfg.RuntimeType)
 	authMethod, err := normalizeProviderAuthMethod(cfg.ProviderAuthMethod)
 	if err != nil {
 		return Config{}, err
@@ -278,6 +285,21 @@ func normalizeProviderType(value string) string {
 	}
 }
 
+func normalizeRuntimeType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "builtin":
+		return "builtin"
+	case "auto":
+		return "auto"
+	case "codex-sdk":
+		return "codex_sdk"
+	case "pi-runtime":
+		return "pi"
+	default:
+		return strings.ToLower(strings.TrimSpace(value))
+	}
+}
+
 func normalizeProviderAuthMethod(value string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "", "auto":
@@ -286,10 +308,12 @@ func normalizeProviderAuthMethod(value string) (string, error) {
 		return "api_key", nil
 	case "codex_login":
 		return "codex_login", nil
+	case "inherited_env":
+		return "inherited_env", nil
 	case "none":
 		return "none", nil
 	default:
-		return "", errors.New("auth method must be one of: auto, api_key, codex_login, none")
+		return "", errors.New("auth method must be one of: auto, api_key, codex_login, inherited_env, none")
 	}
 }
 
