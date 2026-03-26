@@ -12,6 +12,7 @@ import (
 	"aiterm/internal/controller"
 	"aiterm/internal/logging"
 	"aiterm/internal/provider"
+	"aiterm/internal/securefs"
 	"aiterm/internal/shell"
 	"aiterm/internal/tmux"
 	"aiterm/internal/tui"
@@ -43,6 +44,11 @@ func New(cfg config.Config, logger *slog.Logger) *App {
 
 func (a *App) Run(ctx context.Context) (Result, error) {
 	socketTarget := tmux.ResolveSocketTarget(a.cfg.TmuxSocket)
+	if filepath.IsAbs(socketTarget) {
+		if err := securefs.EnsurePrivateDir(filepath.Dir(socketTarget)); err != nil {
+			return Result{}, fmt.Errorf("prepare tmux runtime directory: %w", err)
+		}
+	}
 	historyFile := filepath.Join(a.cfg.StateDir, "shell_history")
 	ensureWorkspace := func(ctx context.Context, client *tmux.Client, startDir string) error {
 		_, _, err := tmux.BootstrapShellSession(
@@ -61,6 +67,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	}
 	logging.Trace(
 		"app.run.begin",
+		"workspace_id", a.cfg.WorkspaceID,
 		"session", a.cfg.SessionName,
 		"socket", socketTarget,
 		"tui", a.cfg.TUI,

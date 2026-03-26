@@ -54,6 +54,7 @@ func main() {
 	logging.Trace(
 		"app.start",
 		"build", version.String(),
+		"workspace_id", cfg.WorkspaceID,
 		"session", cfg.SessionName,
 		"socket", cfg.TmuxSocket,
 		"start_dir", cfg.StartDir,
