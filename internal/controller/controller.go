@@ -124,6 +124,7 @@ func normalizeSessionContext(session SessionContext) SessionContext {
 	session.LocalWorkspaceRoot = normalizeWorkingDirectory(session.LocalWorkspaceRoot)
 	session.UserShellHistoryFile = strings.TrimSpace(session.UserShellHistoryFile)
 	session.RecentShellOutput = strings.TrimSpace(session.RecentShellOutput)
+	session.ApprovalMode = normalizeApprovalMode(session.ApprovalMode)
 	session.TrackedShell.SessionName = strings.TrimSpace(session.TrackedShell.SessionName)
 	session.TrackedShell.PaneID = strings.TrimSpace(session.TrackedShell.PaneID)
 	session.RecentManualCommands = trimStringSlice(session.RecentManualCommands)

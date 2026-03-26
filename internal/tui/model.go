@@ -61,6 +61,7 @@ type controllerEventsMsg struct {
 }
 
 type busyTickMsg time.Time
+type shellContextPollTickMsg time.Time
 
 type refreshedShellContextMsg struct {
 	context *shell.PromptContext
@@ -89,6 +90,8 @@ type actionCardAction string
 
 const (
 	actionCardContinueStartup   actionCardAction = "continue_startup"
+	actionCardConfirmDangerous  actionCardAction = "confirm_dangerous"
+	actionCardCancelDangerous   actionCardAction = "cancel_dangerous"
 	actionCardConfirmFullscreen actionCardAction = "confirm_fullscreen"
 	actionCardCancelFullscreen  actionCardAction = "cancel_fullscreen"
 	actionCardTakeControl       actionCardAction = "take_control"
@@ -154,9 +157,21 @@ type fullscreenAction struct {
 	ApprovalID string
 }
 
+type contextActionKind string
+
+const (
+	contextActionNone    contextActionKind = ""
+	contextActionNewTask contextActionKind = "new_task"
+	contextActionCompact contextActionKind = "compact_task"
+)
+
 type startupSecurityNotice struct {
 	Title string
 	Body  string
+}
+
+type dangerousApprovalConfirm struct {
+	mode controller.ApprovalMode
 }
 
 type providerSwitchedMsg struct {
@@ -202,6 +217,7 @@ type settingsStep string
 
 const (
 	settingsStepMenu           settingsStep = "menu"
+	settingsStepSession        settingsStep = "session"
 	settingsStepProviders      settingsStep = "providers"
 	settingsStepActiveProvider settingsStep = "active_provider"
 	settingsStepActiveModels   settingsStep = "active_models"
@@ -210,6 +226,11 @@ const (
 
 type settingsMenuEntry struct {
 	label string
+}
+
+type settingsApprovalEntry struct {
+	label string
+	mode  controller.ApprovalMode
 }
 
 type settingsProviderEntry struct {
@@ -235,6 +256,11 @@ type settingsProviderSavedMsg struct {
 	err        error
 	persistErr error
 	activated  bool
+}
+
+type settingsProviderTestedMsg struct {
+	profile provider.Profile
+	err     error
 }
 
 const (
@@ -305,6 +331,7 @@ type Model struct {
 	lastCheckInAt               time.Time
 	lastInterruptNoticeID       string
 	activeProvider              provider.Profile
+	overwriteMode               bool
 	onboardingOpen              bool
 	onboardingStep              onboardingStep
 	onboardingIndex             int
@@ -317,9 +344,11 @@ type Model struct {
 	loadModels                  func(provider.Profile) ([]provider.ModelOption, error)
 	switchProvider              func(provider.Profile, *shell.PromptContext) (controller.Controller, provider.Profile, error)
 	saveProvider                func(provider.Profile) error
+	testProvider                func(provider.Profile) error
 	settingsOpen                bool
 	settingsStep                settingsStep
 	settingsIndex               int
+	settingsApprovalIdx         int
 	settingsProviders           []settingsProviderEntry
 	settingsProviderIdx         int
 	settingsConfig              *onboardingFormState
@@ -329,30 +358,33 @@ type Model struct {
 	settingsModelFilter         string
 	settingsModelScope          provider.ProviderPreset
 	settingsModelInfo           bool
+	settingsBanner              string
 	lastModelInfo               *controller.AgentModelInfo
+	pendingContextAction        contextActionKind
+	pendingDangerousConfirm     *dangerousApprovalConfirm
 	completion                  *composerCompletion
 	styles                      styles
 }
 
 func NewModel(workspace tmux.Workspace, ctrl controller.Controller) Model {
 	return Model{
-		workspace:        workspace,
-		ctrl:             ctrl,
-		mode:             ShellMode,
-		transcriptFollow: true,
-		entries: []Entry{
-			{
-				Title: "system",
-				Body:  fmt.Sprintf("Workspace ready. Top pane: %s. Bottom pane TUI is active.", workspace.TopPane.ID),
-			},
-			{
-				Title: "system",
-				Body:  "F1 help. Ctrl+] mode. Tab inserts a tab. Up/Down history. PgUp/PgDn scroll. Enter submit. F2 take control. F10 settings. /onboard setup. /provider and /model open pickers. /quit exits. Esc clear or interrupt. Ctrl+C quit.",
-			},
-		},
-		selectedEntry:     1,
+		workspace:         workspace,
+		ctrl:              ctrl,
+		mode:              ShellMode,
+		transcriptFollow:  true,
+		entries:           initialEntries(workspace),
+		selectedEntry:     0,
 		inlineDetailEntry: -1,
 		styles:            newStyles(),
+	}
+}
+
+func initialEntries(workspace tmux.Workspace) []Entry {
+	return []Entry{
+		{
+			Title: "system",
+			Body:  fmt.Sprintf("Workspace ready. Top pane: %s. Bottom pane TUI is active.", workspace.TopPane.ID),
+		},
 	}
 }
 
@@ -396,8 +428,13 @@ func (m Model) WithProviderOnboarding(
 	return m
 }
 
+func (m Model) WithProviderTester(tester func(provider.Profile) error) Model {
+	m.testProvider = tester
+	return m
+}
+
 func (m Model) Init() tea.Cmd {
-	return nil
+	return tea.Batch(m.refreshShellContextCmd(), tickShellContext())
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -426,6 +463,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.inFlightCancel = nil
 		if len(msg.events) > 0 {
 			m.syncActionState(msg.events)
+		}
+		contextAction := m.pendingContextAction
+		m.pendingContextAction = contextActionNone
+		contextActionSucceeded := msg.err == nil && !containsEventKind(msg.events, controller.EventError)
+		if contextActionSucceeded {
+			m.applySuccessfulContextAction(contextAction)
 		}
 		if len(eventEntries) > 0 {
 			m.entries = append(m.entries, eventEntries...)
@@ -707,7 +750,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		currentApprovalMode := controller.ApprovalModeConfirm
+		if m.ctrl != nil {
+			currentApprovalMode = m.ctrl.ApprovalMode()
+		}
 		m.ctrl = msg.ctrl
+		if m.ctrl != nil && currentApprovalMode != controller.ApprovalModeConfirm {
+			if _, err := m.ctrl.SetApprovalMode(context.Background(), currentApprovalMode); err == nil {
+				m.settingsApprovalIdx = currentSettingsApprovalIndex(m.ctrl)
+			}
+		}
 		m.activeProvider = msg.profile
 		m.startupNotice = startupNoticeForProfile(msg.profile)
 		m.onboardingOpen = false
@@ -723,6 +775,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.settingsStep = msg.settingsStep
 			m.settingsConfig = nil
 			m.settingsProviderIdx = m.currentSettingsProviderIndex()
+			m.settingsBanner = fmt.Sprintf("Active provider switched to %s.", msg.profile.Name)
 			if msg.settingsStep == settingsStepActiveModels {
 				m.applySettingsModelFilter()
 			}
@@ -738,6 +791,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.settingsModelIdx = 0
 			m.settingsModelFilter = ""
 			m.settingsModelInfo = false
+			m.settingsBanner = ""
 		}
 		m.pendingApproval = nil
 		m.pendingProposal = nil
@@ -796,6 +850,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.settingsModelCatalog = append([]settingsModelChoice(nil), msg.choices...)
 		m.settingsModelFilter = ""
 		m.settingsModelInfo = false
+		m.settingsBanner = ""
 		m.applySettingsModelFilter()
 		return m, nil
 	case settingsProviderSavedMsg:
@@ -812,7 +867,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.ctrl != nil {
+			currentApprovalMode := controller.ApprovalModeConfirm
+			if m.ctrl != nil {
+				currentApprovalMode = m.ctrl.ApprovalMode()
+			}
 			m.ctrl = msg.ctrl
+			if m.ctrl != nil && currentApprovalMode != controller.ApprovalModeConfirm {
+				if _, err := m.ctrl.SetApprovalMode(context.Background(), currentApprovalMode); err == nil {
+					m.settingsApprovalIdx = currentSettingsApprovalIndex(m.ctrl)
+				}
+			}
 			m.activeProvider = msg.profile
 		}
 		m.settingsStep = settingsStepProviders
@@ -822,6 +886,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.settingsModelIdx = 0
 		m.settingsModelFilter = ""
 		m.settingsModelInfo = false
+		if msg.activated {
+			m.settingsBanner = fmt.Sprintf("Activated %s.", msg.profile.Name)
+		} else {
+			m.settingsBanner = fmt.Sprintf("Saved %s.", msg.profile.Name)
+		}
 		if msg.persistErr != nil {
 			m.entries = append(m.entries, Entry{
 				Title: "error",
@@ -842,12 +911,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.selectedEntry = len(m.entries) - 1
 		m.clampSelection()
 		return m, nil
+	case settingsProviderTestedMsg:
+		m.busy = false
+		m.busyStartedAt = time.Time{}
+		m.inFlightCancel = nil
+		if msg.err != nil {
+			m.settingsBanner = fmt.Sprintf("Provider test failed for %s: %v", msg.profile.Name, msg.err)
+			return m, nil
+		}
+		m.settingsBanner = fmt.Sprintf("Provider test succeeded for %s.", msg.profile.Name)
+		return m, nil
 	case busyTickMsg:
 		if !m.busy && m.activeExecution == nil {
 			return m, nil
 		}
 
 		return m, tea.Batch(tickBusy(), m.pollShellTailCmd(), m.pollActiveExecutionCmd(), m.maybeExecutionCheckInCmd(time.Time(msg)))
+	case shellContextPollTickMsg:
+		if m.ctrl == nil {
+			return m, nil
+		}
+		return m, tea.Batch(tickShellContext(), m.refreshShellContextCmd())
 	case tea.MouseMsg:
 		if m.helpOpen || m.settingsOpen || m.onboardingOpen || m.detailOpen {
 			return m, nil
@@ -862,6 +946,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.helpOpen {
 			return m.updateHelp(msg)
+		}
+		if m.pendingDangerousConfirm != nil {
+			if handledModel, handled, cmd := m.handleActionCardKey(msg); handled {
+				return handledModel, cmd
+			}
+			if msg.Type == tea.KeyEsc {
+				m.pendingDangerousConfirm = nil
+				return m, nil
+			}
 		}
 		if m.settingsOpen {
 			return m.updateSettings(msg)
@@ -883,6 +976,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyF10:
 			return m.openSettings()
 		case tea.KeyEsc:
+			if m.pendingDangerousConfirm != nil {
+				m.pendingDangerousConfirm = nil
+				return m, nil
+			}
 			if m.sendingFullscreenKeys {
 				m.sendingFullscreenKeys = false
 				m.setInput("")
@@ -952,9 +1049,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.sendingFullscreenKeys {
+				m.moveCursorVertical(-1)
 				return m, nil
 			}
 			if m.composerLocked() {
+				return m, nil
+			}
+			if m.inputHasMultipleLines() {
+				m.moveCursorVertical(-1)
 				return m, nil
 			}
 			m.setInput(m.currentHistory().previous(m.input))
@@ -965,9 +1067,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.sendingFullscreenKeys {
+				m.moveCursorVertical(1)
 				return m, nil
 			}
 			if m.composerLocked() {
+				return m, nil
+			}
+			if m.inputHasMultipleLines() {
+				m.moveCursorVertical(1)
 				return m, nil
 			}
 			m.setInput(m.currentHistory().next(m.input))
@@ -1002,9 +1109,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.scrollTranscriptBy(m.pageScrollSize())
 			return m, nil
 		case tea.KeyHome:
-			m.scrollTranscriptToTop()
+			if m.sendingFullscreenKeys {
+				m.moveCursorToLineBoundary(false)
+				return m, nil
+			}
+			if m.composerLocked() {
+				return m, nil
+			}
+			m.moveCursorToLineBoundary(false)
 			return m, nil
 		case tea.KeyEnd:
+			if m.sendingFullscreenKeys {
+				m.moveCursorToLineBoundary(true)
+				return m, nil
+			}
+			if m.composerLocked() {
+				return m, nil
+			}
+			m.moveCursorToLineBoundary(true)
+			return m, nil
+		case tea.KeyCtrlHome:
+			m.scrollTranscriptToTop()
+			return m, nil
+		case tea.KeyCtrlEnd:
 			m.scrollTranscriptToBottom()
 			return m, nil
 		case tea.KeyCtrlU:
@@ -1032,6 +1159,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m.primaryAction()
 		case tea.KeyCtrlY:
+			if m.sendingFullscreenKeys {
+				return m.submitWithOptions(true)
+			}
 			return m.primaryAction()
 		case tea.KeyCtrlN:
 			if m.pendingProposal != nil {
@@ -1052,6 +1182,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.startupNotice != nil {
 				m.startupNotice = nil
 				return m, nil
+			}
+			if m.pendingDangerousConfirm != nil {
+				return m.confirmDangerousApprovalMode()
 			}
 			if !m.sendingFullscreenKeys && m.composerLocked() {
 				return m, nil
@@ -1076,6 +1209,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.deleteAtCursor()
+			return m, nil
+		case tea.KeyInsert:
+			m.toggleOverwriteMode()
 			return m, nil
 		case tea.KeySpace:
 			if m.sendingFullscreenKeys {
@@ -1103,8 +1239,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if len(msg.Runes) == 1 && strings.TrimSpace(m.input) == "" && m.editingProposal == nil && m.refiningProposal == nil && m.refiningApproval == nil {
 					switch msg.Runes[0] {
 					case 'Y':
+						if m.pendingDangerousConfirm != nil {
+							return m.confirmDangerousApprovalMode()
+						}
 						return m.primaryAction()
 					case 'N':
+						if m.pendingDangerousConfirm != nil {
+							m.pendingDangerousConfirm = nil
+							return m, nil
+						}
 						if m.pendingProposal != nil {
 							return m.rejectProposal()
 						}
@@ -1140,7 +1283,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) composerLocked() bool {
-	return (m.startupNotice != nil || m.pendingFullscreen != nil || m.pendingProposal != nil || m.pendingApproval != nil) && m.editingProposal == nil && m.refiningProposal == nil && m.refiningApproval == nil
+	return (m.startupNotice != nil || m.pendingDangerousConfirm != nil || m.pendingFullscreen != nil || m.pendingProposal != nil || m.pendingApproval != nil) && m.editingProposal == nil && m.refiningProposal == nil && m.refiningApproval == nil
 }
 
 func (m Model) handleActionCardKey(msg tea.KeyMsg) (tea.Model, bool, tea.Cmd) {
@@ -1156,6 +1299,18 @@ func (m Model) handleActionCardKey(msg tea.KeyMsg) (tea.Model, bool, tea.Cmd) {
 		switch unicode.ToUpper(msg.Runes[0]) {
 		case 'Y':
 			m.startupNotice = nil
+			return m, true, nil
+		}
+		return m, true, nil
+	}
+
+	if m.pendingDangerousConfirm != nil {
+		switch unicode.ToUpper(msg.Runes[0]) {
+		case 'Y':
+			model, cmd := m.confirmDangerousApprovalMode()
+			return model, true, cmd
+		case 'N':
+			m.pendingDangerousConfirm = nil
 			return m, true, nil
 		}
 		return m, true, nil
@@ -1202,13 +1357,17 @@ func (m Model) handleActionCardKey(msg tea.KeyMsg) (tea.Model, bool, tea.Cmd) {
 }
 
 func (m Model) submit() (tea.Model, tea.Cmd) {
-	if m.startupNotice != nil && !m.sendingFullscreenKeys {
+	return m.submitWithOptions(false)
+}
+
+func (m Model) submitWithOptions(appendEnterToFullscreenKeys bool) (tea.Model, tea.Cmd) {
+	if (m.startupNotice != nil || m.pendingDangerousConfirm != nil) && !m.sendingFullscreenKeys {
 		return m, nil
 	}
 
 	text := strings.TrimSpace(m.input)
 	if m.sendingFullscreenKeys {
-		rawKeys := normalizeFullscreenKeys(m.input)
+		rawKeys := fullscreenKeysForSubmit(m.input, appendEnterToFullscreenKeys)
 		if rawKeys == "" {
 			return m, nil
 		}
@@ -1318,7 +1477,9 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleComposerCommand(text string) (bool, tea.Model, tea.Cmd) {
-	switch strings.ToLower(strings.TrimSpace(text)) {
+	trimmed := strings.TrimSpace(text)
+	lower := strings.ToLower(trimmed)
+	switch lower {
 	case "/onboard", "/onboarding":
 		m.input = ""
 		m.currentHistory().reset()
@@ -1334,21 +1495,128 @@ func (m Model) handleComposerCommand(text string) (bool, tea.Model, tea.Cmd) {
 		m.currentHistory().reset()
 		next, cmd := m.openActiveModelSettings()
 		return true, next, cmd
+	case "/help":
+		m.input = ""
+		m.currentHistory().reset()
+		m.helpOpen = true
+		m.helpScroll = 0
+		return true, m, nil
+	case "/new":
+		m.input = ""
+		m.currentHistory().reset()
+		if m.ctrl == nil {
+			m.appendTranscriptEntry(Entry{Title: "error", Body: "controller is not available"})
+			return true, m, nil
+		}
+		next, cmd := m.startControllerRequest(func(next *Model) {
+			next.pendingContextAction = contextActionNewTask
+		}, func(ctx context.Context) ([]controller.TranscriptEvent, error) {
+			return m.ctrl.StartNewTask(ctx)
+		}, false)
+		return true, next, cmd
+	case "/compact":
+		m.input = ""
+		m.currentHistory().reset()
+		if m.ctrl == nil {
+			m.appendTranscriptEntry(Entry{Title: "error", Body: "controller is not available"})
+			return true, m, nil
+		}
+		next, cmd := m.startControllerRequest(func(next *Model) {
+			next.pendingContextAction = contextActionCompact
+		}, func(ctx context.Context) ([]controller.TranscriptEvent, error) {
+			return m.ctrl.CompactTask(ctx)
+		}, false)
+		return true, next, cmd
 	case "/quit", "/exit":
 		m.input = ""
 		m.currentHistory().reset()
 		return true, m, tea.Quit
 	default:
-		if strings.HasPrefix(strings.TrimSpace(text), "/") {
+		if strings.HasPrefix(trimmed, "/") {
+			if strings.HasPrefix(lower, "/approvals") {
+				return m.handleApprovalsCommand(trimmed)
+			}
 			m.setInput("")
 			m.currentHistory().reset()
 			m.appendTranscriptEntry(Entry{
 				Title: "system",
-				Body:  fmt.Sprintf("Unknown slash command: %s. Try /onboard, /provider, /model, or /quit.", strings.TrimSpace(text)),
+				Body:  fmt.Sprintf("Unknown slash command: %s. Try /help, /approvals, /new, /compact, /onboard, /provider, /model, or /quit.", trimmed),
 			})
 			return true, m, nil
 		}
 		return false, m, nil
+	}
+}
+
+func (m Model) handleApprovalsCommand(text string) (bool, tea.Model, tea.Cmd) {
+	m.input = ""
+	m.currentHistory().reset()
+	if m.ctrl == nil {
+		m.appendTranscriptEntry(Entry{Title: "error", Body: "controller is not available"})
+		return true, m, nil
+	}
+
+	fields := strings.Fields(strings.ToLower(strings.TrimSpace(text)))
+	if len(fields) <= 1 {
+		mode := m.ctrl.ApprovalMode()
+		m.appendTranscriptEntry(Entry{Title: "system", Body: controller.ApprovalModeStatusBody(mode)})
+		return true, m, nil
+	}
+
+	switch fields[1] {
+	case "confirm", "auto":
+		mode := controller.ApprovalMode(fields[1])
+		next, cmd := m.startControllerRequest(nil, func(ctx context.Context) ([]controller.TranscriptEvent, error) {
+			return m.ctrl.SetApprovalMode(ctx, mode)
+		}, false)
+		return true, next, cmd
+	case "dangerous":
+		m.pendingDangerousConfirm = &dangerousApprovalConfirm{mode: controller.ApprovalModeDanger}
+		return true, m, nil
+	default:
+		m.appendTranscriptEntry(Entry{
+			Title: "system",
+			Body:  fmt.Sprintf("Unknown approvals mode: %s. Try /approvals, /approvals confirm, /approvals auto, or /approvals dangerous.", fields[1]),
+		})
+		return true, m, nil
+	}
+}
+
+func (m Model) confirmDangerousApprovalMode() (tea.Model, tea.Cmd) {
+	if m.pendingDangerousConfirm == nil || m.ctrl == nil {
+		return m, nil
+	}
+	mode := m.pendingDangerousConfirm.mode
+	m.pendingDangerousConfirm = nil
+	next, cmd := m.startControllerRequest(nil, func(ctx context.Context) ([]controller.TranscriptEvent, error) {
+		return m.ctrl.SetApprovalMode(ctx, mode)
+	}, false)
+	return next, cmd
+}
+
+func (m *Model) applySuccessfulContextAction(action contextActionKind) {
+	switch action {
+	case contextActionNewTask:
+		m.entries = initialEntries(m.workspace)
+		m.selectedEntry = len(m.entries) - 1
+		m.transcriptScroll = 0
+		m.transcriptFollow = true
+		m.inlineDetailEntry = -1
+		m.detailOpen = false
+		m.detailScroll = 0
+		m.pendingApproval = nil
+		m.pendingProposal = nil
+		m.refiningApproval = nil
+		m.refiningProposal = nil
+		m.editingProposal = nil
+		m.activePlan = nil
+		m.showShellTail = false
+		m.liveShellTail = ""
+		m.syncActiveExecution(nil)
+	case contextActionCompact:
+		m.refiningApproval = nil
+		m.refiningProposal = nil
+		m.editingProposal = nil
 	}
 }
 
@@ -1367,6 +1635,7 @@ func (m Model) startControllerRequest(mark func(*Model), invoke func(context.Con
 	if mark != nil {
 		mark(&m)
 	}
+	m.refreshTranscriptViewport()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m.inFlightCancel = cancel
@@ -1634,6 +1903,7 @@ func (m Model) openSettings() (tea.Model, tea.Cmd) {
 	m.settingsOpen = true
 	m.settingsStep = settingsStepMenu
 	m.settingsIndex = 0
+	m.settingsApprovalIdx = currentSettingsApprovalIndex(m.ctrl)
 	m.settingsProviders = buildSettingsProviderEntries(choices)
 	m.settingsProviderIdx = m.currentSettingsProviderIndex()
 	m.settingsConfig = nil
@@ -1643,6 +1913,7 @@ func (m Model) openSettings() (tea.Model, tea.Cmd) {
 	m.settingsModelFilter = ""
 	m.settingsModelScope = ""
 	m.settingsModelInfo = false
+	m.settingsBanner = ""
 	return m, nil
 }
 
@@ -1654,7 +1925,7 @@ func (m Model) openActiveProviderSettings() (tea.Model, tea.Cmd) {
 	}
 
 	next.settingsStep = settingsStepActiveProvider
-	next.settingsIndex = 1
+	next.settingsIndex = 2
 	next.settingsProviderIdx = next.currentSettingsProviderIndex()
 	return next, nil
 }
@@ -1667,7 +1938,7 @@ func (m Model) openActiveModelSettings() (tea.Model, tea.Cmd) {
 	}
 
 	next.settingsStep = settingsStepActiveModels
-	next.settingsIndex = 2
+	next.settingsIndex = 3
 	next.settingsModelScope = next.activeProvider.Preset
 	return next.loadSettingsModels()
 }

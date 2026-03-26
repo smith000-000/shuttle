@@ -59,7 +59,15 @@ func (m *Model) insertTextAtCursor(value string) {
 		index = len(runes)
 	}
 	inserted := []rune(value)
-	runes = append(runes[:index], append(inserted, runes[index:]...)...)
+	if m.overwriteMode && len(inserted) > 0 && index < len(runes) {
+		end := index + len(inserted)
+		if end > len(runes) {
+			end = len(runes)
+		}
+		runes = append(runes[:index], append(inserted, runes[end:]...)...)
+	} else {
+		runes = append(runes[:index], append(inserted, runes[index:]...)...)
+	}
 	m.input = string(runes)
 	m.cursor = index + len(inserted)
 	if strings.TrimSpace(m.input) != "" {
@@ -125,6 +133,104 @@ func (m *Model) deleteAtCursor() {
 		m.clearExitConfirm()
 	}
 	m.recomputeCompletion()
+}
+
+func (m *Model) toggleOverwriteMode() {
+	m.overwriteMode = !m.overwriteMode
+}
+
+func (m *Model) inputHasMultipleLines() bool {
+	return strings.Contains(m.input, "\n")
+}
+
+func (m *Model) moveCursorVertical(delta int) {
+	runes := []rune(m.input)
+	if len(runes) == 0 || delta == 0 {
+		return
+	}
+
+	lineStarts := composerLineStarts(runes)
+	lineIndex, column := composerCursorLineColumn(runes, m.cursor, lineStarts)
+	targetLine := lineIndex + delta
+	if targetLine < 0 {
+		targetLine = 0
+	}
+	if targetLine >= len(lineStarts) {
+		targetLine = len(lineStarts) - 1
+	}
+	targetStart := lineStarts[targetLine]
+	targetEnd := composerLineEnd(runes, targetStart)
+	targetColumn := column
+	if targetStart+targetColumn > targetEnd {
+		targetColumn = targetEnd - targetStart
+	}
+	m.cursor = targetStart + targetColumn
+	m.clampCursor()
+	m.recomputeCompletion()
+}
+
+func (m *Model) moveCursorToLineBoundary(end bool) {
+	runes := []rune(m.input)
+	if len(runes) == 0 {
+		m.cursor = 0
+		m.recomputeCompletion()
+		return
+	}
+	lineStarts := composerLineStarts(runes)
+	lineIndex, _ := composerCursorLineColumn(runes, m.cursor, lineStarts)
+	start := lineStarts[lineIndex]
+	if !end {
+		m.cursor = start
+		m.recomputeCompletion()
+		return
+	}
+	m.cursor = composerLineEnd(runes, start)
+	m.recomputeCompletion()
+}
+
+func composerLineStarts(runes []rune) []int {
+	starts := []int{0}
+	for index, r := range runes {
+		if r == '\n' {
+			starts = append(starts, index+1)
+		}
+	}
+	return starts
+}
+
+func composerCursorLineColumn(runes []rune, cursor int, starts []int) (int, int) {
+	if len(starts) == 0 {
+		return 0, 0
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(runes) {
+		cursor = len(runes)
+	}
+	lineIndex := 0
+	for index := len(starts) - 1; index >= 0; index-- {
+		if cursor >= starts[index] {
+			lineIndex = index
+			break
+		}
+	}
+	return lineIndex, cursor - starts[lineIndex]
+}
+
+func composerLineEnd(runes []rune, start int) int {
+	if start < 0 {
+		start = 0
+	}
+	if start > len(runes) {
+		start = len(runes)
+	}
+	for index := start; index < len(runes); index++ {
+		if runes[index] == '\n' {
+			return index
+		}
+	}
+	return len(runes)
 }
 
 func (m *Model) clearCompletion() bool {
@@ -227,7 +333,7 @@ func (m *Model) computeSlashCompletion(runes []rune) *composerCompletion {
 		return nil
 	}
 
-	commands := []string{"/model", "/models", "/onboard", "/onboarding", "/provider", "/providers", "/quit", "/exit"}
+	commands := []string{"/approvals", "/compact", "/exit", "/model", "/models", "/new", "/onboard", "/onboarding", "/provider", "/providers", "/quit"}
 	candidates := make([]string, 0, len(commands))
 	for _, command := range commands {
 		if strings.HasPrefix(command, input) {
@@ -460,6 +566,12 @@ func tickBusy() tea.Cmd {
 	})
 }
 
+func tickShellContext() tea.Cmd {
+	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+		return shellContextPollTickMsg(t)
+	})
+}
+
 func wrapParagraphs(value string, width int) []string {
 	paragraphs := strings.Split(value, "\n")
 	lines := make([]string, 0, len(paragraphs))
@@ -536,6 +648,8 @@ type composerLine struct {
 	Ghost  string
 }
 
+const composerMaxVisibleLines = 15
+
 func composerDisplayLines(input string, cursor int, ghost string) []composerLine {
 	runes := []rune(input)
 	if cursor < 0 {
@@ -593,6 +707,29 @@ func composerDisplayLines(input string, cursor int, ghost string) []composerLine
 	}
 
 	return display
+}
+
+func composerViewportLines(lines []composerLine, maxLines int) []composerLine {
+	if maxLines <= 0 || len(lines) <= maxLines {
+		return lines
+	}
+
+	cursorLine := len(lines) - 1
+	for index, line := range lines {
+		if line.Cursor != "" {
+			cursorLine = index
+			break
+		}
+	}
+
+	start := cursorLine - maxLines + 1
+	if start < 0 {
+		start = 0
+	}
+	if start+maxLines > len(lines) {
+		start = len(lines) - maxLines
+	}
+	return lines[start : start+maxLines]
 }
 
 func renderComposerLine(line composerLine, cursorStyle lipgloss.Style, inputStyle lipgloss.Style, ghostStyle lipgloss.Style) string {

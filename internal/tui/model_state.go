@@ -759,6 +759,14 @@ func normalizeFullscreenKeys(keys string) string {
 	return keys
 }
 
+func fullscreenKeysForSubmit(keys string, appendEnter bool) string {
+	keys = normalizeFullscreenKeys(keys)
+	if appendEnter {
+		keys += "\n"
+	}
+	return keys
+}
+
 func humanizeExecutionState(state controller.CommandExecutionState) string {
 	switch state {
 	case controller.CommandExecutionRunning:
@@ -842,6 +850,19 @@ func (m Model) currentSettingsProviderIndex() int {
 			continue
 		}
 		if entry.candidate.Profile.Preset == m.activeProvider.Preset {
+			return index
+		}
+	}
+	return 0
+}
+
+func currentSettingsApprovalIndex(ctrl controller.Controller) int {
+	mode := controller.ApprovalModeConfirm
+	if ctrl != nil {
+		mode = ctrl.ApprovalMode()
+	}
+	for index, entry := range settingsApprovalEntries() {
+		if entry.mode == mode {
 			return index
 		}
 	}

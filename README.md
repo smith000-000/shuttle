@@ -2,7 +2,7 @@
 
 Shuttle is a tmux-backed AI terminal assistant.
 
-It runs a persistent real shell in the top tmux pane and a Bubble Tea TUI in the bottom pane. Agent-approved commands can also run in owned tmux execution panes, while the persistent shell remains the continuity surface for `F2`, `$>`, cwd, and recent manual shell activity.
+It runs a persistent real shell in the top tmux pane and a Bubble Tea TUI in the bottom pane. Agent-approved commands can also run in owned tmux execution panes for local work, while the persistent shell remains the continuity surface for `F2`, `$>`, cwd, recent manual shell activity, and remote SSH continuity.
 
 ## Status
 
@@ -14,6 +14,7 @@ What is working now:
 - tracked command observation with execution states
 - persistent user-shell context for cwd, recent shell output, and recent manual shell actions
 - owned tmux execution panes for agent-approved commands
+- remote tracked-shell execution stays in the tracked shell instead of spilling into a local owned pane
 - Agent and Shell modes in the TUI
 - approval and refine flow
 - local and remote handoff with `F2`
@@ -25,9 +26,11 @@ What is working now:
 - foreground attach and handoff reconciliation for manually started shell commands
 - real OpenAI Responses API path with API-key auth
 - provider settings UI with:
+  - session-local approval-mode selection
   - active provider switching
   - active model switching
   - provider detail editing
+  - `F7` provider health/auth test from provider details
   - `F8` save-and-activate from provider details
 - saved provider profiles and startup reloading
 - provider secret handling with:
@@ -37,6 +40,10 @@ What is working now:
 - safer runtime state and trace defaults
 - Codex CLI login-based provider support
 - Codex CLI model suggestions sourced from the OpenAI models catalog when available, with free-text entry still allowed
+- task-context controls for `/new` and `/compact`
+- session-local `/approvals` control with `confirm`, bounded `auto`, and explicit-confirmation `dangerous` modes
+- lower-right model status showing approximate live context-window usage
+- initial release packaging via versioned `tar.gz` archives, checksum output, and `--version` build metadata
 
 What is still in progress:
 - broader semantic shell integration (`OSC 133` / `OSC 7`) consumption and subshell/bootstrap support
@@ -135,6 +142,21 @@ Run without the launcher:
 go run ./cmd/shuttle --socket shuttle-dev --session shuttle-dev --tui
 ```
 
+Build a local binary:
+
+```bash
+make build
+./bin/shuttle --version
+```
+
+Create release archives:
+
+```bash
+make package VERSION=v0.1.0
+```
+
+By default `make package` builds `linux/amd64`, `linux/arm64`, `darwin/amd64`, and `darwin/arm64` archives under `./dist/` and writes `SHA256SUMS`.
+
 ## Provider Smoke Test
 
 Noninteractive agent smoke test:
@@ -193,15 +215,47 @@ Core controls:
 - `Right Arrow`: accept the current ghost-text completion
 - `Enter`: submit composer input
 - `Ctrl+J`: insert newline in the composer
+- `Home` / `End`: move to the start or end of the current composer line
+- `Ctrl+Home` / `Ctrl+End`: jump the transcript to the top or bottom
+- `Insert`: toggle composer overwrite mode
 - `Esc`: clear composer or interrupt active work, depending on state
 - `F2`: take control of the live shell pane
 - `S`: enter `KEYS>` mode when the active terminal is waiting for input or a fullscreen app owns the pane
+- in `KEYS>` mode, `Enter` sends the current buffer exactly as typed, `Ctrl+Y` sends the current buffer plus `Enter`, and `Ctrl+J` inserts a literal `Enter` into the key sequence
 - `Ctrl+O`: inspect the selected transcript entry
+- `F10`: open settings
+
+Slash commands in agent mode:
+- `/help`: open the in-app help view
+- `/approvals`: show or change the current session approval mode
+- `/new`: start a fresh task without restarting Shuttle or losing shell continuity
+- `/compact`: summarize older task context and keep a shorter live context window
+- `/onboard`, `/provider`, `/model`, `/quit`: existing provider/settings/session commands
+
+Approval modes:
+- `confirm`: current default; safe commands stay as explicit proposals and risky actions still require approval
+- `auto`: Shuttle auto-runs controller-classified safe local inspection and test commands, but still requires approval for writes, patches, remote work, network/process-control, and other risky actions
+- `dangerous`: after an explicit warning confirmation, Shuttle auto-runs agent commands and auto-applies agent patches for the current session
+- `/approvals` without an argument shows the current session mode; `/approvals confirm`, `/approvals auto`, and `/approvals dangerous` switch it
+
+Settings notes:
+- `F10` opens a menu with `Session Settings`, `Configure Providers`, `Change Active Provider`, and `Select Model`
+- provider detail editing supports `F7` to test the provider config and `F8` to save and activate it immediately
+- multiline composer rendering is capped to 15 visible lines and scrolls older lines off the top as you keep inserting newlines
+
+Terminal selection notes:
+- use `Shift` + drag for your terminal emulator's normal text selection while Bubble Tea mouse mode is active
+- use your terminal copy/paste shortcuts such as `Ctrl+Shift+C` and `Ctrl+Shift+V` for selected text and pasted input
 
 Transcript result notes:
 - successful silent commands collapse to a compact result line instead of showing `exit=0` and `(no output)`
 - silent directory-changing commands can show the resulting cwd
 - result tags are exit-aware: nonzero exits no longer render as green success entries
+
+Status line notes:
+- the lower-right status can show the current approvals mode, especially when `auto` is active
+- the lower-right model label now includes an approximate live context-usage estimate
+- when Shuttle knows the selected model's context window, the estimate is shown against that limit
 
 The TUI is intentionally keyboard-first. Current behavior is still evolving, so see [ui-scratchpad.md](ui-scratchpad.md) for active UX backlog notes.
 
@@ -226,4 +280,4 @@ The TUI is intentionally keyboard-first. Current behavior is still evolving, so 
 - the serial shell-tracking model is in good shape, but remote/container semantic bootstrap is still incomplete
 - transcript and UI polish is still catching up with the newer shell/runtime model
 - multi-card or parallel execution UI is intentionally deferred
-- release packaging is intentionally deferred for now
+- release packaging is still manual: there is no installer, package manager distribution, or CI release pipeline yet

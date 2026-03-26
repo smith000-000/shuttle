@@ -1,12 +1,14 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"aiterm/internal/config"
+	"aiterm/internal/controller"
 	"aiterm/internal/provider"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -140,6 +142,12 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.settingsModels = nil
 		m.settingsModelFilter = ""
 		m.settingsModelInfo = false
+		m.settingsBanner = ""
+		return m, nil
+	case tea.KeyF7:
+		if m.settingsStep == settingsStepProviderForm {
+			return m.testSettingsProfile()
+		}
 		return m, nil
 	case tea.KeyF8:
 		if m.settingsStep == settingsStepProviderForm {
@@ -151,6 +159,7 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case settingsStepProviderForm:
 			m.settingsStep = settingsStepProviders
 			m.settingsConfig = nil
+			m.settingsBanner = ""
 		case settingsStepActiveModels:
 			if m.settingsModelFilter != "" {
 				m.settingsModelFilter = ""
@@ -163,12 +172,19 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.settingsModels = nil
 			m.settingsModelIdx = 0
 			m.settingsModelInfo = false
+			m.settingsBanner = ""
 		case settingsStepActiveProvider:
 			m.settingsStep = settingsStepMenu
+			m.settingsBanner = ""
 		case settingsStepProviders:
 			m.settingsStep = settingsStepMenu
+			m.settingsBanner = ""
+		case settingsStepSession:
+			m.settingsStep = settingsStepMenu
+			m.settingsBanner = ""
 		default:
 			m.settingsOpen = false
+			m.settingsBanner = ""
 		}
 		return m, nil
 	case tea.KeyUp:
@@ -176,6 +192,10 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case settingsStepMenu:
 			if m.settingsIndex > 0 {
 				m.settingsIndex--
+			}
+		case settingsStepSession:
+			if m.settingsApprovalIdx > 0 {
+				m.settingsApprovalIdx--
 			}
 		case settingsStepProviders, settingsStepActiveProvider:
 			if m.settingsProviderIdx > 0 {
@@ -197,6 +217,10 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case settingsStepMenu:
 			if m.settingsIndex < len(settingsMenuEntries())-1 {
 				m.settingsIndex++
+			}
+		case settingsStepSession:
+			if m.settingsApprovalIdx < len(settingsApprovalEntries())-1 {
+				m.settingsApprovalIdx++
 			}
 		case settingsStepProviders, settingsStepActiveProvider:
 			if m.settingsProviderIdx < len(m.settingsProviders)-1 {
@@ -390,6 +414,12 @@ func (m Model) applySettingsSelection() (tea.Model, tea.Cmd) {
 	switch m.settingsStep {
 	case settingsStepMenu:
 		if m.settingsIndex == 0 {
+			m.settingsStep = settingsStepSession
+			m.settingsApprovalIdx = currentSettingsApprovalIndex(m.ctrl)
+			m.settingsBanner = ""
+			return m, nil
+		}
+		if m.settingsIndex == 1 {
 			m.settingsStep = settingsStepProviders
 			m.settingsProviderIdx = m.currentSettingsProviderIndex()
 			m.settingsModelCatalog = nil
@@ -397,14 +427,36 @@ func (m Model) applySettingsSelection() (tea.Model, tea.Cmd) {
 			m.settingsModelIdx = 0
 			m.settingsModelFilter = ""
 			m.settingsModelInfo = false
+			m.settingsBanner = ""
 			return m, nil
 		}
-		if m.settingsIndex == 1 {
+		if m.settingsIndex == 2 {
 			m.settingsStep = settingsStepActiveProvider
 			m.settingsProviderIdx = m.currentSettingsProviderIndex()
+			m.settingsBanner = ""
 			return m, nil
 		}
+		m.settingsBanner = ""
 		return m.loadSettingsModels()
+	case settingsStepSession:
+		entries := settingsApprovalEntries()
+		if len(entries) == 0 {
+			return m, nil
+		}
+		selected := entries[m.settingsApprovalIdx]
+		if selected.mode == controller.ApprovalModeDanger {
+			m.pendingDangerousConfirm = &dangerousApprovalConfirm{mode: selected.mode}
+			return m, nil
+		}
+		if m.ctrl == nil {
+			return m, nil
+		}
+		m.busy = true
+		m.busyStartedAt = time.Now()
+		return m, func() tea.Msg {
+			events, err := m.ctrl.SetApprovalMode(context.Background(), selected.mode)
+			return controllerEventsMsg{events: events, err: err}
+		}
 	case settingsStepProviders:
 		if len(m.settingsProviders) == 0 {
 			return m, nil
@@ -496,6 +548,23 @@ func (m Model) loadSettingsModels() (tea.Model, tea.Cmd) {
 			}
 		}
 		return settingsModelsLoadedMsg{choices: choices}
+	}
+}
+
+func (m Model) testSettingsProfile() (tea.Model, tea.Cmd) {
+	if m.settingsConfig == nil || m.testProvider == nil {
+		return m, nil
+	}
+	profile, err := m.resolveSettingsFormProfile()
+	if err != nil {
+		m.settingsBanner = fmt.Sprintf("Provider test failed: %v", err)
+		return m, nil
+	}
+	m.busy = true
+	m.busyStartedAt = time.Now()
+	return m, func() tea.Msg {
+		err := m.testProvider(profile)
+		return settingsProviderTestedMsg{profile: profile, err: err}
 	}
 }
 

@@ -343,7 +343,7 @@ func blocksSerialShellSubmission(execution *CommandExecution) bool {
 
 func isAgentOwnedExecution(origin CommandOrigin) bool {
 	switch origin {
-	case CommandOriginAgentProposal, CommandOriginAgentApproval, CommandOriginAgentPlan:
+	case CommandOriginAgentProposal, CommandOriginAgentApproval, CommandOriginAgentAuto, CommandOriginAgentPlan:
 		return true
 	default:
 		return false

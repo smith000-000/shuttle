@@ -32,11 +32,13 @@ type SessionContext struct {
 	RecentShellOutput    string
 	RecentManualCommands []string
 	RecentManualActions  []string
+	ApprovalMode         ApprovalMode
 	CurrentShell         *shell.PromptContext
 }
 
 type TaskContext struct {
 	TaskID               string
+	CompactedSummary     string
 	PriorTranscript      []TranscriptEvent
 	PendingApproval      *ApprovalRequest
 	LastCommandResult    *CommandResultSummary
@@ -137,6 +139,14 @@ const (
 	DecisionRefine  ApprovalDecision = "refine"
 )
 
+type ApprovalMode string
+
+const (
+	ApprovalModeConfirm ApprovalMode = "confirm"
+	ApprovalModeAuto    ApprovalMode = "auto"
+	ApprovalModeDanger  ApprovalMode = "dangerous"
+)
+
 type TranscriptEvent struct {
 	ID        string
 	Kind      TranscriptEventKind
@@ -184,6 +194,7 @@ const (
 	CommandOriginUserShell     CommandOrigin = "user_shell"
 	CommandOriginAgentProposal CommandOrigin = "agent_proposal"
 	CommandOriginAgentApproval CommandOrigin = "agent_approval"
+	CommandOriginAgentAuto     CommandOrigin = "agent_auto"
 	CommandOriginAgentPlan     CommandOrigin = "agent_plan"
 )
 
@@ -244,6 +255,10 @@ type CommandResultSummary struct {
 	ShellContext   *shell.PromptContext
 }
 
+type ContextWindowUsage struct {
+	ApproxPromptTokens int
+}
+
 type Controller interface {
 	SubmitAgentPrompt(ctx context.Context, prompt string) ([]TranscriptEvent, error)
 	SubmitRefinement(ctx context.Context, approval ApprovalRequest, note string) ([]TranscriptEvent, error)
@@ -258,8 +273,13 @@ type Controller interface {
 	SubmitProposedShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error)
 	ApplyProposedPatch(ctx context.Context, patch string) ([]TranscriptEvent, error)
 	DecideApproval(ctx context.Context, approvalID string, decision ApprovalDecision, refineText string) ([]TranscriptEvent, error)
+	SetApprovalMode(ctx context.Context, mode ApprovalMode) ([]TranscriptEvent, error)
+	StartNewTask(ctx context.Context) ([]TranscriptEvent, error)
+	CompactTask(ctx context.Context) ([]TranscriptEvent, error)
 	RefreshShellContext(ctx context.Context) (*shell.PromptContext, error)
 	PeekShellTail(ctx context.Context, lines int) (string, error)
+	EstimateContextUsage(prompt string) ContextWindowUsage
+	ApprovalMode() ApprovalMode
 	ActiveExecution() *CommandExecution
 	AbandonActiveExecution(reason string) *CommandExecution
 	TrackedShellTarget() TrackedShellTarget

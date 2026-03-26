@@ -102,6 +102,9 @@ func TestUnknownSlashCommandRendersNotice(t *testing.T) {
 	if last.Title != "system" || !strings.Contains(last.Body, "Unknown slash command: /wat") {
 		t.Fatalf("expected unknown slash command notice, got %#v", last)
 	}
+	if !strings.Contains(last.Body, "/approvals") || !strings.Contains(last.Body, "/new") || !strings.Contains(last.Body, "/compact") {
+		t.Fatalf("expected updated slash command hint, got %#v", last)
+	}
 }
 
 func TestSlashQuitReturnsQuitCmd(t *testing.T) {
@@ -115,6 +118,133 @@ func TestSlashQuitReturnsQuitCmd(t *testing.T) {
 	}
 	if _, ok := cmd().(tea.QuitMsg); !ok {
 		t.Fatal("expected /quit to return tea.Quit")
+	}
+}
+
+func TestSlashNewStartsFreshTaskContext(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.mode = AgentMode
+	model.input = "/new"
+	model.entries = append(model.entries, Entry{Title: "user", Body: "stale transcript entry"})
+	model.pendingApproval = &controller.ApprovalRequest{ID: "approval-1", Title: "pending"}
+	model.activePlan = &controller.ActivePlan{
+		Summary: "Finish the old task",
+		Steps:   []controller.PlanStep{{Text: "Do the thing", Status: controller.PlanStepInProgress}},
+	}
+
+	updated, cmd := model.submit()
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected /new to call the controller")
+	}
+	updated, _ = model.Update(controllerEventsFromCmd(t, cmd))
+	model = updated.(Model)
+
+	if ctrl.newTaskCalls != 1 {
+		t.Fatalf("expected one /new controller call, got %d", ctrl.newTaskCalls)
+	}
+	if len(model.entries) != 2 {
+		t.Fatalf("expected transcript reset plus success notice, got %#v", model.entries)
+	}
+	if strings.Contains(model.View(), "stale transcript entry") {
+		t.Fatalf("expected old transcript to be cleared, got %q", model.View())
+	}
+	if model.pendingApproval != nil || model.activePlan != nil {
+		t.Fatalf("expected task-local UI state to clear, got approval=%#v plan=%#v", model.pendingApproval, model.activePlan)
+	}
+}
+
+func TestSlashCompactCallsController(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.mode = AgentMode
+	model.input = "/compact"
+
+	updated, cmd := model.submit()
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected /compact to call the controller")
+	}
+	updated, _ = model.Update(controllerEventsFromCmd(t, cmd))
+	model = updated.(Model)
+
+	if ctrl.compactTaskCalls != 1 {
+		t.Fatalf("expected one /compact controller call, got %d", ctrl.compactTaskCalls)
+	}
+	last := model.entries[len(model.entries)-1]
+	if last.Title != "system" || !strings.Contains(last.Body, "Compacted task context") {
+		t.Fatalf("expected compaction notice, got %#v", last)
+	}
+}
+
+func TestSlashApprovalsShowsCurrentMode(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.mode = AgentMode
+	model.input = "/approvals"
+
+	updated, cmd := model.submit()
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatal("expected bare /approvals to stay in the TUI")
+	}
+	last := model.entries[len(model.entries)-1]
+	if last.Title != "system" || !strings.Contains(last.Body, "Approvals: confirm") {
+		t.Fatalf("expected approval mode status notice, got %#v", last)
+	}
+}
+
+func TestSlashApprovalsAutoCallsController(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.mode = AgentMode
+	model.input = "/approvals auto"
+
+	updated, cmd := model.submit()
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected /approvals auto to call the controller")
+	}
+	updated, _ = model.Update(controllerEventsFromCmd(t, cmd))
+	model = updated.(Model)
+
+	if ctrl.approvalMode != controller.ApprovalModeAuto {
+		t.Fatalf("expected approval mode auto, got %q", ctrl.approvalMode)
+	}
+	last := model.entries[len(model.entries)-1]
+	if last.Title != "system" || !strings.Contains(last.Body, "Approvals set to auto") {
+		t.Fatalf("expected approvals-auto notice, got %#v", last)
+	}
+}
+
+func TestSlashApprovalsDangerousRequiresConfirmation(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.mode = AgentMode
+	model.input = "/approvals dangerous"
+
+	updated, cmd := model.submit()
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatal("expected dangerous mode to wait for confirmation")
+	}
+	if model.pendingDangerousConfirm == nil {
+		t.Fatal("expected pending dangerous confirmation")
+	}
+	if !strings.Contains(model.View(), "Enable Dangerous Mode") || !strings.Contains(model.View(), "trusted workspace") {
+		t.Fatalf("expected dangerous warning in action card, got %q", model.View())
+	}
+
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Y'}})
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected dangerous confirmation to call the controller")
+	}
+	updated, _ = model.Update(controllerEventsFromCmd(t, cmd))
+	model = updated.(Model)
+	if ctrl.approvalMode != controller.ApprovalModeDanger {
+		t.Fatalf("expected dangerous approval mode, got %q", ctrl.approvalMode)
 	}
 }
 
@@ -222,7 +352,7 @@ func TestManualProviderOnboardingCollectsConfigAndPersists(t *testing.T) {
 	}
 }
 
-func TestF10OpensSettingsWithProviderEntries(t *testing.T) {
+func TestF10OpensSettingsMenuWithSessionAndProviderEntries(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
 		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
 		func() ([]provider.OnboardingCandidate, error) {
@@ -240,14 +370,14 @@ func TestF10OpensSettingsWithProviderEntries(t *testing.T) {
 	)
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF10})
 	model = updated.(Model)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	model = updated.(Model)
-	if !model.settingsOpen || model.settingsStep != settingsStepProviders || len(model.settingsProviders) < 4 {
+	if !model.settingsOpen || model.settingsStep != settingsStepMenu || len(model.settingsProviders) < 4 {
 		t.Fatalf("unexpected settings state")
 	}
 	view := model.View()
-	if !strings.Contains(view, "OpenWebUI") || !strings.Contains(view, "Anthropic Agent SDK") {
-		t.Fatalf("expected provider entries in settings view, got %q", view)
+	for _, fragment := range []string{"Session Settings", "Configure Providers", "Change Active Provider", "Select Model"} {
+		if !strings.Contains(view, fragment) {
+			t.Fatalf("expected settings menu entry %q in view %q", fragment, view)
+		}
 	}
 }
 
@@ -273,6 +403,10 @@ func TestSettingsActiveModelSelectionSwitchesProvider(t *testing.T) {
 		func(provider.Profile) error { return nil },
 	)
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF10})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
 	model = updated.(Model)
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
 	model = updated.(Model)
@@ -314,6 +448,8 @@ func TestSettingsActiveProviderSwitchesProviderWithoutChangingModel(t *testing.T
 	model = updated.(Model)
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
 	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(Model)
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = updated.(Model)
 	if model.settingsStep != settingsStepActiveProvider {
@@ -346,6 +482,8 @@ func TestSettingsActiveProviderEscReturnsToMenu(t *testing.T) {
 		func(provider.Profile) error { return nil },
 	)
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF10})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
 	model = updated.(Model)
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
 	model = updated.(Model)
@@ -382,6 +520,8 @@ func TestSettingsActiveModelFilterNarrowsChoices(t *testing.T) {
 		func(provider.Profile) error { return nil },
 	)
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF10})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
 	model = updated.(Model)
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
 	model = updated.(Model)
@@ -458,6 +598,8 @@ func TestSettingsActiveModelEscClearsFilterBeforeClosing(t *testing.T) {
 	model = updated.(Model)
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
 	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(Model)
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = updated.(Model)
 	loaded := cmd().(settingsModelsLoadedMsg)
@@ -495,6 +637,8 @@ func TestSettingsActiveModelInfoToggleShowsSelectedDetailsOnly(t *testing.T) {
 		func(provider.Profile) error { return nil },
 	)
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF10})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
 	model = updated.(Model)
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
 	model = updated.(Model)
@@ -620,17 +764,149 @@ func TestF8SavesAndActivatesProviderFromSettingsForm(t *testing.T) {
 	if last.Title != "system" || !strings.Contains(last.Body, "Saved and activated provider settings") {
 		t.Fatalf("expected activation success message, got %#v", last)
 	}
+	if model.settingsBanner != "Activated OpenRouter Responses." {
+		t.Fatalf("expected activation banner, got %q", model.settingsBanner)
+	}
+}
+
+func TestF7TestsProviderFromSettingsForm(t *testing.T) {
+	tested := provider.Profile{}
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
+		func() ([]provider.OnboardingCandidate, error) { return nil, nil },
+		nil,
+		nil,
+		nil,
+	).WithProviderTester(func(profile provider.Profile) error {
+		tested = profile
+		return nil
+	})
+	model.settingsOpen = true
+	model.settingsStep = settingsStepProviderForm
+	form := buildOnboardingForm(provider.OnboardingCandidate{
+		Profile: provider.Profile{
+			Preset:       provider.PresetOpenRouter,
+			Name:         "OpenRouter Responses",
+			Model:        "openai/gpt-5",
+			BaseURL:      "https://openrouter.ai/api/v1",
+			APIKeyEnvVar: "OPENROUTER_API_KEY",
+		},
+	})
+	form.fields[2].value = "router-secret"
+	model.settingsConfig = &form
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyF7})
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected F7 to trigger a provider test")
+	}
+	msg := cmd()
+	testMsg, ok := msg.(settingsProviderTestedMsg)
+	if !ok {
+		t.Fatalf("expected settingsProviderTestedMsg, got %T", msg)
+	}
+	if testMsg.err != nil {
+		t.Fatalf("expected successful provider test, got %v", testMsg.err)
+	}
+	updated, _ = model.Update(testMsg)
+	model = updated.(Model)
+	if tested.Preset != provider.PresetOpenRouter || tested.APIKey != "router-secret" {
+		t.Fatalf("expected tested provider profile, got %#v", tested)
+	}
+	if model.settingsBanner != "Provider test succeeded for OpenRouter Responses." {
+		t.Fatalf("expected provider test success banner, got %q", model.settingsBanner)
+	}
+}
+
+func TestSettingsSessionDangerousPromptsForConfirmation(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5", BaseURL: "https://api.openai.com/v1"},
+		func() ([]provider.OnboardingCandidate, error) { return nil, nil },
+		nil,
+		nil,
+		nil,
+	)
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF10})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(Model)
+	if model.settingsStep != settingsStepSession {
+		t.Fatalf("expected session settings step, got %q", model.settingsStep)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(Model)
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatal("expected dangerous selection to wait for confirmation")
+	}
+	if model.pendingDangerousConfirm == nil {
+		t.Fatal("expected dangerous confirmation card")
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'N'}})
+	model = updated.(Model)
+	if model.pendingDangerousConfirm != nil {
+		t.Fatal("expected cancel to clear dangerous confirmation")
+	}
+	if model.settingsStep != settingsStepSession {
+		t.Fatalf("expected session settings to remain active, got %q", model.settingsStep)
+	}
 }
 
 func TestStatusLineShowsLastReplyModel(t *testing.T) {
-	model := NewModel(fakeWorkspace(), &fakeController{})
+	model := NewModel(fakeWorkspace(), &fakeController{
+		contextUsage: controller.ContextWindowUsage{ApproxPromptTokens: 3200},
+	}).WithProviderOnboarding(
+		provider.Profile{
+			Preset: provider.PresetOpenRouter,
+			Model:  "openai/gpt-5-nano-2025-08-07",
+			SelectedModel: &provider.ModelOption{
+				ContextWindow: 128000,
+			},
+		},
+		nil,
+		nil,
+		nil,
+		nil,
+	)
 	model.width = 100
 	model.height = 20
 	model.shellContext = shell.PromptContext{User: "jsmith", Host: "linuxdesktop", Directory: "~/source/repos/aiterm", PromptSymbol: "%"}
 	updated, _ := model.Update(controllerEventsMsg{events: []controller.TranscriptEvent{{Kind: controller.EventModelInfo, Payload: controller.AgentModelInfo{ProviderPreset: "openrouter", RequestedModel: "openrouter/auto", ResponseModel: "openai/gpt-5-nano-2025-08-07"}}}})
 	model = updated.(Model)
-	if !strings.Contains(model.View(), "MODEL OpenRouter / openai/gpt-5-nano-2025-08-07") {
+	if !strings.Contains(model.View(), "APR confirm  MODEL OpenRouter / openai/gpt-5-nano-2025-08-07") {
 		t.Fatalf("expected last reply model in status line, got %q", model.View())
+	}
+	if !strings.Contains(model.View(), "CTX ~3.2k/128k") {
+		t.Fatalf("expected context usage in status line, got %q", model.View())
+	}
+}
+
+func TestAutoApprovalModeRendersInStatusWithoutModelInfo(t *testing.T) {
+	ctrl := &fakeController{approvalMode: controller.ApprovalModeAuto}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.width = 80
+	model.height = 20
+
+	if !strings.Contains(model.View(), "APR auto") {
+		t.Fatalf("expected auto approval mode in status line, got %q", model.View())
+	}
+}
+
+func TestDangerousApprovalModeRendersInStatusWithoutModelInfo(t *testing.T) {
+	ctrl := &fakeController{approvalMode: controller.ApprovalModeDanger}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.width = 80
+	model.height = 20
+
+	if !strings.Contains(model.View(), "APR dangerous") {
+		t.Fatalf("expected dangerous approval mode in status line, got %q", model.View())
 	}
 }
 

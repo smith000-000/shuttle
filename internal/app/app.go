@@ -226,6 +226,9 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 				return provider.SaveStoredProviderConfigWithOptions(runtimeCfg.StateDir, profile, provider.SecretStoreOptions{
 					AllowPlaintextFallback: a.cfg.AllowPlaintextProviderSecrets,
 				})
+			}).
+			WithProviderTester(func(profile provider.Profile) error {
+				return provider.CheckHealth(ctx, profile, provider.FactoryOptions{})
 			})
 		program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 		_, runErr := program.Run()

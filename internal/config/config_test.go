@@ -250,3 +250,14 @@ func TestParseAllowsPlaintextProviderSecretsFromFlag(t *testing.T) {
 		t.Fatalf("expected plaintext provider secret fallback to be enabled from flag")
 	}
 }
+
+func TestParseVersionFlag(t *testing.T) {
+	cfg, err := Parse([]string{"--version"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	if !cfg.Version {
+		t.Fatal("expected version flag to be parsed")
+	}
+}

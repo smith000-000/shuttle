@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -149,6 +150,59 @@ func TestStructuredResponsesRequestIncludesSerialContinuationGuidance(t *testing
 	}
 	if !strings.Contains(systemPrompt, "Never propose a shell command that invokes apply_patch, git apply, patch") {
 		t.Fatalf("expected shell patch-tool prohibition in system prompt, got %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "approval_mode=auto") || !strings.Contains(systemPrompt, "safe local inspection or verification commands may be auto-executed") {
+		t.Fatalf("expected approval auto-mode guidance in system prompt, got %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "approval_mode=dangerous") || !strings.Contains(systemPrompt, "auto-apply agent patches without confirmation") {
+		t.Fatalf("expected approval dangerous-mode guidance in system prompt, got %q", systemPrompt)
+	}
+}
+
+func TestBuildTurnContextIncludesCompactedTaskSummary(t *testing.T) {
+	context := buildTurnContext(controller.AgentInput{
+		Prompt: "continue",
+		Task: controller.TaskContext{
+			CompactedSummary: "User asked for a smaller continuation context after the repo scan.",
+			PriorTranscript: []controller.TranscriptEvent{
+				{Kind: controller.EventUserMessage, Payload: controller.TextPayload{Text: "old prompt"}},
+			},
+		},
+	})
+
+	if !strings.Contains(context, "Compacted task summary:\nUser asked for a smaller continuation context") {
+		t.Fatalf("expected compacted summary in turn context, got %q", context)
+	}
+	if !strings.Contains(context, "Recent transcript:\nuser_message: old prompt") {
+		t.Fatalf("expected recent transcript tail alongside compacted summary, got %q", context)
+	}
+}
+
+func TestBuildTurnContextShrinksAfterCompaction(t *testing.T) {
+	events := make([]controller.TranscriptEvent, 0, 24)
+	for index := 0; index < 24; index++ {
+		events = append(events, controller.TranscriptEvent{
+			Kind:    controller.EventUserMessage,
+			Payload: controller.TextPayload{Text: strings.Repeat("context line ", 12) + strconv.Itoa(index)},
+		})
+	}
+
+	uncompacted := buildTurnContext(controller.AgentInput{
+		Prompt: "continue",
+		Task: controller.TaskContext{
+			PriorTranscript: events,
+		},
+	})
+	compacted := buildTurnContext(controller.AgentInput{
+		Prompt: "continue",
+		Task: controller.TaskContext{
+			CompactedSummary: "Condensed summary.",
+			PriorTranscript:  events,
+		},
+	})
+
+	if len(compacted) >= len(uncompacted) {
+		t.Fatalf("expected compacted context to be smaller, got uncompacted=%d compacted=%d", len(uncompacted), len(compacted))
 	}
 }
 
