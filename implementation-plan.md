@@ -24,9 +24,9 @@ Recently landed on `main`:
 - task-context controls for `/new` and `/compact`, including controller-owned task reset/compaction paths
 - session-local approval-mode control via `/approvals`, with bounded auto-run for safe local inspection and test commands
 - lower-right model status showing approximate live context-window usage
-- initial manual release-packaging support with ldflag-driven build metadata, `--version`, and versioned archive generation under `dist/`
-- tag-driven GitHub Actions release packaging built on the local archive script, with workflow artifacts and release-asset upload
-- a release installer script that downloads the correct archive for the current platform, verifies `SHA256SUMS`, and installs `shuttle`
+- initial manual release-packaging support with ldflag-driven build metadata, `--version`, and versioned archive generation under `dist/` for Linux, macOS, and Windows
+- tag-driven GitHub Actions release packaging built on the local archive script, with workflow artifacts and release-asset upload for both `.tar.gz` and `.zip` assets
+- a release installer script that downloads the correct archive for the current platform, verifies `SHA256SUMS`, and installs `shuttle` on Linux/macOS; Windows currently uses the published zip assets directly
 - derived release defaults for tmux identity: workspace ID from project path, a managed socket path under runtime state, and an internal session name unless explicitly overridden
 
 Execution-monitor redesign / semantic shell hardening status on `semantic-shell-bootstrap`:

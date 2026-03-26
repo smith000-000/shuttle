@@ -12,7 +12,7 @@ on:
       targets:
         description: "Comma-separated GOOS/GOARCH targets"
         required: false
-        default: "linux/amd64,linux/arm64,darwin/amd64,darwin/arm64"
+        default: "linux/amd64,linux/arm64,darwin/amd64,darwin/arm64,windows/amd64,windows/arm64"
       publish:
         description: "Upload archives to a GitHub release"
         type: boolean
@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RELEASE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
-      RELEASE_TARGETS: ${{ github.event_name == 'workflow_dispatch' && inputs.targets || 'linux/amd64,linux/arm64,darwin/amd64,darwin/arm64' }}
+      RELEASE_TARGETS: ${{ github.event_name == 'workflow_dispatch' && inputs.targets || 'linux/amd64,linux/arm64,darwin/amd64,darwin/arm64,windows/amd64,windows/arm64' }}
       RELEASE_PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
     steps:
       - name: Checkout
@@ -55,6 +55,7 @@ jobs:
           name: shuttle-${{ env.RELEASE_VERSION }}
           path: |
             dist/*.tar.gz
+            dist/*.zip
             dist/SHA256SUMS
 
       - name: Publish GitHub release assets
@@ -63,9 +64,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "$RELEASE_VERSION" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_VERSION" dist/*.tar.gz dist/SHA256SUMS --clobber
+            gh release upload "$RELEASE_VERSION" dist/*.tar.gz dist/*.zip dist/SHA256SUMS --clobber
           else
-            gh release create "$RELEASE_VERSION" dist/*.tar.gz dist/SHA256SUMS \
+            gh release create "$RELEASE_VERSION" dist/*.tar.gz dist/*.zip dist/SHA256SUMS \
               --title "$RELEASE_VERSION" \
               --notes "Automated Shuttle release for $RELEASE_VERSION."
           fi

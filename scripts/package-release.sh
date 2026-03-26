@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="${DIST_DIR:-$ROOT_DIR/dist}"
-TARGETS="${TARGETS:-linux/amd64,linux/arm64,darwin/amd64,darwin/arm64}"
+TARGETS="${TARGETS:-linux/amd64,linux/arm64,darwin/amd64,darwin/arm64,windows/amd64,windows/arm64}"
 VERSION="${VERSION:-}"
 COMMIT="${COMMIT:-$(git -C "$ROOT_DIR" rev-parse --short HEAD)}"
 BUILD_DATE="${BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
@@ -37,6 +37,7 @@ LD_FLAGS=(
 )
 
 IFS=',' read -r -a target_list <<< "$TARGETS"
+ARCHIVE_PATHS=()
 for target in "${target_list[@]}"; do
   target="${target//[[:space:]]/}"
   if [[ -z "$target" ]]; then
@@ -52,7 +53,17 @@ for target in "${target_list[@]}"; do
 
   archive_root="shuttle_${VERSION}_${goos}_${goarch}"
   stage_dir="$DIST_DIR/stage/$archive_root"
-  archive_path="$DIST_DIR/${archive_root}.tar.gz"
+  binary_name="shuttle"
+  archive_ext=".tar.gz"
+  if [[ "$goos" == "windows" ]]; then
+    binary_name="shuttle.exe"
+    archive_ext=".zip"
+    if ! command -v zip >/dev/null 2>&1; then
+      echo "missing archive tool: need zip for Windows targets" >&2
+      exit 1
+    fi
+  fi
+  archive_path="$DIST_DIR/${archive_root}${archive_ext}"
 
   rm -rf "$stage_dir"
   mkdir -p "$stage_dir"
@@ -62,7 +73,7 @@ for target in "${target_list[@]}"; do
     GOOS="$goos" GOARCH="$goarch" go build \
       -trimpath \
       -ldflags "${LD_FLAGS[*]}" \
-      -o "$stage_dir/shuttle" \
+      -o "$stage_dir/$binary_name" \
       ./cmd/shuttle
   )
 
@@ -70,12 +81,24 @@ for target in "${target_list[@]}"; do
   cp "$ROOT_DIR/LICENSE" "$stage_dir/"
   cp "$ROOT_DIR/env.sh.sample" "$stage_dir/"
 
-  tar -C "$DIST_DIR/stage" -czf "$archive_path" "$archive_root"
+  if [[ "$goos" == "windows" ]]; then
+    (
+      cd "$DIST_DIR/stage"
+      zip -rq "$archive_path" "$archive_root"
+    )
+  else
+    tar -C "$DIST_DIR/stage" -czf "$archive_path" "$archive_root"
+  fi
+  ARCHIVE_PATHS+=("$archive_path")
 done
 
 (
   cd "$DIST_DIR"
-  "${CHECKSUM_CMD[@]}" ./*.tar.gz > SHA256SUMS
+  if [[ ${#ARCHIVE_PATHS[@]} -eq 0 ]]; then
+    echo "no archives were produced" >&2
+    exit 1
+  fi
+  "${CHECKSUM_CMD[@]}" "${ARCHIVE_PATHS[@]##$DIST_DIR/}" > SHA256SUMS
 )
 
 rm -rf "$DIST_DIR/stage"

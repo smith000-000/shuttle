@@ -43,7 +43,7 @@ What is working now:
 - task-context controls for `/new` and `/compact`
 - session-local `/approvals` control with `confirm`, bounded `auto`, and explicit-confirmation `dangerous` modes
 - lower-right model status showing approximate live context-window usage
-- initial release packaging via versioned `tar.gz` archives, checksum output, and `--version` build metadata
+- initial release packaging via versioned platform archives (`.tar.gz` for Linux/macOS, `.zip` for Windows), checksum output, and `--version` build metadata
 
 What is still in progress:
 - broader semantic shell integration (`OSC 133` / `OSC 7`) consumption and subshell/bootstrap support
@@ -78,6 +78,11 @@ Run Shuttle from a release:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/smith000-000/shuttle/main/scripts/install-release.sh | bash
 ```
+
+Windows:
+- download the matching `shuttle_<version>_windows_<arch>.zip` asset from Releases
+- extract `shuttle.exe`
+- add the extracted directory to `PATH`, or run `shuttle.exe --tui` from that directory
 
 2. Confirm the installed build:
 
@@ -188,7 +193,7 @@ Create release archives:
 make package VERSION=v0.1.0
 ```
 
-By default `make package` builds `linux/amd64`, `linux/arm64`, `darwin/amd64`, and `darwin/arm64` archives under `./dist/` and writes `SHA256SUMS`.
+By default `make package` builds `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, `windows/amd64`, and `windows/arm64` archives under `./dist/` and writes `SHA256SUMS`. Linux/macOS assets are `.tar.gz`; Windows assets are `.zip`.
 
 Install the latest release:
 
@@ -206,7 +211,7 @@ curl -fsSL https://raw.githubusercontent.com/smith000-000/shuttle/main/scripts/i
 GitHub release packaging:
 - pushing a `v*` tag runs the release workflow and publishes the packaged archives plus `SHA256SUMS`
 - `Actions -> Release` also supports manual packaging via `workflow_dispatch`, with an optional publish toggle for dry runs
-- `make test-packaging` smoke-tests archive creation plus the release installer against a local file-backed release directory
+- `make test-packaging` smoke-tests Linux installer flow and verifies that the Windows release zip contains `shuttle.exe` plus the bundled docs/files
 
 ## Provider Smoke Test
 
