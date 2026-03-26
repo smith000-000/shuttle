@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,9 +13,10 @@ import (
 )
 
 const (
-	defaultSessionName = "shuttle"
-	defaultLogName     = "shuttle.log"
-	defaultTraceName   = "trace.log"
+	defaultLogName    = "shuttle.log"
+	defaultTraceName  = "trace.log"
+	managedSocketName = "tmux.sock"
+	workspaceIDLength = 12
 )
 
 type TraceMode string
@@ -25,6 +28,8 @@ const (
 )
 
 type Config struct {
+	Version                       bool
+	WorkspaceID                   string
 	SessionName                   string
 	StartDir                      string
 	TmuxSocket                    string
@@ -73,8 +78,8 @@ func Parse(args []string) (Config, error) {
 	if override := os.Getenv("SHUTTLE_RUNTIME_DIR"); override != "" {
 		runtimeDir = override
 	}
-	sessionName := envOrDefault("SHUTTLE_SESSION", defaultSessionName)
-	socketName := os.Getenv("SHUTTLE_TMUX_SOCKET")
+	sessionName := strings.TrimSpace(os.Getenv("SHUTTLE_SESSION"))
+	socketName := strings.TrimSpace(os.Getenv("SHUTTLE_TMUX_SOCKET"))
 	providerType := envOrDefault("SHUTTLE_PROVIDER", "mock")
 	providerAuthMethod := envOrDefault("SHUTTLE_AUTH", "auto")
 	providerModel := os.Getenv("SHUTTLE_MODEL")
@@ -93,6 +98,7 @@ func Parse(args []string) (Config, error) {
 	fs := flag.NewFlagSet("shuttle", flag.ContinueOnError)
 
 	cfg := Config{}
+	fs.BoolVar(&cfg.Version, "version", false, "print Shuttle version information and exit")
 	fs.StringVar(&cfg.SessionName, "session", sessionName, "tmux session name")
 	fs.StringVar(&cfg.StartDir, "dir", workingDir, "working directory for new panes")
 	fs.StringVar(&cfg.TmuxSocket, "socket", socketName, "tmux socket name for an isolated server")
@@ -126,10 +132,6 @@ func Parse(args []string) (Config, error) {
 		}
 	})
 
-	if cfg.SessionName == "" {
-		return Config{}, errors.New("session name must not be empty")
-	}
-
 	startDir, err := filepath.Abs(cfg.StartDir)
 	if err != nil {
 		return Config{}, err
@@ -146,6 +148,14 @@ func Parse(args []string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.RuntimeDir = runtimeDirAbs
+	cfg.WorkspaceID = workspaceIDForPath(cfg.StartDir)
+	if strings.TrimSpace(cfg.SessionName) == "" {
+		cfg.SessionName = managedSessionName(cfg.WorkspaceID)
+	}
+	cfg.SessionName = normalizeSessionName(cfg.SessionName)
+	if strings.TrimSpace(cfg.TmuxSocket) == "" {
+		cfg.TmuxSocket = managedSocketPath(cfg.RuntimeDir)
+	}
 	cfg.LogPath = filepath.Join(cfg.StateDir, defaultLogName)
 	if strings.TrimSpace(cfg.TracePath) == "" {
 		cfg.TracePath = filepath.Join(cfg.StateDir, defaultTraceName)
@@ -179,6 +189,35 @@ func Parse(args []string) (Config, error) {
 	cfg.ProviderAPIKey, cfg.ProviderAPIKeyEnvVar = resolveProviderAPIKey(cfg.ProviderType, cfg.ProviderAuthMethod)
 
 	return cfg, nil
+}
+
+func workspaceIDForPath(path string) string {
+	sum := sha256.Sum256([]byte(filepath.Clean(path)))
+	encoded := hex.EncodeToString(sum[:])
+	if len(encoded) > workspaceIDLength {
+		return encoded[:workspaceIDLength]
+	}
+	return encoded
+}
+
+func managedSessionName(workspaceID string) string {
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return "shuttle"
+	}
+	return "shuttle_" + workspaceID
+}
+
+func normalizeSessionName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	return strings.ReplaceAll(name, ":", "_")
+}
+
+func managedSocketPath(runtimeDir string) string {
+	return filepath.Join(runtimeDir, managedSocketName)
 }
 
 func envOrDefault(key string, fallback string) string {

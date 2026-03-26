@@ -75,6 +75,34 @@ func TestCodexCLIAgentRequiresLoginForCodexAuth(t *testing.T) {
 	}
 }
 
+func TestCodexCLIAgentRedactsPromptFromCLIError(t *testing.T) {
+	script := writeFakeCodexCLI(t)
+	t.Setenv("FAKE_CODEX_LOGIN_STATUS", "Logged in using ChatGPT")
+	t.Setenv("FAKE_CODEX_ERROR_OUTPUT", "OpenAI Codex v0.116.0 (research preview)\n--------\nworkdir: /workspace\nuser\nYou are the Shuttle agent runtime.")
+
+	agent, err := NewCodexCLIAgent(Profile{
+		BackendFamily: BackendCLIAgent,
+		Preset:        PresetCodexCLI,
+		AuthMethod:    AuthCodexLogin,
+		Model:         "gpt-5.4",
+		CLICommand:    script,
+	})
+	if err != nil {
+		t.Fatalf("NewCodexCLIAgent() error = %v", err)
+	}
+
+	_, err = agent.Respond(context.Background(), controller.AgentInput{Prompt: "hello"})
+	if err == nil {
+		t.Fatal("expected codex CLI error")
+	}
+	if !strings.Contains(err.Error(), "codex CLI failed before producing a structured response") {
+		t.Fatalf("expected sanitized CLI error, got %q", err)
+	}
+	if strings.Contains(err.Error(), "You are the Shuttle agent runtime") {
+		t.Fatalf("expected system prompt to be redacted, got %q", err)
+	}
+}
+
 func writeFakeCodexCLI(t *testing.T) string {
 	t.Helper()
 
@@ -88,6 +116,10 @@ if [ "${1-}" = "login" ] && [ "${2-}" = "status" ]; then
 fi
 
 if [ "${1-}" = "exec" ]; then
+  if [ -n "${FAKE_CODEX_ERROR_OUTPUT:-}" ]; then
+    printf '%s\n' "${FAKE_CODEX_ERROR_OUTPUT}"
+    exit 1
+  fi
   if [ -n "${FAKE_CODEX_ARGS_FILE:-}" ]; then
     printf '%s\n' "$@" > "${FAKE_CODEX_ARGS_FILE}"
   fi

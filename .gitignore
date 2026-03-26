@@ -12,3 +12,7 @@ Thumbs.db
 
 # Local auth/bootstrap helpers
 env.sh
+
+# Local build artifacts
+bin/
+dist/

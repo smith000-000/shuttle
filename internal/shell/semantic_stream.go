@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"aiterm/internal/securefs"
@@ -199,11 +198,6 @@ func semanticStreamGenerationPID(generationID string) (int, bool) {
 		return 0, false
 	}
 	return pid, true
-}
-
-func processAlive(pid int) bool {
-	err := syscall.Kill(pid, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 func pipePaneOutputPath(shellCommand string) string {

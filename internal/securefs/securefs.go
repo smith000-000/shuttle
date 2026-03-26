@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"syscall"
 )
 
 func EnsurePrivateDir(path string) error {
@@ -19,18 +18,14 @@ func EnsurePrivateDir(path string) error {
 }
 
 func OpenFileNoFollow(path string, flags int, perm os.FileMode) (*os.File, error) {
-	fd, err := syscall.Open(path, flags|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, uint32(perm))
-	if err != nil {
-		return nil, err
-	}
-	return os.NewFile(uintptr(fd), path), nil
+	return openFileNoFollow(path, flags, perm)
 }
 
 func OpenAppendPrivate(path string, perm os.FileMode) (*os.File, error) {
 	if err := EnsurePrivateDir(filepath.Dir(path)); err != nil {
 		return nil, err
 	}
-	file, err := OpenFileNoFollow(path, syscall.O_CREAT|syscall.O_APPEND|syscall.O_WRONLY, perm)
+	file, err := OpenFileNoFollow(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, perm)
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +40,7 @@ func EnsureFilePrivate(path string, perm os.FileMode) error {
 	if err := EnsurePrivateDir(filepath.Dir(path)); err != nil {
 		return err
 	}
-	file, err := OpenFileNoFollow(path, syscall.O_CREAT|syscall.O_WRONLY, perm)
+	file, err := OpenFileNoFollow(path, os.O_CREATE|os.O_WRONLY, perm)
 	if err != nil {
 		return err
 	}
@@ -57,7 +52,7 @@ func WriteExclusivePrivate(path string, data []byte, perm os.FileMode) error {
 	if err := EnsurePrivateDir(filepath.Dir(path)); err != nil {
 		return err
 	}
-	file, err := OpenFileNoFollow(path, syscall.O_CREAT|syscall.O_EXCL|syscall.O_WRONLY, perm)
+	file, err := OpenFileNoFollow(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, perm)
 	if err != nil {
 		return err
 	}
@@ -97,7 +92,7 @@ func WriteAtomicPrivate(path string, data []byte, perm os.FileMode) error {
 }
 
 func ReadFileNoFollow(path string) ([]byte, os.FileInfo, error) {
-	file, err := OpenFileNoFollow(path, syscall.O_RDONLY, 0)
+	file, err := OpenFileNoFollow(path, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, nil, err
 	}

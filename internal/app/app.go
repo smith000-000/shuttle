@@ -12,6 +12,7 @@ import (
 	"aiterm/internal/controller"
 	"aiterm/internal/logging"
 	"aiterm/internal/provider"
+	"aiterm/internal/securefs"
 	"aiterm/internal/shell"
 	"aiterm/internal/tmux"
 	"aiterm/internal/tui"
@@ -43,6 +44,12 @@ func New(cfg config.Config, logger *slog.Logger) *App {
 
 func (a *App) Run(ctx context.Context) (Result, error) {
 	socketTarget := tmux.ResolveSocketTarget(a.cfg.TmuxSocket)
+	if filepath.IsAbs(socketTarget) {
+		if err := securefs.EnsurePrivateDir(filepath.Dir(socketTarget)); err != nil {
+			return Result{}, fmt.Errorf("prepare tmux runtime directory: %w", err)
+		}
+	}
+	historyFile := filepath.Join(a.cfg.StateDir, "shell_history")
 	ensureWorkspace := func(ctx context.Context, client *tmux.Client, startDir string) error {
 		_, _, err := tmux.BootstrapShellSession(
 			ctx,
@@ -50,7 +57,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			tmux.ShellSessionOptions{
 				SessionName: a.cfg.SessionName,
 				StartDir:    startDir,
-				HistoryFile: filepath.Join(a.cfg.StateDir, "shell_history"),
+				HistoryFile: historyFile,
 			},
 		)
 		if err != nil {
@@ -60,6 +67,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	}
 	logging.Trace(
 		"app.run.begin",
+		"workspace_id", a.cfg.WorkspaceID,
 		"session", a.cfg.SessionName,
 		"socket", socketTarget,
 		"tui", a.cfg.TUI,
@@ -85,7 +93,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			SessionName:       a.cfg.SessionName,
 			StartDir:          a.cfg.StartDir,
 			BottomPanePercent: 30,
-			HistoryFile:       filepath.Join(a.cfg.StateDir, "shell_history"),
+			HistoryFile:       historyFile,
 		},
 	)
 	if err != nil {
@@ -138,12 +146,13 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			"auth_source", providerLogAuthSource(profile),
 		)
 		ctrl := controller.New(agent, observer, observer, controller.SessionContext{
-			SessionName:      workspace.SessionName,
-			TopPaneID:        workspace.TopPane.ID,
-			BottomPaneID:     workspace.BottomPane.ID,
-			TrackedShell:     controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
-			WorkingDirectory: runtimeCfg.StartDir,
-			CurrentShell:     initialShellContextPtr(initialShellContext),
+			SessionName:          workspace.SessionName,
+			BottomPaneID:         workspace.BottomPane.ID,
+			TrackedShell:         controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
+			WorkingDirectory:     runtimeCfg.StartDir,
+			LocalWorkspaceRoot:   runtimeCfg.StartDir,
+			UserShellHistoryFile: historyFile,
+			CurrentShell:         initialShellContextPtr(initialShellContext),
 		})
 		agentCtx, cancel := context.WithTimeout(ctx, agentPromptTimeout)
 		defer cancel()
@@ -188,12 +197,13 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			"auth_source", providerLogAuthSource(profile),
 		)
 		ctrl := controller.New(agent, observer, observer, controller.SessionContext{
-			SessionName:      workspace.SessionName,
-			TopPaneID:        workspace.TopPane.ID,
-			BottomPaneID:     workspace.BottomPane.ID,
-			TrackedShell:     controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
-			WorkingDirectory: runtimeCfg.StartDir,
-			CurrentShell:     initialShellContextPtr(initialShellContext),
+			SessionName:          workspace.SessionName,
+			BottomPaneID:         workspace.BottomPane.ID,
+			TrackedShell:         controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
+			WorkingDirectory:     runtimeCfg.StartDir,
+			LocalWorkspaceRoot:   runtimeCfg.StartDir,
+			UserShellHistoryFile: historyFile,
+			CurrentShell:         initialShellContextPtr(initialShellContext),
 		})
 		switchProvider := func(profile provider.Profile, shellContext *shell.PromptContext) (controller.Controller, provider.Profile, error) {
 			agent, err := provider.NewFromProfile(profile, provider.FactoryOptions{})
@@ -202,12 +212,13 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			}
 
 			return controller.New(agent, observer, observer, controller.SessionContext{
-				SessionName:      workspace.SessionName,
-				TopPaneID:        workspace.TopPane.ID,
-				BottomPaneID:     workspace.BottomPane.ID,
-				TrackedShell:     controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
-				WorkingDirectory: runtimeCfg.StartDir,
-				CurrentShell:     shellContext,
+				SessionName:          workspace.SessionName,
+				BottomPaneID:         workspace.BottomPane.ID,
+				TrackedShell:         controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
+				WorkingDirectory:     runtimeCfg.StartDir,
+				LocalWorkspaceRoot:   runtimeCfg.StartDir,
+				UserShellHistoryFile: historyFile,
+				CurrentShell:         shellContext,
 			}), profile, nil
 		}
 		model := tui.NewModel(workspace, ctrl).
@@ -222,8 +233,11 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 				return provider.SaveStoredProviderConfigWithOptions(runtimeCfg.StateDir, profile, provider.SecretStoreOptions{
 					AllowPlaintextFallback: a.cfg.AllowPlaintextProviderSecrets,
 				})
+			}).
+			WithProviderTester(func(profile provider.Profile) error {
+				return provider.CheckHealth(ctx, profile, provider.FactoryOptions{})
 			})
-		program := tea.NewProgram(model, tea.WithAltScreen())
+		program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 		_, runErr := program.Run()
 		cleanupErr := cleanupTUISession(created, client, workspace.SessionName)
 		if runErr != nil {

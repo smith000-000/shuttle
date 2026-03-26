@@ -182,6 +182,21 @@ func summarizeRecentContext(input controller.AgentInput) string {
 		}
 	}
 
+	if input.Task.LastPatchApplyResult != nil {
+		last := input.Task.LastPatchApplyResult
+		if last.Applied {
+			parts = append(parts, fmt.Sprintf(
+				"Last patch apply changed %d created, %d updated, %d deleted, %d renamed files.",
+				last.Created,
+				last.Updated,
+				last.Deleted,
+				last.Renamed,
+			))
+		} else {
+			parts = append(parts, "Last patch apply failed: "+strings.TrimSpace(last.Error))
+		}
+	}
+
 	if trimmed := strings.TrimSpace(input.Session.RecentShellOutput); trimmed != "" {
 		parts = append(parts, "Recent shell output:\n"+compactShellOutput(trimmed, 2, 2, 400))
 	}

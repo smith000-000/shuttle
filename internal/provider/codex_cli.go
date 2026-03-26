@@ -85,20 +85,12 @@ func (a *CodexCLIAgent) Respond(ctx context.Context, input controller.AgentInput
 	command := exec.CommandContext(ctx, a.command, args...)
 	output, err := command.CombinedOutput()
 	if err != nil {
-		message := strings.TrimSpace(string(output))
-		if message == "" {
-			message = err.Error()
-		}
-		return controller.AgentResponse{}, fmt.Errorf("run codex CLI: %s", message)
+		return controller.AgentResponse{}, fmt.Errorf("run codex CLI: %s", summarizeCodexCLIError(output, err))
 	}
 
 	lastMessage, err := os.ReadFile(outputPath)
 	if err != nil {
-		message := strings.TrimSpace(string(output))
-		if message == "" {
-			message = err.Error()
-		}
-		return controller.AgentResponse{}, fmt.Errorf("read codex output: %s", message)
+		return controller.AgentResponse{}, fmt.Errorf("read codex output: %s", summarizeCodexCLIError(output, err))
 	}
 
 	var structured shuttleStructuredResponse
@@ -161,4 +153,38 @@ func buildCodexPrompt(input controller.AgentInput) string {
 
 func codexWorkingDir(input controller.AgentInput) string {
 	return strings.TrimSpace(input.Session.WorkingDirectory)
+}
+
+func summarizeCodexCLIError(output []byte, err error) string {
+	message := strings.TrimSpace(string(output))
+	if message == "" {
+		if err == nil {
+			return "codex CLI failed before producing a structured response"
+		}
+		return err.Error()
+	}
+	if strings.Contains(message, shuttleSystemPrompt) || strings.Contains(message, strings.SplitN(shuttleSystemPrompt, "\n", 2)[0]) {
+		return "codex CLI failed before producing a structured response"
+	}
+
+	lines := strings.Split(strings.ReplaceAll(message, "\r\n", "\n"), "\n")
+	candidates := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "", line == "--------":
+			continue
+		case strings.EqualFold(line, "user"), strings.EqualFold(line, "assistant"), strings.EqualFold(line, "system"):
+			continue
+		case strings.HasPrefix(line, "OpenAI Codex "):
+			continue
+		case strings.HasPrefix(line, "workdir:"), strings.HasPrefix(line, "model:"), strings.HasPrefix(line, "provider:"), strings.HasPrefix(line, "approval:"), strings.HasPrefix(line, "sandbox:"), strings.HasPrefix(line, "reasoning effort:"), strings.HasPrefix(line, "reasoning summaries:"), strings.HasPrefix(line, "session id:"):
+			continue
+		}
+		candidates = append(candidates, line)
+	}
+	if len(candidates) == 0 {
+		return "codex CLI failed before producing a structured response"
+	}
+	return candidates[len(candidates)-1]
 }

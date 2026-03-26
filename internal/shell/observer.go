@@ -158,22 +158,30 @@ func (o *Observer) CaptureShellContext(ctx context.Context, paneID string) (Prom
 		return PromptContext{}, fmt.Errorf("capture shell context: %w", err)
 	}
 
+	paneInfo, paneErr := o.paneInfo(ctx, paneID)
+	hasPaneInfo := paneErr == nil
+
 	context, ok := ParsePromptContextFromCapture(captured)
-	if ok {
-		if paneInfo, paneErr := o.paneInfo(ctx, paneID); paneErr == nil {
+	if ok && captureHasCurrentPromptContext(captured, context) {
+		if hasPaneInfo {
 			if semanticState, _, semanticOK := o.captureSemanticShellState(ctx, paneID, paneInfo.TTY, "", strings.TrimSpace(paneInfo.CurrentCommand), context); semanticOK {
-				context = synthesizePromptContext(context, semanticState)
+				synthesized := synthesizePromptContext(context, semanticState)
+				if captureHasCurrentPromptContext(captured, synthesized) {
+					context = synthesized
+				}
 			}
 		}
 		o.promptHint = context
 		return context, nil
 	}
 
-	if paneInfo, paneErr := o.paneInfo(ctx, paneID); paneErr == nil {
+	if hasPaneInfo {
 		if semanticState, _, semanticOK := o.captureSemanticShellState(ctx, paneID, paneInfo.TTY, "", strings.TrimSpace(paneInfo.CurrentCommand), o.promptHint); semanticOK {
 			context = synthesizePromptContext(o.promptHint, semanticState)
-			o.promptHint = context
-			return context, nil
+			if captureHasCurrentPromptContext(captured, context) {
+				o.promptHint = context
+				return context, nil
+			}
 		}
 	}
 
@@ -432,7 +440,7 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 			return
 		}
 
-		if started && !hasSemanticState && allowPromptReturnInference(command, alternateOn, currentPaneCommand) {
+		if started && allowPromptReturnInference(command, alternateOn, currentPaneCommand) {
 			promptContext := monitor.Snapshot().ShellContext
 			if TailSuggestsPromptReturn(captured, promptContext) {
 				cleanBody := sanitizeCapturedBody(capturePaneDelta(beforeCapture, captured))
@@ -440,9 +448,29 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 				if promptContext.PromptLine() != "" {
 					cleanBody = stripTrailingPromptLine(cleanBody, promptContext)
 				}
-				confidence := ConfidenceMedium
-				if paneCommandIsShell(currentPaneCommand) {
-					confidence = ConfidenceStrong
+				if cleanBody == "" && promptContext.LastExitCode == nil && semanticState.ExitCode == nil {
+					select {
+					case <-ctx.Done():
+						logging.TraceError(
+							"shell.tracked.canceled",
+							ctx.Err(),
+							"pane", paneID,
+							"command", command,
+							"command_id", markers.CommandID,
+							"started", started,
+							"last_capture_preview", logging.Preview(lastCapture, 1000),
+						)
+						monitor.finish(TrackedExecution{CommandID: markers.CommandID, Command: command}, ctx.Err(), monitorStateFromError(ctx.Err()))
+						return
+					case <-time.After(50 * time.Millisecond):
+					}
+					continue
+				}
+				exitCode, state, confidence, inferred := inferPromptReturnResult(promptContext, cleanBody, semanticState.ExitCode)
+				semanticShell := !inferred && (promptContext.LastExitCode != nil || semanticState.ExitCode != nil)
+				semanticSourceValue := ""
+				if semanticShell {
+					semanticSourceValue = semanticSource
 				}
 				logging.Trace(
 					"shell.tracked.prompt_returned",
@@ -453,16 +481,21 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 					"prompt", promptContext.PromptLine(),
 					"pane_command", currentPaneCommand,
 					"confidence", confidence,
+					"exit_code", exitCode,
+					"state", state,
+					"inferred_exit", inferred,
 				)
 				monitor.finish(TrackedExecution{
-					CommandID:    markers.CommandID,
-					Command:      command,
-					Cause:        CompletionCausePromptReturn,
-					Confidence:   confidence,
-					ExitCode:     InterruptedExitCode,
-					Captured:     cleanBody,
-					ShellContext: promptContext,
-				}, nil, MonitorStateCanceled)
+					CommandID:      markers.CommandID,
+					Command:        command,
+					Cause:          CompletionCausePromptReturn,
+					Confidence:     confidence,
+					SemanticShell:  semanticShell,
+					SemanticSource: semanticSourceValue,
+					ExitCode:       exitCode,
+					Captured:       cleanBody,
+					ShellContext:   promptContext,
+				}, nil, state)
 				return
 			}
 		}
@@ -1266,12 +1299,26 @@ func stripShuttlePlumbingLines(lines []string) []string {
 }
 
 func isShuttlePlumbingLine(line string) bool {
+	if looksLikeShuttleCommandError(line) {
+		return false
+	}
 	return strings.Contains(line, "__SHUTTLE_") ||
 		strings.Contains(line, "__shuttle_status") ||
 		strings.Contains(line, "eval \"$(printf") ||
 		strings.Contains(line, "SHUTTLE_SEMANTIC_SHELL_V1") ||
 		strings.Contains(line, "/shell-integration/") ||
 		strings.Contains(line, "/commands/")
+}
+
+func looksLikeShuttleCommandError(line string) bool {
+	lower := strings.ToLower(strings.TrimSpace(line))
+	if !strings.Contains(lower, "/commands/") {
+		return false
+	}
+	return strings.Contains(lower, ": command not found:") ||
+		strings.Contains(lower, ": no such file or directory") ||
+		strings.Contains(lower, ": permission denied") ||
+		strings.Contains(lower, ".sh:")
 }
 
 func isShuttleContinuationLine(line string) bool {
