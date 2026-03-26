@@ -691,6 +691,16 @@ func (m Model) footerParts(width int) []string {
 	if m.activeExecution != nil && !m.canAttemptLocalInterrupt() {
 		escHint = "[Esc] manual"
 	}
+	if m.sendingFullscreenKeys {
+		switch {
+		case width < 72:
+			return []string{"[F1]", "[Enter]", "[Ctrl+Y]", "[Ctrl+J]", "[Esc]", "[F2]", "[Ctrl+C]"}
+		case width < 100:
+			return []string{"[F1] help", "[Enter] send", "[Ctrl+Y] send+Enter", "[Ctrl+J] insert Enter", "[Esc] cancel", "[F2] shell", "[Ctrl+C] quit"}
+		default:
+			return []string{"[F1] help", "[Enter] send exact", "[Ctrl+Y] send + Enter", "[Ctrl+J] insert Enter", "[Esc] cancel", "[F2] shell", "[Ctrl+C] quit"}
+		}
+	}
 
 	switch {
 	case width < 72:
@@ -1062,7 +1072,12 @@ func helpContentLines(width int, mode Mode, canSendKeys bool) []string {
 		"> Approval and proposal cards also support clickable actions with the mouse.",
 	)
 	if canSendKeys {
-		lines = append(lines, "S: enter KEYS> mode to send raw keys to a fullscreen app")
+		lines = append(lines,
+			"S: enter KEYS> mode to send raw keys to a fullscreen or waiting terminal app",
+			"KEYS> Enter: send the current buffer exactly as typed",
+			"KEYS> Ctrl+Y: send the current buffer plus Enter",
+			"KEYS> Ctrl+J: insert a literal Enter/newline into the key sequence",
+		)
 	}
 	lines = append(lines,
 		"",

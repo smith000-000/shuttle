@@ -205,6 +205,7 @@ Core controls:
 - `Esc`: clear composer or interrupt active work, depending on state
 - `F2`: take control of the live shell pane
 - `S`: enter `KEYS>` mode when the active terminal is waiting for input or a fullscreen app owns the pane
+- in `KEYS>` mode, `Enter` sends the current buffer exactly as typed, `Ctrl+Y` sends the current buffer plus `Enter`, and `Ctrl+J` inserts a literal `Enter` into the key sequence
 - `Ctrl+O`: inspect the selected transcript entry
 - `F10`: open settings
 
@@ -254,22 +255,6 @@ The TUI is intentionally keyboard-first. Current behavior is still evolving, so 
 - [runtime-management-design.md](runtime-management-design.md)
 - [requirements-mvp.md](requirements-mvp.md)
 - [patch-apply-research.md](patch-apply-research.md)
-
-## Worktrees
-
-This repo is currently being developed with multiple git worktrees.
-
-Primary interactive execution branch:
-- `/home/jsmith/source/repos/aiterm`
-
-Secondary onboarding/provider branch:
-- `/home/jsmith/source/repos/aiterm-model-onboarding`
-
-List them with:
-
-```bash
-git worktree list
-```
 
 ## Current Limitations
 

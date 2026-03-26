@@ -130,6 +130,7 @@ Status:
   - multiline composer rendering is capped to a 15-line viewport that scrolls older lines off the top
   - agent-owned execution stays in the tracked shell when the current user shell context is remote, instead of launching a local owned pane
   - the lower-right model status now shows an approximate live context-usage estimate, and shows the selected model limit when available
+  - `KEYS>` mode now keeps plain `Enter` as exact raw-send, uses `Ctrl+Y` for send-plus-Enter, and documents the distinction in the footer/help so sudo and menu prompts are both practical
 
 Implemented scope:
 - `/help`: open the in-app help view from the composer

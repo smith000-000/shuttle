@@ -1009,6 +1009,46 @@ func TestEnterSubmitsFullscreenKeysWhileBusy(t *testing.T) {
 	}
 }
 
+func TestFullscreenKeysForSubmitPreservesExactSendByDefault(t *testing.T) {
+	if got := fullscreenKeysForSubmit("password", false); got != "password" {
+		t.Fatalf("expected exact submit keys, got %q", got)
+	}
+	if got := fullscreenKeysForSubmit("password", true); got != "password\n" {
+		t.Fatalf("expected optional trailing enter, got %q", got)
+	}
+	if got := fullscreenKeysForSubmit("line1\nline2", false); got != "line1\nline2" {
+		t.Fatalf("expected explicit multiline keys to remain unchanged, got %q", got)
+	}
+}
+
+func TestCtrlYSubmitsFullscreenKeysWithTrailingEnter(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.sendingFullscreenKeys = true
+	model.input = "password"
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
+	next := updated.(Model)
+
+	if cmd == nil {
+		t.Fatal("expected Ctrl+Y to submit fullscreen keys")
+	}
+	if next.sendingFullscreenKeys {
+		t.Fatal("expected fullscreen key mode to clear after Ctrl+Y submit")
+	}
+}
+
+func TestFullscreenKeysFooterShowsSendHints(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.sendingFullscreenKeys = true
+
+	footer := strings.Join(model.footerParts(120), "  ")
+	for _, fragment := range []string{"[Enter] send exact", "[Ctrl+Y] send + Enter", "[Ctrl+J] insert Enter"} {
+		if !strings.Contains(footer, fragment) {
+			t.Fatalf("expected fullscreen keys footer to contain %q, got %q", fragment, footer)
+		}
+	}
+}
+
 func TestFullscreenKeysSentMessageUpdatesActiveCardFeedback(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.activeExecution = &controller.CommandExecution{

@@ -759,6 +759,14 @@ func normalizeFullscreenKeys(keys string) string {
 	return keys
 }
 
+func fullscreenKeysForSubmit(keys string, appendEnter bool) string {
+	keys = normalizeFullscreenKeys(keys)
+	if appendEnter {
+		keys += "\n"
+	}
+	return keys
+}
+
 func humanizeExecutionState(state controller.CommandExecutionState) string {
 	switch state {
 	case controller.CommandExecutionRunning:

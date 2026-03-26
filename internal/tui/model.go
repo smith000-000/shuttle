@@ -1159,6 +1159,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m.primaryAction()
 		case tea.KeyCtrlY:
+			if m.sendingFullscreenKeys {
+				return m.submitWithOptions(true)
+			}
 			return m.primaryAction()
 		case tea.KeyCtrlN:
 			if m.pendingProposal != nil {
@@ -1354,13 +1357,17 @@ func (m Model) handleActionCardKey(msg tea.KeyMsg) (tea.Model, bool, tea.Cmd) {
 }
 
 func (m Model) submit() (tea.Model, tea.Cmd) {
+	return m.submitWithOptions(false)
+}
+
+func (m Model) submitWithOptions(appendEnterToFullscreenKeys bool) (tea.Model, tea.Cmd) {
 	if (m.startupNotice != nil || m.pendingDangerousConfirm != nil) && !m.sendingFullscreenKeys {
 		return m, nil
 	}
 
 	text := strings.TrimSpace(m.input)
 	if m.sendingFullscreenKeys {
-		rawKeys := normalizeFullscreenKeys(m.input)
+		rawKeys := fullscreenKeysForSubmit(m.input, appendEnterToFullscreenKeys)
 		if rawKeys == "" {
 			return m, nil
 		}
