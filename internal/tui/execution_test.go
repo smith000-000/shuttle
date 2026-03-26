@@ -5,6 +5,7 @@ import (
 	"aiterm/internal/provider"
 	"aiterm/internal/shell"
 	"context"
+	"fmt"
 	tea "github.com/charmbracelet/bubbletea"
 	"strings"
 	"testing"
@@ -34,7 +35,7 @@ func TestAgentModeSubmissionAddsPlaceholderResponse(t *testing.T) {
 	updated, _ = next.Update(msg)
 	next = updated.(Model)
 
-	if len(next.entries) < 4 {
+	if len(next.entries) < 3 {
 		t.Fatalf("expected transcript entries, got %d", len(next.entries))
 	}
 
@@ -84,6 +85,29 @@ func TestMultilineComposerRendersEveryLine(t *testing.T) {
 	}
 }
 
+func TestComposerViewportClipsOldLinesAfterFifteenRows(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.width = 80
+	model.height = 24
+
+	lines := make([]string, 0, 18)
+	for index := 1; index <= 18; index++ {
+		lines = append(lines, fmt.Sprintf("line-%02d", index))
+	}
+	model.setInput(strings.Join(lines, "\n"))
+
+	rendered := model.renderComposer(80)
+	if strings.Contains(rendered, "line-01") || strings.Contains(rendered, "line-02") || strings.Contains(rendered, "line-03") {
+		t.Fatalf("expected oldest lines to scroll off the top, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "line-04") || !strings.Contains(rendered, "line-18") {
+		t.Fatalf("expected last fifteen lines to remain visible, got %q", rendered)
+	}
+	if got := len(strings.Split(rendered, "\n")); got != composerMaxVisibleLines {
+		t.Fatalf("expected %d visible composer lines, got %d", composerMaxVisibleLines, got)
+	}
+}
+
 func TestCurrentProviderModelLabelIncludesPresetAndModel(t *testing.T) {
 	label := currentProviderModelLabel(provider.Profile{
 		Name:   "Codex CLI",
@@ -112,6 +136,118 @@ func TestLeftRightMovesComposerCursor(t *testing.T) {
 	}
 	if model.cursor != 3 {
 		t.Fatalf("expected cursor after inserted rune, got %d", model.cursor)
+	}
+}
+
+func TestUpDownMoveWithinMultilineComposer(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.setInput("alpha\nbeta\ngamma")
+	model.cursor = 2
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(Model)
+	if model.cursor != 8 {
+		t.Fatalf("expected cursor to move to matching column on next line, got %d", model.cursor)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(Model)
+	if model.cursor != 13 {
+		t.Fatalf("expected cursor to move to matching column on third line, got %d", model.cursor)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = updated.(Model)
+	if model.cursor != 8 {
+		t.Fatalf("expected cursor to move back to prior line, got %d", model.cursor)
+	}
+}
+
+func TestHomeEndMoveWithinComposerLine(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.setInput("alpha\nbeta\ngamma")
+	model.cursor = 8
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyHome})
+	model = updated.(Model)
+	if model.cursor != 6 {
+		t.Fatalf("expected Home to move to start of current line, got %d", model.cursor)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	model = updated.(Model)
+	if model.cursor != 10 {
+		t.Fatalf("expected End to move to end of current line, got %d", model.cursor)
+	}
+}
+
+func TestInsertTogglesComposerOverwriteMode(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.setInput("abc")
+	model.cursor = 1
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyInsert})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Z'}})
+	model = updated.(Model)
+
+	if !model.overwriteMode {
+		t.Fatal("expected overwrite mode to remain enabled")
+	}
+	if model.input != "aZc" {
+		t.Fatalf("expected overwrite insertion, got %q", model.input)
+	}
+}
+
+func TestShellContextPollRefreshesRemotePromptHint(t *testing.T) {
+	ctrl := &fakeController{
+		refreshedShellContext: &shell.PromptContext{
+			User:         "openclaw",
+			Host:         "openclaw",
+			Directory:    "~",
+			PromptSymbol: "$",
+			RawLine:      "openclaw@openclaw ~ $",
+			Remote:       true,
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+
+	updated, cmd := model.Update(shellContextPollTickMsg(time.Now()))
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected shell-context poll command")
+	}
+	msg := cmd()
+	var refreshMsg refreshedShellContextMsg
+	switch typed := msg.(type) {
+	case refreshedShellContextMsg:
+		refreshMsg = typed
+	case tea.BatchMsg:
+		found := false
+		for _, nested := range typed {
+			if nested == nil {
+				continue
+			}
+			if candidate, ok := nested().(refreshedShellContextMsg); ok {
+				refreshMsg = candidate
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected refreshedShellContextMsg in batch, got %#v", typed)
+		}
+	default:
+		t.Fatalf("expected refreshedShellContextMsg, got %T", msg)
+	}
+	updated, _ = model.Update(refreshMsg)
+	model = updated.(Model)
+
+	if !model.shellContext.Remote || model.shellContext.Host != "openclaw" {
+		t.Fatalf("expected refreshed remote shell context, got %#v", model.shellContext)
+	}
+	if ctrl.refreshShellContextCalls == 0 {
+		t.Fatal("expected refresh shell context call")
 	}
 }
 

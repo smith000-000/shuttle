@@ -26,6 +26,13 @@ func (c *LocalController) prepareCommandExecutionTarget(ctx context.Context, tra
 		return trackedShell, nil, nil
 	}
 
+	c.mu.Lock()
+	currentShell := c.session.CurrentShell
+	c.mu.Unlock()
+	if currentShell != nil && currentShell.Remote {
+		return trackedShell, nil, nil
+	}
+
 	runner, ok := c.runner.(OwnedExecutionShellRunner)
 	if !ok {
 		return trackedShell, nil, nil

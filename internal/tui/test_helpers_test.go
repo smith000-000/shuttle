@@ -94,6 +94,8 @@ type fakeController struct {
 	checkInEvents            []controller.TranscriptEvent
 	shellEvents              []controller.TranscriptEvent
 	patchEvents              []controller.TranscriptEvent
+	newTaskEvents            []controller.TranscriptEvent
+	compactTaskEvents        []controller.TranscriptEvent
 	shellCommands            []string
 	appliedPatches           []string
 	decisionEvents           []controller.TranscriptEvent
@@ -102,12 +104,19 @@ type fakeController struct {
 	continueCalls            int
 	continueAfterPatchCalls  int
 	checkInCalls             int
+	newTaskCalls             int
+	compactTaskCalls         int
 	activeExecution          *controller.CommandExecution
 	refreshEvents            []controller.TranscriptEvent
 	abandonReason            string
 	peekShellTail            string
 	sessionName              string
 	trackedPaneID            string
+	contextUsage             controller.ContextWindowUsage
+	approvalMode             controller.ApprovalMode
+	refreshedShellContext    *shell.PromptContext
+	refreshShellContextErr   error
+	refreshShellContextCalls int
 }
 
 func (f *fakeController) SubmitAgentPrompt(_ context.Context, _ string) ([]controller.TranscriptEvent, error) {
@@ -267,7 +276,49 @@ func (f *fakeController) DecideApproval(_ context.Context, approvalID string, de
 	return append([]controller.TranscriptEvent(nil), f.decisionEvents...), nil
 }
 
+func (f *fakeController) StartNewTask(_ context.Context) ([]controller.TranscriptEvent, error) {
+	f.newTaskCalls++
+	if len(f.newTaskEvents) == 0 {
+		return []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventSystemNotice,
+				Payload: controller.TextPayload{Text: "Started a fresh task context. Shell continuity and provider settings were preserved."},
+			},
+		}, nil
+	}
+	return append([]controller.TranscriptEvent(nil), f.newTaskEvents...), nil
+}
+
+func (f *fakeController) CompactTask(_ context.Context) ([]controller.TranscriptEvent, error) {
+	f.compactTaskCalls++
+	if len(f.compactTaskEvents) == 0 {
+		return []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventSystemNotice,
+				Payload: controller.TextPayload{Text: "Compacted task context into a summary and kept 8 recent transcript event(s)."},
+			},
+		}, nil
+	}
+	return append([]controller.TranscriptEvent(nil), f.compactTaskEvents...), nil
+}
+
+func (f *fakeController) SetApprovalMode(_ context.Context, mode controller.ApprovalMode) ([]controller.TranscriptEvent, error) {
+	f.approvalMode = mode
+	return []controller.TranscriptEvent{{
+		Kind:    controller.EventSystemNotice,
+		Payload: controller.TextPayload{Text: controller.ApprovalModeDescription(mode)},
+	}}, nil
+}
+
 func (f *fakeController) RefreshShellContext(_ context.Context) (*shell.PromptContext, error) {
+	f.refreshShellContextCalls++
+	if f.refreshShellContextErr != nil {
+		return nil, f.refreshShellContextErr
+	}
+	if f.refreshedShellContext != nil {
+		contextCopy := *f.refreshedShellContext
+		return &contextCopy, nil
+	}
 	return &shell.PromptContext{
 		User:      "jsmith",
 		Host:      "linuxdesktop",
@@ -280,6 +331,17 @@ func (f *fakeController) PeekShellTail(_ context.Context, _ int) (string, error)
 		return f.peekShellTail, nil
 	}
 	return "waiting for input", nil
+}
+
+func (f *fakeController) EstimateContextUsage(_ string) controller.ContextWindowUsage {
+	return f.contextUsage
+}
+
+func (f *fakeController) ApprovalMode() controller.ApprovalMode {
+	if f.approvalMode == "" {
+		return controller.ApprovalModeConfirm
+	}
+	return f.approvalMode
 }
 
 func (f *fakeController) ActiveExecution() *controller.CommandExecution {

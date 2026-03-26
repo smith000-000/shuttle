@@ -538,6 +538,51 @@ func TestLocalControllerSubmitProposedShellCommandUsesOwnedExecutionPane(t *test
 	}
 }
 
+func TestLocalControllerSubmitProposedShellCommandUsesTrackedShellWhenUserShellRemote(t *testing.T) {
+	runner := &ownedExecutionRunner{
+		stubRunner: stubRunner{
+			result: shell.TrackedExecution{
+				CommandID: "cmd-2",
+				Command:   "touch openclawfoo.txt",
+				ExitCode:  0,
+			},
+		},
+		ownedPane: shell.OwnedExecutionPane{
+			SessionName: "shuttle-test",
+			PaneID:      "%9",
+			WindowID:    "@3",
+		},
+	}
+	controller := New(nil, runner, nil, SessionContext{
+		SessionName:      "shuttle-test",
+		TrackedShell:     TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
+		WorkingDirectory: "/home/jsmith",
+		CurrentShell: &shell.PromptContext{
+			User:         "openclaw",
+			Host:         "openclaw",
+			Directory:    "/home/openclaw",
+			PromptSymbol: "$",
+			RawLine:      "openclaw@openclaw /home/openclaw $",
+			Remote:       true,
+		},
+	})
+
+	events, err := controller.SubmitProposedShellCommand(context.Background(), "touch openclawfoo.txt")
+	if err != nil {
+		t.Fatalf("SubmitProposedShellCommand() error = %v", err)
+	}
+
+	if runner.startDir != "" {
+		t.Fatalf("expected no owned execution pane for remote shell, got start dir %q", runner.startDir)
+	}
+	if len(runner.paneIDs) != 1 || runner.paneIDs[0] != "%0" {
+		t.Fatalf("expected tracked shell pane %%0, got %#v", runner.paneIDs)
+	}
+	if len(events) != 2 || events[0].Kind != EventCommandStart || events[1].Kind != EventCommandResult {
+		t.Fatalf("expected direct tracked-shell execution start/result, got %#v", events)
+	}
+}
+
 func TestLocalControllerOwnedExecutionDoesNotOverwriteUserShellContext(t *testing.T) {
 	runner := &ownedExecutionRunner{
 		stubRunner: stubRunner{
