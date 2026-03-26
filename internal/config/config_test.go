@@ -5,6 +5,60 @@ import (
 	"testing"
 )
 
+func TestParseDerivesManagedWorkspaceDefaults(t *testing.T) {
+	tempDir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", filepath.Join(tempDir, "state"))
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(tempDir, "runtime"))
+
+	cfg, err := Parse([]string{"--dir", tempDir})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	expectedWorkspaceID := workspaceIDForPath(tempDir)
+	if cfg.WorkspaceID != expectedWorkspaceID {
+		t.Fatalf("expected workspace ID %q, got %q", expectedWorkspaceID, cfg.WorkspaceID)
+	}
+	if cfg.SessionName != managedSessionName(expectedWorkspaceID) {
+		t.Fatalf("expected derived session name %q, got %q", managedSessionName(expectedWorkspaceID), cfg.SessionName)
+	}
+	expectedSocket := filepath.Join(filepath.Join(tempDir, "runtime"), "shuttle", "tmux.sock")
+	if cfg.TmuxSocket != expectedSocket {
+		t.Fatalf("expected derived socket path %q, got %q", expectedSocket, cfg.TmuxSocket)
+	}
+}
+
+func TestParsePreservesExplicitTmuxOverrides(t *testing.T) {
+	cfg, err := Parse([]string{"--session", "custom-session", "--socket", "custom-socket"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	if cfg.SessionName != "custom-session" {
+		t.Fatalf("expected explicit session override, got %q", cfg.SessionName)
+	}
+	if cfg.TmuxSocket != "custom-socket" {
+		t.Fatalf("expected explicit socket override, got %q", cfg.TmuxSocket)
+	}
+}
+
+func TestParsePreservesEnvTmuxOverrides(t *testing.T) {
+	t.Setenv("SHUTTLE_SESSION", "env-session")
+	t.Setenv("SHUTTLE_TMUX_SOCKET", "env-socket")
+
+	cfg, err := Parse(nil)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	if cfg.SessionName != "env-session" {
+		t.Fatalf("expected env session override, got %q", cfg.SessionName)
+	}
+	if cfg.TmuxSocket != "env-socket" {
+		t.Fatalf("expected env socket override, got %q", cfg.TmuxSocket)
+	}
+}
+
 func TestParseResolvesOpenAIAPIKeyByProvider(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "openai-key")
 	t.Setenv("OPENROUTER_API_KEY", "openrouter-key")

@@ -92,7 +92,7 @@ export OPENAI_API_KEY="..."
 By default this runs:
 
 ```bash
-go run ./cmd/shuttle --socket shuttle-dev --session shuttle-dev --tui
+go run ./cmd/shuttle --tui
 ```
 
 ## Environment
@@ -115,6 +115,12 @@ Important variables:
 - `SHUTTLE_TRACE_CONSENT`: must be true or passed as `--trace-consent` when using sensitive trace
 
 `launch.sh` loads `./env.sh` if present, otherwise it falls back to `./env.sh.sample`.
+
+Release-oriented tmux defaults:
+- Shuttle now derives a stable workspace ID from the absolute project path
+- by default it uses a managed tmux socket at `$XDG_RUNTIME_DIR/shuttle/tmux.sock` or the XDG state fallback
+- by default it uses a derived tmux session name like `shuttle:<workspace-id>`
+- `--socket`, `--session`, `SHUTTLE_TMUX_SOCKET`, and `SHUTTLE_SESSION` still work as explicit dev/debug overrides
 
 ## Build and Test
 
@@ -139,7 +145,7 @@ make test-integration
 Run without the launcher:
 
 ```bash
-go run ./cmd/shuttle --socket shuttle-dev --session shuttle-dev --tui
+go run ./cmd/shuttle --tui
 ```
 
 Build a local binary:
@@ -181,7 +187,7 @@ Noninteractive agent smoke test:
 
 ```bash
 source ./env.sh
-go run ./cmd/shuttle --socket shuttle-dev --session shuttle-dev \
+go run ./cmd/shuttle \
   --agent "Give me a one-sentence summary of what you can do in Shuttle." \
   --provider openai --auth api_key --model "${SHUTTLE_MODEL}"
 ```
@@ -298,4 +304,4 @@ The TUI is intentionally keyboard-first. Current behavior is still evolving, so 
 - the serial shell-tracking model is in good shape, but remote/container semantic bootstrap is still incomplete
 - transcript and UI polish is still catching up with the newer shell/runtime model
 - multi-card or parallel execution UI is intentionally deferred
-- release packaging now has a GitHub release workflow and install script, but there is still no package-manager distribution path
+- release packaging now has a GitHub release workflow, install script, and managed tmux defaults, but there is still no package-manager distribution path
