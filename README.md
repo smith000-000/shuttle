@@ -2,7 +2,7 @@
 
 Shuttle is a tmux-backed AI terminal assistant.
 
-It runs a persistent real shell in the top tmux pane and a Bubble Tea TUI in the bottom pane. Agent-approved commands can also run in owned tmux execution panes, while the persistent shell remains the continuity surface for `F2`, `$>`, cwd, and recent manual shell activity.
+It runs a persistent real shell in the top tmux pane and a Bubble Tea TUI in the bottom pane. Agent-approved commands can also run in owned tmux execution panes for local work, while the persistent shell remains the continuity surface for `F2`, `$>`, cwd, recent manual shell activity, and remote SSH continuity.
 
 ## Status
 
@@ -14,6 +14,7 @@ What is working now:
 - tracked command observation with execution states
 - persistent user-shell context for cwd, recent shell output, and recent manual shell actions
 - owned tmux execution panes for agent-approved commands
+- remote tracked-shell execution stays in the tracked shell instead of spilling into a local owned pane
 - Agent and Shell modes in the TUI
 - approval and refine flow
 - local and remote handoff with `F2`
@@ -208,6 +209,7 @@ Core controls:
 - `F10`: open settings
 
 Slash commands in agent mode:
+- `/help`: open the in-app help view
 - `/approvals`: show or change the current session approval mode
 - `/new`: start a fresh task without restarting Shuttle or losing shell continuity
 - `/compact`: summarize older task context and keep a shorter live context window
@@ -222,6 +224,11 @@ Approval modes:
 Settings notes:
 - `F10` opens a menu with `Session Settings`, `Configure Providers`, `Change Active Provider`, and `Select Model`
 - provider detail editing supports `F7` to test the provider config and `F8` to save and activate it immediately
+- multiline composer rendering is capped to 15 visible lines and scrolls older lines off the top as you keep inserting newlines
+
+Terminal selection notes:
+- use `Shift` + drag for your terminal emulator's normal text selection while Bubble Tea mouse mode is active
+- use your terminal copy/paste shortcuts such as `Ctrl+Shift+C` and `Ctrl+Shift+V` for selected text and pasted input
 
 Transcript result notes:
 - successful silent commands collapse to a compact result line instead of showing `exit=0` and `(no output)`

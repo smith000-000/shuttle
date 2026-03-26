@@ -122,13 +122,17 @@ Status:
 - implemented on `main`:
   - `/new` resets task state while preserving Shuttle session continuity, tracked shell state, and provider selection
   - `/compact` stores a model-generated task summary and trims live transcript context to a recent tail
+  - `/help` opens the in-app help view directly from agent mode slash commands
   - `/approvals` switches the current session between `confirm`, bounded `auto`, and explicit-confirmation `dangerous` command-execution policy
   - `F10` settings now expose a session-local approval-mode selector plus clearer provider/model menu entry points
   - provider detail editing now supports `F7` health/auth tests and `F8` save-and-activate
   - multiline composer navigation now uses `Up/Down`, `Home/End`, and `Insert`, while transcript bounds move to `Ctrl+Home/Ctrl+End`
+  - multiline composer rendering is capped to a 15-line viewport that scrolls older lines off the top
+  - agent-owned execution stays in the tracked shell when the current user shell context is remote, instead of launching a local owned pane
   - the lower-right model status now shows an approximate live context-usage estimate, and shows the selected model limit when available
 
 Implemented scope:
+- `/help`: open the in-app help view from the composer
 - `/approvals`: change how aggressively Shuttle auto-runs safe agent commands in the current session
 - `/new`: start a fresh task in the current Shuttle session
 - `/compact`: summarize and compress the current task context while preserving enough state for the next turn
@@ -136,9 +140,11 @@ Implemented scope:
 - composer navigation: make multiline editing behave like a real text field without losing transcript scrolling
 
 Design rules:
+- `/help` should be a pure UI command that mirrors `F1`
 - `/approvals` is session-preserving, not task-preserving; `/new` and `/compact` must not reset it
 - `/approvals auto` only applies to controller-classified safe local shell commands; patches, remote shells, and risky actions remain explicit
 - `/approvals dangerous` must require an explicit confirmation warning before activation
+- remote tracked shells must stay authoritative for remote agent command execution; local owned execution panes are only for local work
 - `/new` resets task state, not session state
 - `/new` must preserve the active Shuttle workspace, tracked shell target, working-directory context, provider selection, and remote-shell continuity
 - `/compact` is task-preserving, not task-resetting
@@ -153,7 +159,9 @@ Delivered implementation slices:
 5. Added a controller-owned `CompactTask` path that asks the model for a structured summary, stores it, and trims transcript state safely.
 6. Added guardrails that block `/new` and `/compact` while a live execution or pending approval is still active.
 7. Added `F10` session/provider/model settings refinements, provider test/save+activate flows, and multiline composer navigation improvements.
-8. Added controller, provider-context, and TUI tests for approval mode, task reset, compaction, status-line rendering, provider settings actions, and multiline composer navigation.
+8. Added `/help`, terminal selection/copy guidance, and a capped multiline composer viewport.
+9. Added remote-shell execution routing hardening so agent commands stay remote when the tracked shell is remote.
+10. Added controller, provider-context, and TUI tests for approval mode, task reset, compaction, status-line rendering, provider settings actions, remote-shell execution routing, and multiline composer behavior.
 
 Exit criteria:
 - a user can start a fresh task without restarting Shuttle or losing shell continuity
