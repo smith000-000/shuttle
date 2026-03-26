@@ -157,6 +157,10 @@ make package VERSION=v0.1.0
 
 By default `make package` builds `linux/amd64`, `linux/arm64`, `darwin/amd64`, and `darwin/arm64` archives under `./dist/` and writes `SHA256SUMS`.
 
+GitHub release packaging:
+- pushing a `v*` tag runs the release workflow and publishes the packaged archives plus `SHA256SUMS`
+- `Actions -> Release` also supports manual packaging via `workflow_dispatch`, with an optional publish toggle for dry runs
+
 ## Provider Smoke Test
 
 Noninteractive agent smoke test:
@@ -280,4 +284,4 @@ The TUI is intentionally keyboard-first. Current behavior is still evolving, so 
 - the serial shell-tracking model is in good shape, but remote/container semantic bootstrap is still incomplete
 - transcript and UI polish is still catching up with the newer shell/runtime model
 - multi-card or parallel execution UI is intentionally deferred
-- release packaging is still manual: there is no installer, package manager distribution, or CI release pipeline yet
+- release packaging now has a GitHub release workflow, but there is still no installer or package-manager distribution path

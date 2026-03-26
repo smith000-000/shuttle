@@ -25,6 +25,7 @@ Recently landed on `main`:
 - session-local approval-mode control via `/approvals`, with bounded auto-run for safe local inspection and test commands
 - lower-right model status showing approximate live context-window usage
 - initial manual release-packaging support with ldflag-driven build metadata, `--version`, and versioned archive generation under `dist/`
+- tag-driven GitHub Actions release packaging built on the local archive script, with workflow artifacts and release-asset upload
 
 Execution-monitor redesign / semantic shell hardening status on `semantic-shell-bootstrap`:
 - implemented: first-class command monitor, local managed shell transport, `awaiting_input` detection, `interactive_fullscreen` detection, `lost` execution state, `F2` handoff/reconciliation, raw `KEYS>` terminal input, remote prompt-return reconciliation, and agent-driven `keys` proposals
@@ -95,7 +96,6 @@ Milestone 5 still needs:
 - broader semantic shell integration and subshell/bootstrap support using signals such as `OSC 133` and `OSC 7`
 - any richer bootstrap or injected helper mode should come later, after the standards-based marker path exists
 - release pipeline polish beyond the first manual archive script:
-  - CI-driven archive publishing
   - installer/package-manager integration
   - runtime-management defaults that hide raw tmux socket/session flags in release UX
 - before touching richer subshell/bootstrap behavior for `ssh`, `docker exec -it`, or nested shells, run the manual regression checklist in [shell-execution-strategy.md](shell-execution-strategy.md) to avoid regressing the current moderately functional context-transition path
