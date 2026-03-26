@@ -43,6 +43,7 @@ What is working now:
 - task-context controls for `/new` and `/compact`
 - session-local `/approvals` control with `confirm`, bounded `auto`, and explicit-confirmation `dangerous` modes
 - lower-right model status showing approximate live context-window usage
+- initial release packaging via versioned `tar.gz` archives, checksum output, and `--version` build metadata
 
 What is still in progress:
 - broader semantic shell integration (`OSC 133` / `OSC 7`) consumption and subshell/bootstrap support
@@ -140,6 +141,21 @@ Run without the launcher:
 ```bash
 go run ./cmd/shuttle --socket shuttle-dev --session shuttle-dev --tui
 ```
+
+Build a local binary:
+
+```bash
+make build
+./bin/shuttle --version
+```
+
+Create release archives:
+
+```bash
+make package VERSION=v0.1.0
+```
+
+By default `make package` builds `linux/amd64`, `linux/arm64`, `darwin/amd64`, and `darwin/arm64` archives under `./dist/` and writes `SHA256SUMS`.
 
 ## Provider Smoke Test
 
@@ -264,4 +280,4 @@ The TUI is intentionally keyboard-first. Current behavior is still evolving, so 
 - the serial shell-tracking model is in good shape, but remote/container semantic bootstrap is still incomplete
 - transcript and UI polish is still catching up with the newer shell/runtime model
 - multi-card or parallel execution UI is intentionally deferred
-- release packaging is intentionally deferred for now
+- release packaging is still manual: there is no installer, package manager distribution, or CI release pipeline yet

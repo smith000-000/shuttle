@@ -25,6 +25,7 @@ const (
 )
 
 type Config struct {
+	Version                       bool
 	SessionName                   string
 	StartDir                      string
 	TmuxSocket                    string
@@ -89,6 +90,7 @@ func Parse(args []string) (Config, error) {
 	fs := flag.NewFlagSet("shuttle", flag.ContinueOnError)
 
 	cfg := Config{}
+	fs.BoolVar(&cfg.Version, "version", false, "print Shuttle version information and exit")
 	fs.StringVar(&cfg.SessionName, "session", sessionName, "tmux session name")
 	fs.StringVar(&cfg.StartDir, "dir", workingDir, "working directory for new panes")
 	fs.StringVar(&cfg.TmuxSocket, "socket", socketName, "tmux socket name for an isolated server")

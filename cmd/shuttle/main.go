@@ -13,6 +13,7 @@ import (
 	"aiterm/internal/config"
 	"aiterm/internal/controller"
 	"aiterm/internal/logging"
+	"aiterm/internal/version"
 )
 
 func main() {
@@ -20,6 +21,11 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
 		os.Exit(2)
+	}
+
+	if cfg.Version {
+		fmt.Println(version.String())
+		return
 	}
 
 	if cfg.TraceMode == config.TraceModeSensitive && !cfg.TraceConsent {
@@ -47,6 +53,7 @@ func main() {
 
 	logging.Trace(
 		"app.start",
+		"build", version.String(),
 		"session", cfg.SessionName,
 		"socket", cfg.TmuxSocket,
 		"start_dir", cfg.StartDir,
