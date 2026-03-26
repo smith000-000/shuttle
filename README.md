@@ -157,9 +157,23 @@ make package VERSION=v0.1.0
 
 By default `make package` builds `linux/amd64`, `linux/arm64`, `darwin/amd64`, and `darwin/arm64` archives under `./dist/` and writes `SHA256SUMS`.
 
+Install the latest release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/smith000-000/shuttle/main/scripts/install-release.sh | bash
+```
+
+Install a specific release or custom location:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/smith000-000/shuttle/main/scripts/install-release.sh | \
+  VERSION=v0.1.0 INSTALL_DIR="$HOME/.local/bin" bash
+```
+
 GitHub release packaging:
 - pushing a `v*` tag runs the release workflow and publishes the packaged archives plus `SHA256SUMS`
 - `Actions -> Release` also supports manual packaging via `workflow_dispatch`, with an optional publish toggle for dry runs
+- `make test-packaging` smoke-tests archive creation plus the release installer against a local file-backed release directory
 
 ## Provider Smoke Test
 
@@ -284,4 +298,4 @@ The TUI is intentionally keyboard-first. Current behavior is still evolving, so 
 - the serial shell-tracking model is in good shape, but remote/container semantic bootstrap is still incomplete
 - transcript and UI polish is still catching up with the newer shell/runtime model
 - multi-card or parallel execution UI is intentionally deferred
-- release packaging now has a GitHub release workflow, but there is still no installer or package-manager distribution path
+- release packaging now has a GitHub release workflow and install script, but there is still no package-manager distribution path
