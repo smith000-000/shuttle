@@ -19,7 +19,8 @@ The persistent user shell target is:
 - represented in controller state as `SessionContext.TrackedShell`
 
 Current design rule:
-- the persistent tracked shell is the continuity surface for `$>`, `F2`, cwd, recent manual commands, and recent manual file-affecting actions
+- the persistent tracked shell is the continuity surface for `$>`, cwd, recent manual commands, and recent manual file-affecting actions
+- `F2` normally targets that persistent shell, but temporarily targets an owned execution pane when the active owned command is in `awaiting_input`, `interactive_fullscreen`, or an active handoff state
 - approved agent commands no longer need to run inside that persistent shell pane
 - agent-approved commands can run in detached owned tmux panes and are tracked through their own `CommandExecution.TrackedShell`
 - the TUI is not the source of truth for either target
@@ -139,17 +140,17 @@ Relevant files:
 
 Responsibilities:
 - render transcript and shell state
-- start `F2` handoff into the tracked shell pane
-- route `F2` to the persistent tracked shell pane
+- start `F2` handoff into the controller-selected take-control pane
+- route `F2` to the controller-selected take-control target
 - route `KEYS>` and local interrupts to the active execution pane when one exists
 - mirror controller-tracked pane/session updates into local UI state
 
 Important rule:
 - the TUI does not decide which pane is authoritative
-- it asks the controller for the current tracked shell target and mirrors that into handoff config
+- it asks the controller for both the persistent tracked shell target and the current take-control target, and mirrors those into local UI state
 - the TUI does not invent durable active-command records anymore; active command state comes from controller `CommandStart` events and `ActiveExecution()` polling
-- `F2` is only a command handoff when the active execution actually lives in the persistent tracked shell pane
-- when the active execution runs in an owned pane, `F2` opens the user shell while the command keeps running in the background
+- `F2` is a command handoff whenever the active execution pane itself is the take-control target
+- owned interactive execution panes are marked in tmux as temporary Shuttle execution panes and are expected to disappear when the command completes
 
 ---
 
@@ -157,7 +158,7 @@ Important rule:
 
 Current fallback ladder:
 - use the controller's currently tracked execution when one exists
-- on `F2` return, only reconcile prompt state when that execution actually lives in the tracked user shell pane
+- on `F2` return, reconcile prompt state against the controller-selected take-control target for the active execution
 - if no execution reconciles, ask the controller to attach to a manually started foreground command
 - if neither applies, treat the shell as having no active tracked command
 
@@ -215,7 +216,7 @@ Path:
 Important rule:
 - owned execution results belong to `LastCommandResult` and the execution record
 - they do not replace persistent user-shell cwd or prompt state
-- `F2` does not jump into the owned execution pane in this slice
+- owned interactive prompts and fullscreen apps can take over `F2` temporarily, while noninteractive owned execution panes still keep `F2` on the persistent user shell
 
 This makes agent command tracking dramatically more stable because command lifecycle no longer depends on inferring what is happening inside the shared user shell pane.
 
@@ -411,8 +412,8 @@ This fixed a class of bugs where:
 
 ## 7.2 Handoff and Resume Path
 
-1. TUI takes control with `F2` using the current tracked shell target.
-2. User interacts directly with the shell pane.
+1. TUI takes control with `F2` using the controller-selected take-control target.
+2. User interacts directly with the persistent shell pane or a temporary owned execution pane.
 3. On return, controller first attempts prompt-return reconciliation for an existing active execution.
 4. If no owned execution reconciles, controller tries to attach to a foreground command.
 5. Updated shell context and results flow back into transcript state.

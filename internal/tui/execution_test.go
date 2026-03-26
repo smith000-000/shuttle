@@ -586,6 +586,33 @@ func TestF2DoesNotMarkOwnedExecutionAsHandoff(t *testing.T) {
 	}
 }
 
+func TestF2MarksOwnedInteractiveExecutionAsHandoff(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sudo apt update",
+		Origin:    controller.CommandOriginAgentProposal,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now(),
+		TrackedShell: controller.TrackedShellTarget{
+			SessionName: "shuttle-test",
+			PaneID:      "%9",
+		},
+	}
+	model.takeControl.TrackedPaneID = "%9"
+	model.takeControl.TemporaryPane = true
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF2})
+	next := updated.(Model)
+
+	if next.activeExecution == nil || next.activeExecution.State != controller.CommandExecutionHandoffActive {
+		t.Fatalf("expected owned interactive execution to enter handoff, got %#v", next.activeExecution)
+	}
+	if !next.handoffVisible {
+		t.Fatal("expected owned interactive execution to show handoff state")
+	}
+}
+
 func TestTakeControlFinishedSyncsTrackedTopPane(t *testing.T) {
 	ctrl := &fakeController{sessionName: "shuttle-recovered", trackedPaneID: "%7"}
 	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
@@ -889,6 +916,32 @@ func TestActiveExecutionCardExplainsOwnedExecutionPane(t *testing.T) {
 	}
 }
 
+func TestActiveExecutionCardOffersTakeControlForOwnedInteractivePane(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sudo apt update",
+		Origin:    controller.CommandOriginAgentProposal,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now(),
+		TrackedShell: controller.TrackedShellTarget{
+			SessionName: "shuttle-test",
+			PaneID:      "%9",
+		},
+		LatestOutputTail: "[sudo] password for localuser:",
+	}
+	model.takeControl.TrackedPaneID = "%9"
+	model.takeControl.TemporaryPane = true
+
+	card := model.renderActiveExecutionCard(100)
+	if !strings.Contains(card, "F2 take control") {
+		t.Fatalf("expected owned interactive card to advertise F2 takeover, got %q", card)
+	}
+	if !strings.Contains(card, "Temporary Shuttle execution pane") {
+		t.Fatalf("expected owned interactive card to explain temporary pane, got %q", card)
+	}
+}
+
 func TestSubmitShellCommandWhileFullscreenPromptsForConfirmation(t *testing.T) {
 	ctrl := &fakeController{}
 	model := NewModel(fakeWorkspace(), ctrl)
@@ -1163,6 +1216,17 @@ func TestTakeControlFinishedRestartsTickingForActiveExecution(t *testing.T) {
 	}
 }
 
+func TestTakeControlFinishedRestoresMouseTracking(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.handoffVisible = true
+
+	_, cmd := model.Update(takeControlFinishedMsg{})
+
+	if !cmdContainsMessageType(t, cmd, tea.EnableMouseCellMotion()) {
+		t.Fatal("expected take-control return to re-enable mouse tracking")
+	}
+}
+
 func TestTakeControlFinishedPreservesExecutionAcrossTransientNilPoll(t *testing.T) {
 	ctrl := &fakeController{}
 	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
@@ -1329,6 +1393,104 @@ func TestActiveExecutionCheckInMsgAppendsTranscriptWithoutClearingExecution(t *t
 	}
 	if next.entries[len(next.entries)-1].Title != "agent" {
 		t.Fatalf("expected agent entry, got %q", next.entries[len(next.entries)-1].Title)
+	}
+}
+
+func TestInteractiveCheckInPausesAfterRetryLimit(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-agent",
+		Command:   "sudo apt update",
+		Origin:    controller.CommandOriginAgentProposal,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now().Add(-2 * time.Minute),
+	}
+	model.checkInInFlight = true
+	model.interactiveCheckInCount = maxInteractiveCheckIns - 1
+
+	updated, _ := model.Update(activeExecutionCheckInMsg{
+		executionID: "cmd-agent",
+		events: []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventAgentMessage,
+				Payload: controller.TextPayload{Text: "Still waiting for the sudo password."},
+			},
+		},
+	})
+	next := updated.(Model)
+
+	if !next.interactiveCheckInPaused {
+		t.Fatal("expected interactive check-ins to pause after retry limit")
+	}
+	last := next.entries[len(next.entries)-1]
+	if last.Title != "system" || !strings.Contains(last.Body, "Paused automatic agent check-ins") {
+		t.Fatalf("expected pause notice, got %#v", last)
+	}
+}
+
+func TestCtrlGResumesPausedInteractiveCheckIns(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-agent",
+		Command:   "sudo apt update",
+		Origin:    controller.CommandOriginAgentProposal,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now().Add(-2 * time.Minute),
+	}
+	model.interactiveCheckInPaused = true
+	model.interactiveCheckInCount = maxInteractiveCheckIns
+	model.lastCheckInAt = time.Now()
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
+	next := updated.(Model)
+
+	if next.interactiveCheckInPaused {
+		t.Fatal("expected Ctrl+G to resume paused interactive check-ins")
+	}
+	if next.interactiveCheckInCount != 0 {
+		t.Fatalf("expected paused interactive retry count to reset, got %d", next.interactiveCheckInCount)
+	}
+	if cmd == nil {
+		t.Fatal("expected Ctrl+G resume to schedule follow-up work")
+	}
+}
+
+func TestInteractivePauseActionRFocusesAgentComposer(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.mode = ShellMode
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-agent",
+		Command:   "sudo apt update",
+		Origin:    controller.CommandOriginAgentProposal,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now().Add(-2 * time.Minute),
+	}
+	model.interactiveCheckInPaused = true
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	next := updated.(Model)
+
+	if next.mode != AgentMode {
+		t.Fatalf("expected R to focus the agent composer, got mode %s", next.mode)
+	}
+}
+
+func TestParseFullscreenKeyEventsSupportsControlTokens(t *testing.T) {
+	events := parseFullscreenKeyEvents("password<Ctrl+C><Esc>\n")
+	if len(events) != 4 {
+		t.Fatalf("expected 4 key events, got %#v", events)
+	}
+	if events[0].literal != "password" {
+		t.Fatalf("expected literal password segment, got %#v", events[0])
+	}
+	if events[1].tmuxKey != "C-c" {
+		t.Fatalf("expected Ctrl+C token to map to tmux key, got %#v", events[1])
+	}
+	if events[2].tmuxKey != "Escape" {
+		t.Fatalf("expected Esc token to map to tmux key, got %#v", events[2])
+	}
+	if events[3].tmuxKey != "Enter" {
+		t.Fatalf("expected newline to map to Enter, got %#v", events[3])
 	}
 }
 

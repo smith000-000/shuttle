@@ -73,6 +73,12 @@ type shellTailMsg struct {
 	err  error
 }
 
+func restoreMouseTrackingCmd() tea.Cmd {
+	return func() tea.Msg {
+		return tea.EnableMouseCellMotion()
+	}
+}
+
 type activeExecutionMsg struct {
 	execution *controller.CommandExecution
 	events    []controller.TranscriptEvent
@@ -95,6 +101,7 @@ const (
 	actionCardConfirmFullscreen actionCardAction = "confirm_fullscreen"
 	actionCardCancelFullscreen  actionCardAction = "cancel_fullscreen"
 	actionCardTakeControl       actionCardAction = "take_control"
+	actionCardResumeInteractive actionCardAction = "resume_interactive"
 	actionCardApprove           actionCardAction = "approve"
 	actionCardReject            actionCardAction = "reject"
 	actionCardRefine            actionCardAction = "refine"
@@ -269,6 +276,7 @@ const (
 	shellTailPollTimeout = 750 * time.Millisecond
 	firstCheckInDelay    = 10 * time.Second
 	repeatCheckInDelay   = 30 * time.Second
+	maxInteractiveCheckIns = 3
 )
 
 var (
@@ -329,6 +337,8 @@ type Model struct {
 	exitConfirmToken            uint64
 	checkInInFlight             bool
 	lastCheckInAt               time.Time
+	interactiveCheckInCount     int
+	interactiveCheckInPaused    bool
 	lastInterruptNoticeID       string
 	activeProvider              provider.Profile
 	overwriteMode               bool
@@ -552,7 +562,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			m.selectedEntry = len(m.entries) - 1
 			m.clampSelection()
-			return m, nil
+			return m, restoreMouseTrackingCmd()
 		}
 		m.handoffVisible = false
 		m.syncTrackedShellTarget()
@@ -589,9 +599,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					events: events,
 					err:    err,
 				}
-			}, tickBusy(), m.refreshShellContextCmd(), m.pollShellTailCmd())
+			}, tickBusy(), m.refreshShellContextCmd(), m.pollShellTailCmd(), restoreMouseTrackingCmd())
 		}
 		m.handoffReturnGraceUntil = time.Time{}
+		followUpCmds = append(followUpCmds, restoreMouseTrackingCmd())
 		return m, tea.Batch(followUpCmds...)
 	case refreshedShellContextMsg:
 		if msg.context != nil {
@@ -672,7 +683,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.lastCheckInAt = time.Now()
+		if executionNeedsUserDrivenResume(m.activeExecution) {
+			m.interactiveCheckInCount++
+		}
 		if len(msg.events) == 0 {
+			if executionNeedsUserDrivenResume(m.activeExecution) && m.interactiveCheckInCount >= maxInteractiveCheckIns {
+				m.pauseInteractiveCheckIns()
+			}
 			return m, nil
 		}
 		pinned := m.isTranscriptPinned()
@@ -684,6 +701,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.selectedEntry = len(m.entries) - 1
 		m.clampSelection()
+		if executionNeedsUserDrivenResume(m.activeExecution) && m.interactiveCheckInCount >= maxInteractiveCheckIns {
+			m.pauseInteractiveCheckIns()
+		}
 		return m, nil
 	case shellInterruptMsg:
 		logging.Trace("tui.shell_interrupt.finished", "error", errString(msg.err), "active_execution", activeExecutionID(m.activeExecution))
@@ -1143,6 +1163,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlO:
 			return m.openDetail()
 		case tea.KeyCtrlG:
+			if m.pendingApproval == nil && m.pendingProposal == nil && m.interactiveCheckInPaused && executionNeedsUserDrivenResume(m.activeExecution) {
+				return m.resumePausedInteractiveCheckIns()
+			}
 			if m.pendingApproval == nil && m.pendingProposal == nil && m.activePlan != nil {
 				return m.continueActivePlan()
 			}
@@ -1171,6 +1194,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlR:
 			if m.pendingProposal != nil {
 				return m.refineProposal()
+			}
+			if m.pendingApproval == nil && m.interactiveCheckInPaused && executionNeedsUserDrivenResume(m.activeExecution) {
+				return m.focusAgentComposerForActiveExecution()
 			}
 			return m.refineApproval()
 		case tea.KeyCtrlT:
@@ -1255,6 +1281,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					case 'R':
 						if m.pendingProposal != nil {
 							return m.refineProposal()
+						}
+						if m.pendingApproval == nil && m.interactiveCheckInPaused && executionNeedsUserDrivenResume(m.activeExecution) {
+							return m.focusAgentComposerForActiveExecution()
 						}
 						return m.refineApproval()
 					case 'E':
@@ -1656,6 +1685,8 @@ func (m Model) startControllerRequest(mark func(*Model), invoke func(context.Con
 
 func (m Model) primaryAction() (tea.Model, tea.Cmd) {
 	switch {
+	case m.pendingApproval == nil && m.pendingProposal == nil && m.interactiveCheckInPaused && executionNeedsUserDrivenResume(m.activeExecution):
+		return m.resumePausedInteractiveCheckIns()
 	case m.pendingApproval != nil:
 		logging.Trace("tui.primary_action", "action", "approve", "approval_id", m.pendingApproval.ID)
 		return m.decideApproval(controller.DecisionApprove)
@@ -1671,6 +1702,27 @@ func (m Model) primaryAction() (tea.Model, tea.Cmd) {
 	default:
 		return m, nil
 	}
+}
+
+func (m Model) resumePausedInteractiveCheckIns() (tea.Model, tea.Cmd) {
+	if !m.interactiveCheckInPaused || m.activeExecution == nil {
+		return m, nil
+	}
+
+	m.interactiveCheckInPaused = false
+	m.interactiveCheckInCount = 0
+	m.lastCheckInAt = time.Time{}
+	return m, tea.Batch(tickBusy(), m.pollActiveExecutionCmd(), m.pollShellTailCmd())
+}
+
+func (m Model) focusAgentComposerForActiveExecution() (tea.Model, tea.Cmd) {
+	if m.activeExecution == nil {
+		return m, nil
+	}
+
+	m.mode = AgentMode
+	m.recomputeCompletion()
+	return m, nil
 }
 
 func (m Model) confirmFullscreenAction() (tea.Model, tea.Cmd) {
@@ -1784,7 +1836,7 @@ func (m Model) takeControlNow() (tea.Model, tea.Cmd) {
 		m.inFlightCancel()
 		m.inFlightCancel = nil
 	}
-	if m.activeExecution != nil && m.activeExecutionUsesTrackedShell() {
+	if m.activeExecution != nil && (m.takeControlTargetsActiveExecution() || m.activeExecutionUsesTrackedShell()) {
 		updated := *m.activeExecution
 		m.handoffPriorState = updated.State
 		updated.State = controller.CommandExecutionHandoffActive

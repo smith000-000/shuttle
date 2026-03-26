@@ -146,6 +146,7 @@ func Parse(args []string) (Config, error) {
 	if strings.TrimSpace(cfg.SessionName) == "" {
 		cfg.SessionName = managedSessionName(cfg.WorkspaceID)
 	}
+	cfg.SessionName = normalizeSessionName(cfg.SessionName)
 	if strings.TrimSpace(cfg.TmuxSocket) == "" {
 		cfg.TmuxSocket = managedSocketPath(cfg.RuntimeDir)
 	}
@@ -197,7 +198,15 @@ func managedSessionName(workspaceID string) string {
 	if workspaceID == "" {
 		return "shuttle"
 	}
-	return "shuttle:" + workspaceID
+	return "shuttle_" + workspaceID
+}
+
+func normalizeSessionName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	return strings.ReplaceAll(name, ":", "_")
 }
 
 func managedSocketPath(runtimeDir string) string {

@@ -8,6 +8,11 @@ import (
 	"aiterm/internal/logging"
 )
 
+const (
+	ownedExecutionWindowName = "shuttle-exec [temporary]"
+	ownedExecutionPaneTitle  = "shuttle-exec temporary"
+)
+
 type OwnedExecutionPane struct {
 	SessionName string
 	PaneID      string
@@ -52,6 +57,7 @@ func (o *Observer) CreateOwnedExecutionPane(ctx context.Context, startDir string
 	if target.SessionName == "" {
 		target.SessionName = strings.TrimSpace(o.sessionName)
 	}
+	o.markOwnedExecutionPane(ctx, target)
 
 	cleanup := func(ctx context.Context) error {
 		windowID := target.WindowID
@@ -77,4 +83,21 @@ func (o *Observer) CreateOwnedExecutionPane(ctx context.Context, startDir string
 	)
 
 	return target, cleanup, nil
+}
+
+func (o *Observer) markOwnedExecutionPane(ctx context.Context, target OwnedExecutionPane) {
+	windowID := strings.TrimSpace(target.WindowID)
+	if windowID != "" {
+		if err := o.tmuxClient.SetWindowOption(ctx, windowID, "automatic-rename", "off"); err != nil {
+			logging.TraceError("shell.owned_execution.window_option_error", err, "window", windowID)
+		}
+		if err := o.tmuxClient.RenameWindow(ctx, windowID, ownedExecutionWindowName); err != nil {
+			logging.TraceError("shell.owned_execution.rename_error", err, "window", windowID)
+		}
+	}
+	if paneID := strings.TrimSpace(target.PaneID); paneID != "" {
+		if err := o.tmuxClient.SetPaneTitle(ctx, paneID, ownedExecutionPaneTitle); err != nil {
+			logging.TraceError("shell.owned_execution.pane_title_error", err, "pane", paneID)
+		}
+	}
 }

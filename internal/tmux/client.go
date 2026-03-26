@@ -161,6 +161,21 @@ func (c *Client) SendLiteralKeys(ctx context.Context, target string, text string
 	return err
 }
 
+func (c *Client) SetPaneTitle(ctx context.Context, target string, title string) error {
+	_, err := c.run(ctx, "select-pane", "-t", target, "-T", title)
+	return err
+}
+
+func (c *Client) RenameWindow(ctx context.Context, target string, name string) error {
+	_, err := c.run(ctx, "rename-window", "-t", target, name)
+	return err
+}
+
+func (c *Client) SetWindowOption(ctx context.Context, target string, name string, value string) error {
+	_, err := c.run(ctx, "set-window-option", "-t", target, name, value)
+	return err
+}
+
 func (c *Client) InterruptForegroundProcess(ctx context.Context, target string) error {
 	pane, err := c.PaneInfo(ctx, target)
 	if err != nil {

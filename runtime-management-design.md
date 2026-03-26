@@ -90,7 +90,7 @@ Session names should be derived from the workspace ID.
 Recommended format:
 
 ```text
-session_name = shuttle:<short-workspace-id>
+session_name = shuttle_<short-workspace-id>
 ```
 
 Human-readable optional metadata may be stored in the registry, but the session name itself should stay compact and safe for tmux.

@@ -247,6 +247,31 @@ func (m Model) currentActionCardSpec() *actionCardSpec {
 		}
 	}
 
+	if m.pendingApproval == nil && m.pendingProposal == nil && m.interactiveCheckInPaused && executionNeedsUserDrivenResume(m.activeExecution) {
+		command := "interactive command"
+		if m.activeExecution != nil && strings.TrimSpace(m.activeExecution.Command) != "" {
+			command = m.activeExecution.Command
+		}
+		stateLabel := "interactive screen"
+		if m.activeExecution != nil && m.activeExecution.State == controller.CommandExecutionAwaitingInput {
+			stateLabel = "input prompt"
+		}
+		return &actionCardSpec{
+			title: "Interactive Wait Paused",
+			body: []string{
+				fmt.Sprintf("Automatic agent check-ins are paused while this %s is active.", stateLabel),
+				"command: " + command,
+				"Use F2 for direct control, or S for KEYS> if a few explicit tmux key events are enough.",
+			},
+			buttons: []actionCardButton{
+				{label: "Ctrl+G resume", action: actionCardResumeInteractive},
+				{label: "R tell agent", action: actionCardRefine},
+				{label: "F2 take control", action: actionCardTakeControl},
+			},
+			borderColor: lipgloss.Color("214"),
+		}
+	}
+
 	if m.pendingApproval != nil {
 		body := []string{
 			m.pendingApproval.Title,
@@ -379,14 +404,19 @@ func (m Model) renderActiveExecutionCard(width int) string {
 		"command: " + m.activeExecution.Command,
 	}
 	usesTrackedShell := m.activeExecutionUsesTrackedShell()
+	takeControlTargetsExecution := m.takeControlTargetsActiveExecution()
 	if m.activeExecution.State == controller.CommandExecutionInteractiveFullscreen {
 		body = append(body, "Fullscreen terminal app detected.")
 		if strings.TrimSpace(m.lastFullscreenKeys) != "" {
 			body = append(body, "last keys: "+previewFullscreenKeys(m.lastFullscreenKeys))
 		}
-		if usesTrackedShell {
+		if takeControlTargetsExecution || usesTrackedShell {
 			body = append(body, "F2 take control  S send keys")
-			body = append(body, "Exit or control the fullscreen app manually from the shell view.")
+			if usesTrackedShell {
+				body = append(body, "Exit or control the fullscreen app manually from the shell view.")
+			} else {
+				body = append(body, "Temporary Shuttle execution pane. It closes when the command finishes.")
+			}
 		} else {
 			body = append(body, "S send keys")
 			body = append(body, "This command is running in an owned execution pane. F2 opens the persistent user shell.")
@@ -397,14 +427,20 @@ func (m Model) renderActiveExecutionCard(width int) string {
 			lines = lines[len(lines)-2:]
 		}
 		body = append(body, "tail: "+strings.Join(lines, " | "))
-		if usesTrackedShell {
+		if takeControlTargetsExecution || usesTrackedShell {
 			body = append(body, "F2 take control")
+			if takeControlTargetsExecution && !usesTrackedShell {
+				body = append(body, "Temporary Shuttle execution pane. It closes when the command finishes.")
+			}
 		} else {
 			body = append(body, "Running in owned execution pane. F2 opens the persistent user shell.")
 		}
 	} else {
-		if usesTrackedShell {
+		if takeControlTargetsExecution || usesTrackedShell {
 			body = append(body, "F2 take control")
+			if takeControlTargetsExecution && !usesTrackedShell {
+				body = append(body, "Temporary Shuttle execution pane. It closes when the command finishes.")
+			}
 		} else {
 			body = append(body, "Running in owned execution pane. F2 opens the persistent user shell.")
 		}
@@ -722,6 +758,8 @@ func (m Model) footerParts(width int) []string {
 			parts = append(parts, "[Y/N/R]")
 		} else if m.pendingProposal != nil && m.pendingProposal.Command != "" {
 			parts = append(parts, "[Y/N/R/E]")
+		} else if m.interactiveCheckInPaused && executionNeedsUserDrivenResume(m.activeExecution) {
+			parts = append(parts, "[Ctrl+G]", "[R]")
 		}
 		return parts
 	case width < 100:
@@ -743,6 +781,8 @@ func (m Model) footerParts(width int) []string {
 			parts = append(parts, "[Y/N/R]")
 		} else if m.pendingProposal != nil && m.pendingProposal.Command != "" {
 			parts = append(parts, "[Y/N/R/E]")
+		} else if m.interactiveCheckInPaused && executionNeedsUserDrivenResume(m.activeExecution) {
+			parts = append(parts, "[Ctrl+G] resume", "[R] agent")
 		}
 		return parts
 	}
@@ -771,6 +811,8 @@ func (m Model) footerParts(width int) []string {
 		parts = append(parts, "[Y] apply", "[N] reject", "[R] ask agent")
 	} else if m.pendingProposal != nil && m.pendingProposal.Command != "" {
 		parts = append(parts, "[Y] continue", "[N] reject", "[R] ask agent", "[E] tweak command")
+	} else if m.interactiveCheckInPaused && executionNeedsUserDrivenResume(m.activeExecution) {
+		parts = append(parts, "[Ctrl+G] resume", "[R] tell agent")
 	}
 	parts = append(parts, "[Ctrl+C] quit")
 	return parts
@@ -1036,9 +1078,10 @@ func helpContentLines(width int, mode Mode, canSendKeys bool) []string {
 		"",
 		"# Global Keys",
 		"F1: open or close this help view",
-		"F2: jump to the shell pane / take control",
+		"F2: take control of the persistent shell, or the active temporary execution pane when an owned interactive command needs direct input",
 		"F10: open settings",
 		"Ctrl+C: quit Shuttle",
+		"Ctrl+G: continue an active plan, or resume paused interactive agent check-ins",
 		"Ctrl+]: toggle between agent and shell mode",
 		"Ctrl+O: open the selected transcript entry in the full detail view",
 		"PgUp/PgDn: scroll transcript",
@@ -1077,6 +1120,7 @@ func helpContentLines(width int, mode Mode, canSendKeys bool) []string {
 			"KEYS> Enter: send the current buffer exactly as typed",
 			"KEYS> Ctrl+Y: send the current buffer plus Enter",
 			"KEYS> Ctrl+J: insert a literal Enter/newline into the key sequence",
+			`KEYS> tokens like <Ctrl+C> or <Esc>: send tmux control-key events that the TUI cannot capture directly`,
 		)
 	}
 	lines = append(lines,

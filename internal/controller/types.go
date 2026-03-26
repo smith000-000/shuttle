@@ -282,5 +282,6 @@ type Controller interface {
 	ApprovalMode() ApprovalMode
 	ActiveExecution() *CommandExecution
 	AbandonActiveExecution(reason string) *CommandExecution
+	TakeControlTarget() TrackedShellTarget
 	TrackedShellTarget() TrackedShellTarget
 }

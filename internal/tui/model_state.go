@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"aiterm/internal/controller"
 	"aiterm/internal/logging"
@@ -109,21 +110,115 @@ func sendFullscreenKeysCmd(config takeControlConfig, paneID string, keys string)
 			return fullscreenKeysSentMsg{keys: keys, err: err}
 		}
 
-		parts := strings.Split(strings.ReplaceAll(keys, "\r\n", "\n"), "\n")
-		for index, part := range parts {
-			if part != "" {
-				if err := client.SendLiteralKeys(ctx, paneID, part); err != nil {
+		events := parseFullscreenKeyEvents(keys)
+		for _, event := range events {
+			if event.literal != "" {
+				if err := client.SendLiteralKeys(ctx, paneID, event.literal); err != nil {
 					return fullscreenKeysSentMsg{keys: keys, err: err}
 				}
+				continue
 			}
-			if index < len(parts)-1 {
-				if err := client.SendKeys(ctx, paneID, "Enter", false); err != nil {
+			if event.tmuxKey != "" {
+				if err := client.SendKeys(ctx, paneID, event.tmuxKey, false); err != nil {
 					return fullscreenKeysSentMsg{keys: keys, err: err}
 				}
 			}
 		}
 
 		return fullscreenKeysSentMsg{keys: keys}
+	}
+}
+
+type fullscreenKeyEvent struct {
+	literal string
+	tmuxKey string
+}
+
+func parseFullscreenKeyEvents(keys string) []fullscreenKeyEvent {
+	keys = strings.ReplaceAll(keys, "\r\n", "\n")
+	events := make([]fullscreenKeyEvent, 0, len(keys))
+	var literal strings.Builder
+
+	flushLiteral := func() {
+		if literal.Len() == 0 {
+			return
+		}
+		events = append(events, fullscreenKeyEvent{literal: literal.String()})
+		literal.Reset()
+	}
+
+	for len(keys) > 0 {
+		if keys[0] == '\n' {
+			flushLiteral()
+			events = append(events, fullscreenKeyEvent{tmuxKey: "Enter"})
+			keys = keys[1:]
+			continue
+		}
+		if keys[0] == '<' {
+			if end := strings.IndexByte(keys, '>'); end > 1 {
+				if tmuxKey, ok := fullscreenTokenToTmuxKey(keys[1:end]); ok {
+					flushLiteral()
+					events = append(events, fullscreenKeyEvent{tmuxKey: tmuxKey})
+					keys = keys[end+1:]
+					continue
+				}
+			}
+		}
+
+		r, size := utf8.DecodeRuneInString(keys)
+		literal.WriteRune(r)
+		keys = keys[size:]
+	}
+	flushLiteral()
+	return events
+}
+
+func fullscreenTokenToTmuxKey(token string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(token)) {
+	case "ctrl+c", "ctrl-c", "c-c":
+		return "C-c", true
+	case "ctrl+d", "ctrl-d", "c-d":
+		return "C-d", true
+	case "ctrl+l", "ctrl-l", "c-l":
+		return "C-l", true
+	case "ctrl+z", "ctrl-z", "c-z":
+		return "C-z", true
+	case "ctrl+u", "ctrl-u", "c-u":
+		return "C-u", true
+	case "ctrl+w", "ctrl-w", "c-w":
+		return "C-w", true
+	case "ctrl+a", "ctrl-a", "c-a":
+		return "C-a", true
+	case "ctrl+e", "ctrl-e", "c-e":
+		return "C-e", true
+	case "enter", "return":
+		return "Enter", true
+	case "esc", "escape":
+		return "Escape", true
+	case "tab":
+		return "Tab", true
+	case "up":
+		return "Up", true
+	case "down":
+		return "Down", true
+	case "left":
+		return "Left", true
+	case "right":
+		return "Right", true
+	case "home":
+		return "Home", true
+	case "end":
+		return "End", true
+	case "pgup", "pageup":
+		return "PageUp", true
+	case "pgdn", "pagedown":
+		return "PageDown", true
+	case "delete", "del":
+		return "Delete", true
+	case "backspace", "bs":
+		return "BSpace", true
+	default:
+		return "", false
 	}
 }
 
@@ -210,6 +305,13 @@ func (m Model) activeExecutionPaneID() string {
 	return strings.TrimSpace(m.takeControl.TrackedPaneID)
 }
 
+func (m Model) persistentTrackedPaneID() string {
+	if paneID := strings.TrimSpace(m.workspace.TopPane.ID); paneID != "" {
+		return paneID
+	}
+	return strings.TrimSpace(m.takeControl.TrackedPaneID)
+}
+
 func (m Model) activeExecutionUsesTrackedShell() bool {
 	if m.activeExecution == nil {
 		return false
@@ -217,6 +319,17 @@ func (m Model) activeExecutionUsesTrackedShell() bool {
 	executionPane := strings.TrimSpace(m.activeExecution.TrackedShell.PaneID)
 	if executionPane == "" {
 		return true
+	}
+	return executionPane == m.persistentTrackedPaneID()
+}
+
+func (m Model) takeControlTargetsActiveExecution() bool {
+	if m.activeExecution == nil {
+		return false
+	}
+	executionPane := strings.TrimSpace(m.activeExecution.TrackedShell.PaneID)
+	if executionPane == "" {
+		return false
 	}
 	return executionPane == strings.TrimSpace(m.takeControl.TrackedPaneID)
 }
@@ -248,6 +361,9 @@ func (m *Model) maybeExecutionCheckInCmd(now time.Time) tea.Cmd {
 	case controller.CommandExecutionHandoffActive, controller.CommandExecutionCompleted, controller.CommandExecutionFailed, controller.CommandExecutionCanceled, controller.CommandExecutionLost:
 		return nil
 	}
+	if executionNeedsUserDrivenResume(m.activeExecution) && m.interactiveCheckInPaused {
+		return nil
+	}
 
 	dueAt := m.activeExecution.StartedAt.Add(firstCheckInDelay)
 	if !m.lastCheckInAt.IsZero() {
@@ -272,6 +388,19 @@ func (m *Model) maybeExecutionCheckInCmd(now time.Time) tea.Cmd {
 	}
 }
 
+func executionNeedsUserDrivenResume(execution *controller.CommandExecution) bool {
+	if execution == nil {
+		return false
+	}
+
+	switch execution.State {
+	case controller.CommandExecutionAwaitingInput, controller.CommandExecutionInteractiveFullscreen:
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 	currentID := ""
 	previous := m.activeExecution
@@ -288,6 +417,8 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 		m.lastFullscreenKeysAt = time.Time{}
 		m.checkInInFlight = false
 		m.lastCheckInAt = time.Time{}
+		m.interactiveCheckInCount = 0
+		m.interactiveCheckInPaused = false
 		m.lastInterruptNoticeID = ""
 		m.handoffVisible = false
 		m.handoffPriorState = ""
@@ -304,6 +435,8 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 		m.lastFullscreenKeysAt = time.Time{}
 		m.checkInInFlight = false
 		m.lastCheckInAt = time.Time{}
+		m.interactiveCheckInCount = 0
+		m.interactiveCheckInPaused = false
 		m.lastInterruptNoticeID = ""
 		m.handoffVisible = false
 		m.handoffPriorState = ""
@@ -325,6 +458,10 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 		m.pendingFullscreen = nil
 		m.lastFullscreenKeys = ""
 		m.lastFullscreenKeysAt = time.Time{}
+	}
+	if !executionNeedsUserDrivenResume(execution) {
+		m.interactiveCheckInCount = 0
+		m.interactiveCheckInPaused = false
 	}
 }
 
@@ -378,7 +515,18 @@ func (m *Model) syncTrackedShellTarget() {
 		m.takeControl.SessionName = sessionName
 	}
 	m.workspace.TopPane.ID = paneID
-	m.takeControl.TrackedPaneID = paneID
+	takeControlTarget := m.ctrl.TakeControlTarget()
+	takeControlSession := strings.TrimSpace(takeControlTarget.SessionName)
+	takeControlPaneID := strings.TrimSpace(takeControlTarget.PaneID)
+	if takeControlSession != "" {
+		m.takeControl.SessionName = takeControlSession
+	}
+	if takeControlPaneID != "" {
+		m.takeControl.TrackedPaneID = takeControlPaneID
+	} else {
+		m.takeControl.TrackedPaneID = paneID
+	}
+	m.takeControl.TemporaryPane = m.takeControl.TrackedPaneID != "" && m.takeControl.TrackedPaneID != paneID
 
 	if previousSession != m.workspace.SessionName || previousPane != m.workspace.TopPane.ID {
 		logging.Trace(
@@ -742,6 +890,18 @@ func (m *Model) appendInterruptNotice(body string) {
 	}
 	m.selectedEntry = len(m.entries) - 1
 	m.clampSelection()
+}
+
+func (m *Model) pauseInteractiveCheckIns() {
+	if m.interactiveCheckInPaused || m.activeExecution == nil {
+		return
+	}
+
+	m.interactiveCheckInPaused = true
+	m.appendTranscriptEntry(Entry{
+		Title: "system",
+		Body:  "Paused automatic agent check-ins for this interactive screen. Press Ctrl+G when you are ready to resume, or press R to tell the agent something else.",
+	})
 }
 
 func previewFullscreenKeys(keys string) string {

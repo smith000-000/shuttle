@@ -455,6 +455,8 @@ func (m Model) performActionCardAction(action actionCardAction) (tea.Model, tea.
 		return m, nil
 	case actionCardTakeControl:
 		return m.takeControlNow()
+	case actionCardResumeInteractive:
+		return m.resumePausedInteractiveCheckIns()
 	case actionCardApprove:
 		return m.primaryAction()
 	case actionCardReject:
@@ -465,6 +467,9 @@ func (m Model) performActionCardAction(action actionCardAction) (tea.Model, tea.
 	case actionCardRefine:
 		if m.pendingProposal != nil {
 			return m.refineProposal()
+		}
+		if m.pendingApproval == nil && m.interactiveCheckInPaused && executionNeedsUserDrivenResume(m.activeExecution) {
+			return m.focusAgentComposerForActiveExecution()
 		}
 		return m.refineApproval()
 	case actionCardEditProposal:

@@ -60,7 +60,7 @@ func (c *LocalController) ResumeAfterTakeControl(ctx context.Context) ([]Transcr
 
 func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context) ([]TranscriptEvent, bool, bool, error) {
 	trackedShell, trackedShellEvent := c.syncTrackedShellTargetWithNotice(ctx)
-	if c.reader == nil || trackedShell.PaneID == "" {
+	if c.reader == nil {
 		return prependTranscriptEvent(nil, trackedShellEvent), false, false, nil
 	}
 
@@ -72,11 +72,15 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 	}
 	execution := *executionPtr
 	c.mu.Unlock()
-	if !sameTrackedShellTarget(executionTarget(&execution, trackedShell), trackedShell) {
+	handoffTarget := takeControlTargetForExecution(&execution, trackedShell)
+	if strings.TrimSpace(handoffTarget.PaneID) == "" {
+		return prependTranscriptEvent(nil, trackedShellEvent), false, false, nil
+	}
+	if sameTrackedShellTarget(handoffTarget, trackedShell) && !sameTrackedShellTarget(executionTarget(&execution, trackedShell), trackedShell) {
 		return prependTranscriptEvent(nil, trackedShellEvent), false, false, nil
 	}
 
-	promptContext, err := c.reader.CaptureShellContext(ctx, trackedShell.PaneID)
+	promptContext, err := c.reader.CaptureShellContext(ctx, handoffTarget.PaneID)
 	if err != nil {
 		return nil, false, false, err
 	}
@@ -91,7 +95,7 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 		recentOutput = strings.TrimSpace(execution.LatestOutputTail)
 	}
 	if recentOutput == "" {
-		if captured, captureErr := c.reader.CaptureRecentOutput(ctx, trackedShell.PaneID, 120); captureErr == nil {
+		if captured, captureErr := c.reader.CaptureRecentOutput(ctx, handoffTarget.PaneID, 120); captureErr == nil {
 			recentOutput = strings.TrimSpace(captured)
 		}
 	}

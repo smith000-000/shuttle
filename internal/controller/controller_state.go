@@ -236,6 +236,26 @@ func executionTarget(execution *CommandExecution, fallback TrackedShellTarget) T
 	return target
 }
 
+func executionSupportsDirectTakeControl(execution *CommandExecution) bool {
+	if execution == nil {
+		return false
+	}
+
+	switch execution.State {
+	case CommandExecutionAwaitingInput, CommandExecutionInteractiveFullscreen, CommandExecutionHandoffActive:
+		return true
+	default:
+		return false
+	}
+}
+
+func takeControlTargetForExecution(execution *CommandExecution, fallback TrackedShellTarget) TrackedShellTarget {
+	if !executionSupportsDirectTakeControl(execution) {
+		return fallback
+	}
+	return executionTarget(execution, fallback)
+}
+
 func sameTrackedShellTarget(left TrackedShellTarget, right TrackedShellTarget) bool {
 	return strings.TrimSpace(left.SessionName) == strings.TrimSpace(right.SessionName) &&
 		strings.TrimSpace(left.PaneID) == strings.TrimSpace(right.PaneID)
@@ -243,6 +263,12 @@ func sameTrackedShellTarget(left TrackedShellTarget, right TrackedShellTarget) b
 
 func shouldSyncExecutionIntoUserShellSession(execution *CommandExecution, session SessionContext) bool {
 	return sameTrackedShellTarget(executionTarget(execution, session.TrackedShell), session.TrackedShell)
+}
+
+func (c *LocalController) TakeControlTarget() TrackedShellTarget {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return takeControlTargetForExecution(c.primaryExecutionLocked(), c.session.TrackedShell)
 }
 
 func runExecutionCleanup(cleanup func(context.Context) error) {

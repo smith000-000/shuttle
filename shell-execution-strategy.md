@@ -73,9 +73,10 @@ On `semantic-shell-bootstrap`, Shuttle now has a usable first pass of the redesi
 - local managed transport using sourced temp scripts instead of giant inline wrappers where possible
 - active execution states including `awaiting_input`, `interactive_fullscreen`, `background_monitoring`, `canceled`, and `lost`
 - `F2` take-control handoff and reconciliation back into Shuttle
-- raw `KEYS>` input for active prompts and fullscreen apps
+- raw `KEYS>` input for active prompts and fullscreen apps, including explicit control-key tokens such as `<Ctrl+C>`
 - agent-side recovery guidance informed by a larger recovery snapshot
 - first-class agent `keys` proposals so the model can ask Shuttle to send small raw key sequences instead of only narrating them
+- bounded interactive/fullscreen check-ins that eventually pause automatic model retries and require an explicit `Ctrl+G` resume
 - serial execution ownership enforcement plus an internal execution registry so future multi-card work has a stable base without allowing overlap yet
 - serial auto-continue hardening so ordered one-command-at-a-time workflows can keep progressing without an extra user "go"
 - plan cards demoted to informational state instead of approval-like control flow, with continuation turns now suppressing stale replacement plans and emitting explicit plan-complete state when needed
@@ -92,7 +93,8 @@ What is still not done:
   - TUI: composer/input routing, transcript rendering, proposal/approval state, and handoff/fullscreen control
 
 Recent direction change on `semantic-shell-bootstrap`:
-- keep one persistent user shell pane as the continuity surface for cwd, `F2`, `$>`, and recent manual shell history
+- keep one persistent user shell pane as the continuity surface for cwd, `$>`, and recent manual shell history
+- let `F2` normally target that persistent shell, but temporarily follow an owned interactive execution pane when that pane is what needs direct user control
 - run approved agent shell commands in owned tmux execution panes by default
 - exception: when the tracked user shell is remote, keep agent shell execution in that tracked remote shell instead of opening a local owned pane
 - feed the agent structured recent manual commands/actions plus full command results, instead of forcing both concerns through one shared pane
@@ -260,9 +262,9 @@ Examples:
 
 #### Mode C. Interactive Handoff Command
 For commands that need terminal ownership:
-- submit command to the same top pane
+- submit command to the pane chosen by controller policy for that execution
 - expose live tail immediately
-- allow explicit `F2` handoff into the exact same tmux pane
+- allow explicit `F2` handoff into the exact tracked execution pane
 - on detach, reconcile shell state and resume Shuttle
 
 Examples:
@@ -302,6 +304,7 @@ Recommended behavior:
 - if the command completes quickly, continue automatically as it does today
 - if the command runs longer than a soft threshold, move into monitored mode
 - for agent-owned monitored commands, schedule periodic check-ins
+- for `awaiting_input` and `interactive_fullscreen`, stop automatic check-ins after a bounded retry count and hand control back to the user until they explicitly resume with `Ctrl+G` or send the agent a new note
 
 Check-in prompt shape:
 - command is still running
@@ -320,13 +323,14 @@ This is the closest Shuttle analogue to the Warp behavior you described:
 Important constraint:
 - do not spam the model every second
 - rate-limit check-ins aggressively, for example after 10s, 30s, 60s, then every few minutes
+- interactive waits should have a breakpoint rather than retry forever; once the pause threshold is hit, Shuttle should stop polling the model until the user explicitly resumes
 
 ### 6. Treat Interactive Handoff as a Normal State Transition
 When the user presses `F2`:
 - cancel only the local wait operation
 - do not treat that cancellation as a user-facing error
 - transition the execution into `handoff_active`
-- attach to the same tmux session and same top pane
+- attach to the controller-selected take-control pane, which may be the persistent shell pane or a temporary owned execution pane
 - suspend automated waiting logic
 
 When the user detaches back:

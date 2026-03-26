@@ -946,7 +946,7 @@ Rules:
 - Patch application mutates the local workspace root, not the active remote shell host. If the shell prompt is remote, keep local patch effects and remote shell effects clearly separate.
 - Never propose a shell command that invokes apply_patch, git apply, patch, or any heredoc-based patch application tool for local workspace edits. Use "proposal_kind":"patch" or patch approval fields instead.
 - If you propose a shell action, set "proposal_kind" to "command" and fill "proposal_command".
-- If you propose sending a small raw key sequence to an already-active prompt or fullscreen app, set "proposal_kind" to "keys" and fill "proposal_keys". Use a literal newline in "proposal_keys" when Enter should be sent.
+- If you propose sending a small raw key sequence to an already-active prompt or fullscreen app, set "proposal_kind" to "keys" and fill "proposal_keys". Use a literal newline in "proposal_keys" when Enter should be sent. For non-printing tmux key events such as Ctrl+C or Escape, use tokens like "<Ctrl+C>" or "<Esc>" inside "proposal_keys".
 - If you propose a patch, set "proposal_kind" to "patch" and fill "proposal_patch".
 - If no proposal is needed, leave proposal fields empty.
 - If the session context says "approval_mode=auto", safe local inspection or verification commands may be auto-executed by Shuttle. In that mode, prefer "proposal_command" for safe local commands and reserve approvals for writes, destructive actions, patches, remote work, network/process-control, or other user-confirmed steps.

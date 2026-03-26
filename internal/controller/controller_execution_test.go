@@ -71,6 +71,32 @@ func TestLocalControllerSubmitShellCommandUsesResolvedTrackedShellPane(t *testin
 	}
 }
 
+func TestLocalControllerTakeControlTargetUsesOwnedInteractivePane(t *testing.T) {
+	controller := New(nil, nil, nil, SessionContext{
+		SessionName:  "shuttle-test",
+		TrackedShell: TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
+	})
+	setPrimaryExecutionForTest(controller, CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sudo apt update",
+		Origin:    CommandOriginAgentProposal,
+		State:     CommandExecutionAwaitingInput,
+		StartedAt: time.Now(),
+		TrackedShell: TrackedShellTarget{
+			SessionName: "shuttle-test",
+			PaneID:      "%9",
+		},
+	})
+
+	target := controller.TakeControlTarget()
+	if target.PaneID != "%9" {
+		t.Fatalf("expected take-control target pane %%9, got %#v", target)
+	}
+	if controller.TrackedShellTarget().PaneID != "%0" {
+		t.Fatalf("expected persistent tracked shell pane to remain %%0, got %#v", controller.TrackedShellTarget())
+	}
+}
+
 func TestLocalControllerSubmitShellCommandReturnsTrackedShellChangeNotice(t *testing.T) {
 	runner := &stubRunner{
 		result:         shell.TrackedExecution{CommandID: "cmd-1", Command: "ls", ExitCode: 0},
@@ -196,6 +222,55 @@ func TestLocalControllerResumeAfterTakeControlReconcilesUserShellPromptReturn(t 
 	}
 	if controller.ActiveExecution() != nil {
 		t.Fatal("expected active execution to clear after handoff reconcile")
+	}
+}
+
+func TestLocalControllerResumeAfterTakeControlReconcilesOwnedInteractivePane(t *testing.T) {
+	exitCode := 0
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "Handled the interactive step.",
+		},
+	}
+	reader := &stubContextReader{
+		snapshot: "done\nlocaluser@workstation /tmp/project %",
+		context: shell.PromptContext{
+			User:         "localuser",
+			Host:         "workstation",
+			Directory:    "/tmp/project",
+			PromptSymbol: "%",
+			RawLine:      "localuser@workstation /tmp/project %",
+			LastExitCode: &exitCode,
+		},
+	}
+	controller := New(agent, nil, reader, SessionContext{
+		SessionName:  "shuttle-test",
+		TrackedShell: TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
+	})
+	setPrimaryExecutionForTest(controller, CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sudo apt update",
+		Origin:    CommandOriginAgentProposal,
+		State:     CommandExecutionAwaitingInput,
+		StartedAt: time.Now().Add(-30 * time.Second),
+		TrackedShell: TrackedShellTarget{
+			SessionName: "shuttle-test",
+			PaneID:      "%9",
+		},
+	})
+
+	events, err := controller.ResumeAfterTakeControl(context.Background())
+	if err != nil {
+		t.Fatalf("ResumeAfterTakeControl() error = %v", err)
+	}
+	if len(events) != 3 || events[0].Kind != EventSystemNotice || events[1].Kind != EventCommandResult || events[2].Kind != EventAgentMessage {
+		t.Fatalf("expected reconcile notice, command result, and agent follow-up, got %#v", events)
+	}
+	if controller.ActiveExecution() != nil {
+		t.Fatal("expected active execution to clear after owned-pane reconcile")
+	}
+	if controller.task.LastCommandResult == nil || controller.task.LastCommandResult.State != CommandExecutionCompleted {
+		t.Fatalf("expected completed last command result, got %#v", controller.task.LastCommandResult)
 	}
 }
 

@@ -22,6 +22,7 @@ type takeControlConfig struct {
 	SocketName    string
 	SessionName   string
 	TrackedPaneID string
+	TemporaryPane bool
 	StartDir      string
 	DetachKey     string
 }
@@ -75,20 +76,16 @@ func (c *tmuxTakeControlCommand) Run() error {
 		"resolved_pane", targetPaneID,
 	)
 
-	if err := c.runTmux("select-pane", "-t", targetPaneID); err != nil {
-		return fmt.Errorf("select shell pane: %w", err)
-	}
-
-	zoomed, err := c.captureTmux("display-message", "-p", "-t", targetPaneID, "#{window_zoomed_flag}")
+	zoomedHere, err := c.selectTakeControlTarget(targetPaneID)
 	if err != nil {
-		return fmt.Errorf("inspect tmux zoom state: %w", err)
+		return err
 	}
-	zoomedHere := false
-	if strings.TrimSpace(zoomed) != "1" {
-		if err := c.runTmux("resize-pane", "-Z", "-t", targetPaneID); err != nil {
-			return fmt.Errorf("zoom shell pane: %w", err)
-		}
-		zoomedHere = true
+	cleanupAutoDetach, err := c.installTemporaryPaneAutoDetach(targetPaneID)
+	if err != nil {
+		logging.TraceError("tui.take_control.auto_detach_error", err, "pane", targetPaneID, "session", c.config.SessionName)
+	}
+	if cleanupAutoDetach != nil {
+		defer cleanupAutoDetach()
 	}
 	if zoomedHere {
 		defer func() {
@@ -116,6 +113,87 @@ func (c *tmuxTakeControlCommand) Run() error {
 	return command.Run()
 }
 
+func (c *tmuxTakeControlCommand) installTemporaryPaneAutoDetach(targetPaneID string) (func(), error) {
+	if !c.config.TemporaryPane {
+		return nil, nil
+	}
+
+	clientTTY, err := c.currentTTY()
+	if err != nil {
+		return nil, fmt.Errorf("resolve client tty: %w", err)
+	}
+	return c.installTemporaryPaneWindowHook(targetPaneID, fmt.Sprintf("detach-client -t %q", clientTTY))
+}
+
+func (c *tmuxTakeControlCommand) installTemporaryPaneWindowHook(targetPaneID string, hookCommand string) (func(), error) {
+	if !c.config.TemporaryPane {
+		return nil, nil
+	}
+	if strings.TrimSpace(targetPaneID) == "" {
+		return nil, fmt.Errorf("target pane is required")
+	}
+	if strings.TrimSpace(hookCommand) == "" {
+		return nil, fmt.Errorf("hook command is required")
+	}
+
+	hookName := fmt.Sprintf("window-unlinked[%d]", time.Now().UnixNano())
+	if err := c.runTmux("set-hook", "-w", "-t", targetPaneID, "--", hookName, hookCommand); err != nil {
+		return nil, fmt.Errorf("install temporary window hook: %w", err)
+	}
+	return func() {
+		_ = c.runTmux("set-hook", "-w", "-u", "-t", targetPaneID, "--", hookName)
+	}, nil
+}
+
+func (c *tmuxTakeControlCommand) currentTTY() (string, error) {
+	command := exec.Command("tty")
+	if c.stdin != nil {
+		command.Stdin = c.stdin
+	} else {
+		command.Stdin = os.Stdin
+	}
+	output, err := command.CombinedOutput()
+	trimmed := strings.TrimSpace(string(output))
+	if err != nil {
+		if trimmed == "" {
+			return "", err
+		}
+		return "", fmt.Errorf("%w: %s", err, trimmed)
+	}
+	if trimmed == "" {
+		return "", fmt.Errorf("tty returned empty output")
+	}
+	return trimmed, nil
+}
+
+func (c *tmuxTakeControlCommand) selectTakeControlTarget(targetPaneID string) (bool, error) {
+	windowID, err := c.captureTmux("display-message", "-p", "-t", targetPaneID, "#{window_id}")
+	if err != nil {
+		return false, fmt.Errorf("resolve target window: %w", err)
+	}
+	windowID = strings.TrimSpace(windowID)
+	if windowID != "" {
+		if err := c.runTmux("select-window", "-t", windowID); err != nil {
+			return false, fmt.Errorf("select shell window: %w", err)
+		}
+	}
+	if err := c.runTmux("select-pane", "-t", targetPaneID); err != nil {
+		return false, fmt.Errorf("select shell pane: %w", err)
+	}
+
+	zoomed, err := c.captureTmux("display-message", "-p", "-t", targetPaneID, "#{window_zoomed_flag}")
+	if err != nil {
+		return false, fmt.Errorf("inspect tmux zoom state: %w", err)
+	}
+	if strings.TrimSpace(zoomed) == "1" {
+		return false, nil
+	}
+	if err := c.runTmux("resize-pane", "-Z", "-t", targetPaneID); err != nil {
+		return false, fmt.Errorf("zoom shell pane: %w", err)
+	}
+	return true, nil
+}
+
 func (c *tmuxTakeControlCommand) resolveTrackedPaneID(paneID string) (string, error) {
 	if err := c.runTmux("select-pane", "-t", paneID); err == nil {
 		return paneID, nil
@@ -127,6 +205,8 @@ func (c *tmuxTakeControlCommand) resolveTrackedPaneID(paneID string) (string, er
 			"reason", err.Error(),
 		)
 		return c.recoverTrackedPaneID()
+	} else if c.config.TemporaryPane {
+		return "", fmt.Errorf("temporary execution pane %s is no longer available", paneID)
 	} else if !strings.Contains(strings.ToLower(err.Error()), "can't find pane") {
 		return "", fmt.Errorf("select shell pane: %w", err)
 	}

@@ -2,7 +2,7 @@
 
 Shuttle is a tmux-backed AI terminal assistant.
 
-It runs a persistent real shell in the top tmux pane and a Bubble Tea TUI in the bottom pane. Agent-approved commands can also run in owned tmux execution panes for local work, while the persistent shell remains the continuity surface for `F2`, `$>`, cwd, recent manual shell activity, and remote SSH continuity.
+It runs a persistent real shell in the top tmux pane and a Bubble Tea TUI in the bottom pane. Agent-approved commands can also run in owned tmux execution panes for local work. The persistent shell remains the continuity surface for `$>`, cwd, recent manual shell activity, and remote SSH continuity, while `F2` can temporarily hand off into an owned interactive execution pane when that pane is the thing waiting for input.
 
 ## Status
 
@@ -19,6 +19,7 @@ What is working now:
 - approval and refine flow
 - local and remote handoff with `F2`
 - `KEYS>` mode for sending raw terminal input
+- bounded agent check-ins for interactive/fullscreen waits, with explicit `Ctrl+G` resume after Shuttle pauses automatic retries
 - partial semantic shell integration for local shells
 - serial agentic command loops with one proposal at a time and auto-continue after results
 - native unified-diff patch proposals with explicit apply/reject/ask-agent flow
@@ -151,7 +152,7 @@ Important variables:
 Release-oriented tmux defaults:
 - Shuttle now derives a stable workspace ID from the absolute project path
 - by default it uses a managed tmux socket at `$XDG_RUNTIME_DIR/shuttle/tmux.sock` or the XDG state fallback
-- by default it uses a derived tmux session name like `shuttle:<workspace-id>`
+- by default it uses a derived tmux session name like `shuttle_<workspace-id>`
 - `--socket`, `--session`, `SHUTTLE_TMUX_SOCKET`, and `SHUTTLE_SESSION` still work as explicit dev/debug overrides
 
 ## Build and Test
@@ -275,9 +276,11 @@ Core controls:
 - `Ctrl+Home` / `Ctrl+End`: jump the transcript to the top or bottom
 - `Insert`: toggle composer overwrite mode
 - `Esc`: clear composer or interrupt active work, depending on state
-- `F2`: take control of the live shell pane
+- `F2`: take control of the live shell pane, or the active temporary execution pane when an owned interactive command is waiting for input
+- `Ctrl+G`: continue an active plan, or resume paused interactive agent check-ins after you handled a prompt/fullscreen app
 - `S`: enter `KEYS>` mode when the active terminal is waiting for input or a fullscreen app owns the pane
 - in `KEYS>` mode, `Enter` sends the current buffer exactly as typed, `Ctrl+Y` sends the current buffer plus `Enter`, and `Ctrl+J` inserts a literal `Enter` into the key sequence
+- `KEYS>` also accepts explicit tmux control-key tokens such as `<Ctrl+C>` or `<Esc>` for key events the TUI cannot capture directly
 - `Ctrl+O`: inspect the selected transcript entry
 - `F10`: open settings
 

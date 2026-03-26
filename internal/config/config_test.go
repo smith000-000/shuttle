@@ -42,6 +42,17 @@ func TestParsePreservesExplicitTmuxOverrides(t *testing.T) {
 	}
 }
 
+func TestParseNormalizesColonSessionNamesForTmux(t *testing.T) {
+	cfg, err := Parse([]string{"--session", "shuttle:custom"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	if cfg.SessionName != "shuttle_custom" {
+		t.Fatalf("expected normalized session name %q, got %q", "shuttle_custom", cfg.SessionName)
+	}
+}
+
 func TestParsePreservesEnvTmuxOverrides(t *testing.T) {
 	t.Setenv("SHUTTLE_SESSION", "env-session")
 	t.Setenv("SHUTTLE_TMUX_SOCKET", "env-socket")

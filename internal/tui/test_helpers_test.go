@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	tea "github.com/charmbracelet/bubbletea"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -382,6 +383,23 @@ func (f *fakeController) TrackedShellTarget() controller.TrackedShellTarget {
 	return controller.TrackedShellTarget{SessionName: sessionName, PaneID: "%0"}
 }
 
+func (f *fakeController) TakeControlTarget() controller.TrackedShellTarget {
+	if f.activeExecution != nil && strings.TrimSpace(f.activeExecution.TrackedShell.PaneID) != "" {
+		switch f.activeExecution.State {
+		case controller.CommandExecutionAwaitingInput, controller.CommandExecutionInteractiveFullscreen, controller.CommandExecutionHandoffActive:
+			sessionName := strings.TrimSpace(f.activeExecution.TrackedShell.SessionName)
+			if sessionName == "" {
+				sessionName = f.TrackedShellTarget().SessionName
+			}
+			return controller.TrackedShellTarget{
+				SessionName: sessionName,
+				PaneID:      strings.TrimSpace(f.activeExecution.TrackedShell.PaneID),
+			}
+		}
+	}
+	return f.TrackedShellTarget()
+}
+
 type approvalDecisionCall struct {
 	approvalID string
 	decision   controller.ApprovalDecision
@@ -420,4 +438,31 @@ func controllerEventsFromCmd(t *testing.T, cmd tea.Cmd) controllerEventsMsg {
 	}
 
 	return controllerEventsMsg{}
+}
+
+func cmdContainsMessageType(t *testing.T, cmd tea.Cmd, expected tea.Msg) bool {
+	t.Helper()
+	if cmd == nil {
+		t.Fatal("expected command")
+	}
+
+	expectedType := reflect.TypeOf(expected)
+	msg := cmd()
+	if reflect.TypeOf(msg) == expectedType {
+		return true
+	}
+
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		return false
+	}
+	for _, candidate := range batch {
+		if candidate == nil {
+			continue
+		}
+		if reflect.TypeOf(candidate()) == expectedType {
+			return true
+		}
+	}
+	return false
 }
