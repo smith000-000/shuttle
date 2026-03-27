@@ -12,6 +12,8 @@ import (
 	"aiterm/internal/controller"
 	"aiterm/internal/logging"
 	"aiterm/internal/provider"
+	shuttleruntime "aiterm/internal/runtime"
+	"aiterm/internal/search"
 	"aiterm/internal/securefs"
 	"aiterm/internal/shell"
 	"aiterm/internal/tmux"
@@ -79,6 +81,10 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("load stored provider config: %w", err)
 	}
+	runtimeCfg, err = shuttleruntime.ApplyStoredRuntimeConfig(runtimeCfg)
+	if err != nil {
+		return Result{}, fmt.Errorf("load stored runtime config: %w", err)
+	}
 
 	client, err := tmux.NewClient(socketTarget)
 	if err != nil {
@@ -121,6 +127,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 		Workspace: workspace,
 		Created:   created,
 	}
+	shuttleSearch := search.ShuttleAvailability(runtimeCfg.SearchProvider)
 
 	if a.cfg.AgentPrompt != "" {
 		observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir).WithSessionName(workspace.SessionName).WithStartDir(runtimeCfg.StartDir).WithSessionEnsurer(func(ctx context.Context) error {
@@ -131,7 +138,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 		if err := observer.EnsureLocalShellIntegration(ctx, workspace.TopPane.ID); err != nil {
 			logging.TraceError("app.shell_integration.error", err, "pane", workspace.TopPane.ID)
 		}
-		agent, profile, err := provider.NewFromConfig(runtimeCfg, provider.FactoryOptions{})
+		agent, profile, activeRuntime, err := shuttleruntime.NewFromConfig(runtimeCfg, provider.FactoryOptions{})
 		if err != nil {
 			logging.TraceError("app.provider.error", err, "provider", a.cfg.ProviderType)
 			return Result{}, fmt.Errorf("configure provider: %w", err)
@@ -146,13 +153,15 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			"auth_source", providerLogAuthSource(profile),
 		)
 		ctrl := controller.New(agent, observer, observer, controller.SessionContext{
-			SessionName:          workspace.SessionName,
-			BottomPaneID:         workspace.BottomPane.ID,
-			TrackedShell:         controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
-			WorkingDirectory:     runtimeCfg.StartDir,
-			LocalWorkspaceRoot:   runtimeCfg.StartDir,
-			UserShellHistoryFile: historyFile,
-			CurrentShell:         initialShellContextPtr(initialShellContext),
+			SessionName:             workspace.SessionName,
+			BottomPaneID:            workspace.BottomPane.ID,
+			TrackedShell:            controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
+			WorkingDirectory:        runtimeCfg.StartDir,
+			LocalWorkspaceRoot:      runtimeCfg.StartDir,
+			Search:                  shuttleSearch,
+			PreferredExternalSearch: controllerSearchForSelection(activeRuntime),
+			UserShellHistoryFile:    historyFile,
+			CurrentShell:            initialShellContextPtr(initialShellContext),
 		})
 		agentCtx, cancel := context.WithTimeout(ctx, agentPromptTimeout)
 		defer cancel()
@@ -182,7 +191,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 		if err := observer.EnsureLocalShellIntegration(ctx, workspace.TopPane.ID); err != nil {
 			logging.TraceError("app.shell_integration.error", err, "pane", workspace.TopPane.ID)
 		}
-		agent, profile, err := provider.NewFromConfig(runtimeCfg, provider.FactoryOptions{})
+		agent, profile, activeRuntime, err := shuttleruntime.NewFromConfig(runtimeCfg, provider.FactoryOptions{})
 		if err != nil {
 			logging.TraceError("app.provider.error", err, "provider", a.cfg.ProviderType)
 			return Result{}, fmt.Errorf("configure provider: %w", err)
@@ -197,35 +206,39 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			"auth_source", providerLogAuthSource(profile),
 		)
 		ctrl := controller.New(agent, observer, observer, controller.SessionContext{
-			SessionName:          workspace.SessionName,
-			BottomPaneID:         workspace.BottomPane.ID,
-			TrackedShell:         controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
-			WorkingDirectory:     runtimeCfg.StartDir,
-			LocalWorkspaceRoot:   runtimeCfg.StartDir,
-			UserShellHistoryFile: historyFile,
-			CurrentShell:         initialShellContextPtr(initialShellContext),
+			SessionName:             workspace.SessionName,
+			BottomPaneID:            workspace.BottomPane.ID,
+			TrackedShell:            controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
+			WorkingDirectory:        runtimeCfg.StartDir,
+			LocalWorkspaceRoot:      runtimeCfg.StartDir,
+			Search:                  shuttleSearch,
+			PreferredExternalSearch: controllerSearchForSelection(activeRuntime),
+			UserShellHistoryFile:    historyFile,
+			CurrentShell:            initialShellContextPtr(initialShellContext),
 		})
-		switchProvider := func(profile provider.Profile, shellContext *shell.PromptContext) (controller.Controller, provider.Profile, error) {
-			agent, err := provider.NewFromProfile(profile, provider.FactoryOptions{})
+		switchProvider := func(profile provider.Profile, shellContext *shell.PromptContext) (controller.Controller, provider.Profile, shuttleruntime.Selection, error) {
+			agent, selection, err := shuttleruntime.NewFromProfile(runtimeCfg, profile, provider.FactoryOptions{})
 			if err != nil {
-				return nil, provider.Profile{}, err
+				return nil, provider.Profile{}, shuttleruntime.Selection{}, err
 			}
 
 			return controller.New(agent, observer, observer, controller.SessionContext{
-				SessionName:          workspace.SessionName,
-				BottomPaneID:         workspace.BottomPane.ID,
-				TrackedShell:         controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
-				WorkingDirectory:     runtimeCfg.StartDir,
-				LocalWorkspaceRoot:   runtimeCfg.StartDir,
-				UserShellHistoryFile: historyFile,
-				CurrentShell:         shellContext,
-			}), profile, nil
+				SessionName:             workspace.SessionName,
+				BottomPaneID:            workspace.BottomPane.ID,
+				TrackedShell:            controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
+				WorkingDirectory:        runtimeCfg.StartDir,
+				LocalWorkspaceRoot:      runtimeCfg.StartDir,
+				Search:                  shuttleSearch,
+				PreferredExternalSearch: controllerSearchForSelection(selection),
+				UserShellHistoryFile:    historyFile,
+				CurrentShell:            shellContext,
+			}), profile, selection, nil
 		}
 		model := tui.NewModel(workspace, ctrl).
 			WithShellContext(initialShellContext).
 			WithTakeControl(socketTarget, workspace.SessionName, workspace.TopPane.ID, tui.TakeControlKey).
 			WithTakeControlStartDir(runtimeCfg.StartDir).
-			WithProviderOnboarding(profile, func() ([]provider.OnboardingCandidate, error) {
+			WithProviderOnboardingRuntimeAware(profile, func() ([]provider.OnboardingCandidate, error) {
 				return provider.BuildOnboardingCandidates(runtimeCfg.StateDir)
 			}, func(profile provider.Profile) ([]provider.ModelOption, error) {
 				return provider.ListModels(profile, nil)
@@ -234,8 +247,16 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 					AllowPlaintextFallback: a.cfg.AllowPlaintextProviderSecrets,
 				})
 			}).
+			WithRuntimeSupport(activeRuntime, func(selection shuttleruntime.Selection) error {
+				return shuttleruntime.SaveSelection(runtimeCfg.StateDir, runtimeCfg.WorkspaceID, selection)
+			}, func(confirm bool) error {
+				return shuttleruntime.SaveConfirmationPreference(runtimeCfg.StateDir, runtimeCfg.WorkspaceID, confirm)
+			}, func(profile provider.Profile) []shuttleruntime.Choice {
+				return shuttleruntime.Choices(runtimeCfg, profile)
+			}).
+			WithSearchSupport(shuttleSearch).
 			WithProviderTester(func(profile provider.Profile) error {
-				return provider.CheckHealth(ctx, profile, provider.FactoryOptions{})
+				return shuttleruntime.CheckHealth(ctx, runtimeCfg, profile)
 			})
 		program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 		_, runErr := program.Run()
@@ -300,6 +321,10 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	}
 
 	return result, nil
+}
+
+func controllerSearchForSelection(selection shuttleruntime.Selection) search.Availability {
+	return selection.Search
 }
 
 func providerLogAuthSource(profile provider.Profile) string {

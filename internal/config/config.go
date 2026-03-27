@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"aiterm/internal/search"
 )
 
 const (
@@ -52,10 +54,13 @@ type Config struct {
 	ProviderAPIKey                string
 	ProviderAPIKeyEnvVar          string
 	ProviderCLICommand            string
+	SearchProvider                search.Provider
 	RuntimeType                   string
 	RuntimeCommand                string
 	AllowPlaintextProviderSecrets bool
 	ProviderFlagsSet              bool
+	SearchFlagsSet                bool
+	RuntimeFlagsSet               bool
 }
 
 func Parse(args []string) (Config, error) {
@@ -84,6 +89,7 @@ func Parse(args []string) (Config, error) {
 	providerAuthMethod := envOrDefault("SHUTTLE_AUTH", "auto")
 	providerModel := os.Getenv("SHUTTLE_MODEL")
 	providerBaseURL := os.Getenv("SHUTTLE_BASE_URL")
+	searchProvider := search.NormalizeProvider(envOrDefault("SHUTTLE_SEARCH_PROVIDER", string(search.ProviderNone)))
 	runtimeType := envOrDefault("SHUTTLE_RUNTIME", "builtin")
 	runtimeCommand := os.Getenv("SHUTTLE_RUNTIME_COMMAND")
 	traceMode, err := resolveTraceMode(os.Getenv("SHUTTLE_TRACE"), os.Getenv("SHUTTLE_TRACE_MODE"))
@@ -118,8 +124,9 @@ func Parse(args []string) (Config, error) {
 	fs.StringVar(&cfg.ProviderModel, "model", providerModel, "model name for the selected provider")
 	fs.StringVar(&cfg.ProviderBaseURL, "base-url", providerBaseURL, "base URL for the selected provider API")
 	fs.StringVar(&cfg.ProviderCLICommand, "cli-command", providerCLICommand, "CLI command path for CLI-backed providers")
-	fs.StringVar(&cfg.RuntimeType, "runtime", runtimeType, "coding runtime to use: builtin, pi, codex_sdk, or auto")
-	fs.StringVar(&cfg.RuntimeCommand, "runtime-command", runtimeCommand, "command path for selected coding runtime")
+	fs.StringVar((*string)(&cfg.SearchProvider), "search-provider", string(searchProvider), "Shuttle builtin web search provider: none, brave, or perplexity")
+	fs.StringVar(&cfg.RuntimeType, "runtime", runtimeType, "preferred external coding runtime to hand larger tasks to: builtin, pi, codex_sdk, or auto")
+	fs.StringVar(&cfg.RuntimeCommand, "runtime-command", runtimeCommand, "command path for the selected external coding runtime")
 	fs.BoolVar(&cfg.AllowPlaintextProviderSecrets, "allow-plaintext-provider-secrets", allowPlaintextProviderSecrets, "allow less-secure local plaintext fallback for provider secrets when OS keyring is unavailable")
 
 	if err := fs.Parse(args); err != nil {
@@ -127,8 +134,12 @@ func Parse(args []string) (Config, error) {
 	}
 	fs.Visit(func(flag *flag.Flag) {
 		switch flag.Name {
-		case "provider", "auth", "model", "base-url", "cli-command", "runtime", "runtime-command":
+		case "provider", "auth", "model", "base-url", "cli-command":
 			cfg.ProviderFlagsSet = true
+		case "search-provider":
+			cfg.SearchFlagsSet = true
+		case "runtime", "runtime-command":
+			cfg.RuntimeFlagsSet = true
 		}
 	})
 
@@ -180,6 +191,10 @@ func Parse(args []string) (Config, error) {
 		return Config{}, errors.New("trace mode must be one of: off, safe, sensitive")
 	}
 	cfg.ProviderType = normalizeProviderType(cfg.ProviderType)
+	cfg.SearchProvider = search.NormalizeProvider(string(cfg.SearchProvider))
+	if cfg.SearchProvider != search.ProviderNone && cfg.SearchProvider != search.ProviderBrave && cfg.SearchProvider != search.ProviderPerplexity {
+		return Config{}, errors.New("search provider must be one of: none, brave, perplexity")
+	}
 	cfg.RuntimeType = normalizeRuntimeType(cfg.RuntimeType)
 	authMethod, err := normalizeProviderAuthMethod(cfg.ProviderAuthMethod)
 	if err != nil {

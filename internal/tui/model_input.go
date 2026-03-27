@@ -333,7 +333,7 @@ func (m *Model) computeSlashCompletion(runes []rune) *composerCompletion {
 		return nil
 	}
 
-	commands := []string{"/approvals", "/compact", "/exit", "/model", "/models", "/new", "/onboard", "/onboarding", "/provider", "/providers", "/quit"}
+	commands := []string{"/approvals", "/coder", "/compact", "/exit", "/model", "/models", "/new", "/onboard", "/onboarding", "/provider", "/providers", "/quit"}
 	candidates := make([]string, 0, len(commands))
 	for _, command := range commands {
 		if strings.HasPrefix(command, input) {

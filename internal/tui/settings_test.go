@@ -3,6 +3,8 @@ package tui
 import (
 	"aiterm/internal/controller"
 	"aiterm/internal/provider"
+	shuttleruntime "aiterm/internal/runtime"
+	"aiterm/internal/search"
 	"aiterm/internal/shell"
 	"errors"
 	tea "github.com/charmbracelet/bubbletea"
@@ -102,7 +104,7 @@ func TestUnknownSlashCommandRendersNotice(t *testing.T) {
 	if last.Title != "system" || !strings.Contains(last.Body, "Unknown slash command: /wat") {
 		t.Fatalf("expected unknown slash command notice, got %#v", last)
 	}
-	if !strings.Contains(last.Body, "/approvals") || !strings.Contains(last.Body, "/new") || !strings.Contains(last.Body, "/compact") {
+	if !strings.Contains(last.Body, "/approvals") || !strings.Contains(last.Body, "/coder") || !strings.Contains(last.Body, "/new") || !strings.Contains(last.Body, "/compact") {
 		t.Fatalf("expected updated slash command hint, got %#v", last)
 	}
 }
@@ -178,6 +180,119 @@ func TestSlashCompactCallsController(t *testing.T) {
 	}
 }
 
+func TestSlashCoderRoutesPromptToExternalAgent(t *testing.T) {
+	ctrl := &fakeController{
+		externalState: controller.ExternalState{
+			PreferredRuntime: "pi",
+			Available:        true,
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.mode = AgentMode
+	model.input = "/coder please fix the script"
+
+	updated, cmd := model.submit()
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatal("expected /coder prompt to stage confirmation by default")
+	}
+	if model.pendingHandoff == nil || model.pendingHandoffPrompt != "please fix the script" {
+		t.Fatalf("expected staged handoff, got handoff=%#v prompt=%q", model.pendingHandoff, model.pendingHandoffPrompt)
+	}
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Y'}})
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected confirmed /coder prompt to call the controller")
+	}
+	updated, _ = model.Update(controllerEventsFromCmd(t, cmd))
+	model = updated.(Model)
+
+	if len(ctrl.externalPrompts) != 1 || ctrl.externalPrompts[0] != "please fix the script" {
+		t.Fatalf("expected /coder to route prompt externally, got %#v", ctrl.externalPrompts)
+	}
+	last := model.entries[len(model.entries)-1]
+	if last.Title != "system" || !strings.Contains(last.Body, "routed to external agent") {
+		t.Fatalf("expected external routing notice, got %#v", last)
+	}
+}
+
+func TestSlashCoderRoutesPromptDirectlyWhenConfirmationDisabled(t *testing.T) {
+	ctrl := &fakeController{
+		externalState: controller.ExternalState{
+			PreferredRuntime: "pi",
+			Available:        true,
+			ConfirmationMode: "off",
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.mode = AgentMode
+	model.input = "/coder please fix the script"
+
+	updated, cmd := model.submit()
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected /coder prompt to route immediately when confirmation is disabled")
+	}
+	updated, _ = model.Update(controllerEventsFromCmd(t, cmd))
+	model = updated.(Model)
+
+	if len(ctrl.externalPrompts) != 1 || ctrl.externalPrompts[0] != "please fix the script" {
+		t.Fatalf("expected direct external routing, got %#v", ctrl.externalPrompts)
+	}
+}
+
+func TestSlashCoderResumesExternalWhenNoPromptProvided(t *testing.T) {
+	ctrl := &fakeController{
+		externalState: controller.ExternalState{
+			PreferredRuntime: "pi",
+			Available:        true,
+			Resumable:        true,
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.mode = AgentMode
+	model.input = "/coder"
+
+	updated, cmd := model.submit()
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected bare /coder to resume external context")
+	}
+	updated, _ = model.Update(controllerEventsFromCmd(t, cmd))
+	model = updated.(Model)
+
+	last := model.entries[len(model.entries)-1]
+	if last.Title != "system" || !strings.Contains(last.Body, "external resumed") {
+		t.Fatalf("expected external resume notice, got %#v", last)
+	}
+}
+
+func TestSlashCoderTogglesBackToBuiltinWhenExternalOwnsConversation(t *testing.T) {
+	ctrl := &fakeController{
+		externalState: controller.ExternalState{
+			PreferredRuntime: "pi",
+			Available:        true,
+			Owner:            controller.ConversationOwnerExternal,
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.mode = AgentMode
+	model.input = "/coder"
+
+	updated, cmd := model.submit()
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected bare /coder to return to builtin while external mode is active")
+	}
+	updated, _ = model.Update(controllerEventsFromCmd(t, cmd))
+	model = updated.(Model)
+
+	last := model.entries[len(model.entries)-1]
+	if last.Title != "system" || !strings.Contains(last.Body, "returned to builtin") {
+		t.Fatalf("expected builtin-return notice, got %#v", last)
+	}
+}
+
 func TestSlashApprovalsShowsCurrentMode(t *testing.T) {
 	ctrl := &fakeController{}
 	model := NewModel(fakeWorkspace(), ctrl)
@@ -192,6 +307,47 @@ func TestSlashApprovalsShowsCurrentMode(t *testing.T) {
 	last := model.entries[len(model.entries)-1]
 	if last.Title != "system" || !strings.Contains(last.Body, "Approvals: confirm") {
 		t.Fatalf("expected approval mode status notice, got %#v", last)
+	}
+}
+
+func TestRuntimeSettingsShowSearchStatus(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).
+		WithRuntimeSupport(
+			shuttleruntime.Selection{
+				ID:     shuttleruntime.RuntimePi,
+				Search: search.RuntimeAvailability("pi", search.ProviderBrave),
+			},
+			func(shuttleruntime.Selection) error { return nil },
+			func(bool) error { return nil },
+			func(provider.Profile) []shuttleruntime.Choice {
+				return []shuttleruntime.Choice{{
+					Selection: shuttleruntime.Selection{
+						ID:     shuttleruntime.RuntimePi,
+						Search: search.RuntimeAvailability("pi", search.ProviderBrave),
+					},
+					Label: "pi",
+				}}
+			},
+		).
+		WithSearchSupport(search.ShuttleAvailability(search.ProviderBrave))
+	model.settingsOpen = true
+	model.settingsStep = settingsStepRuntime
+	model.settingsRuntimes = buildSettingsRuntimeEntries([]shuttleruntime.Choice{{
+		Selection: shuttleruntime.Selection{
+			ID:     shuttleruntime.RuntimePi,
+			Search: search.RuntimeAvailability("pi", search.ProviderBrave),
+		},
+		Label: "pi",
+	}})
+
+	view := model.View()
+	for _, fragment := range []string{
+		"Builtin web search: Shuttle-managed (Brave)",
+		"External web search: Runtime-native (pi) with Shuttle fallback (Brave)",
+	} {
+		if !strings.Contains(view, fragment) {
+			t.Fatalf("expected %q in runtime settings, got %q", fragment, view)
+		}
 	}
 }
 

@@ -30,10 +30,28 @@ What is working now:
   - session-local approval-mode selection
   - active provider switching
   - active model switching
+  - preferred external-agent selection
   - provider detail editing
   - `F7` provider health/auth test from provider details
   - `F8` save-and-activate from provider details
 - saved provider profiles and startup reloading
+- workspace-persisted preferred external-agent selection plus repo-level external-work history
+- builtin-first external-agent handoff flow, with:
+  - explicit handoff suggestions from Shuttle before larger coding work moves to an external agent
+  - explicit `/coder ...` routing to force the current turn into the preferred external coding agent
+  - a generic `External Work` indicator when Shuttle has previously handed this repo to an external agent
+  - a resume banner when Shuttle has saved resumable external context for the repo
+  - explicit return-to-Shuttle control after the external agent owns the conversation
+  - an `F3` external-activity inspector for live assistant/tool progress from SDK- or RPC-backed coding runtimes
+- a first-class `web_search` capability stub, with:
+  - Shuttle-owned search capability metadata for builtin turns
+  - runtime-native search capability metadata for external coding runtimes such as PI
+  - prompt/context wiring so Shuttle can describe available search surfaces without forcing PI or future runtimes through Shuttle's own search path
+- PI runtime integration over PI RPC mode as the first external coding-agent backend, with:
+  - direct PI-owned `read`, `write`, `edit`, and `bash` tools in the local workspace
+  - trust grant applied on the first confirmed Shuttle handoff into PI
+  - PI session-file resume metadata stored in Shuttle runtime state
+  - PI support for `openai`, `anthropic`, `openrouter`, `custom`, `openwebui`, and `codex_cli`-style OpenAI/Codex mapping
 - provider secret handling with:
   - OS keyring persistence
   - session-only fallback
@@ -50,10 +68,12 @@ What is still in progress:
 - broader semantic shell integration (`OSC 133` / `OSC 7`) consumption and subshell/bootstrap support
 - provider onboarding polish and provider-auth validation
 - provider registry/plugin architecture instead of static first-class wiring
+- richer external-runtime diagnostics and version/compatibility enforcement
 - any richer shell bootstrap/helper mode beyond those standards
 - transcript/UI cleanup and continued TUI/controller decomposition
 - multi-card or parallel execution UI
 - release packaging
+- full tmux-harness coverage for external coding-runtime loops such as PI handoff, live runtime activity streaming, and resume-after-restart
 
 ## Requirements
 
@@ -143,6 +163,9 @@ Important variables:
 - `SHUTTLE_TMUX_SOCKET`: optional tmux socket/server name override
 - `SHUTTLE_STATE_DIR`: optional persistent state directory for logs and shell history
 - `SHUTTLE_RUNTIME_DIR`: optional private runtime directory for staged shell scripts and semantic shell state
+- `SHUTTLE_SEARCH_PROVIDER`: optional Shuttle builtin search provider stub: `none`, `brave`, or `perplexity`
+- `SHUTTLE_RUNTIME`: optional preferred external coding runtime such as `builtin` or `pi`
+- `SHUTTLE_RUNTIME_COMMAND`: optional command path override for the selected coding runtime
 - `SHUTTLE_ALLOW_PLAINTEXT_PROVIDER_SECRETS`: allow an explicit less-secure local file fallback if OS keyring storage is unavailable
 - `SHUTTLE_TRACE`: `off`, `safe`, or `sensitive`
 - `SHUTTLE_TRACE_CONSENT`: must be true or passed as `--trace-consent` when using sensitive trace
@@ -174,6 +197,8 @@ Integration-only tests:
 ```bash
 make test-integration
 ```
+
+Current integration coverage includes real tmux/TUI flows for builtin proposal, patch, and auto-continue behavior. External coding-runtime loops such as PI handoff, runtime-event streaming, and resume-after-restart are still primarily manual-test territory for now.
 
 Run from source without the launcher:
 

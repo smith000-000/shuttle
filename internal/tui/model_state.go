@@ -10,6 +10,7 @@ import (
 	"aiterm/internal/controller"
 	"aiterm/internal/logging"
 	"aiterm/internal/provider"
+	shuttleruntime "aiterm/internal/runtime"
 	"aiterm/internal/shell"
 	"aiterm/internal/tmux"
 
@@ -607,17 +608,31 @@ func (m *Model) syncActionState(events []controller.TranscriptEvent) {
 	newApproval := latestApproval(events)
 	if newApproval != nil {
 		m.pendingApproval = newApproval
+		m.pendingHandoff = nil
+		m.pendingHandoffPrompt = ""
 		m.refiningApproval = nil
 		m.refiningProposal = nil
 		m.editingProposal = nil
 		m.pendingProposal = nil
 	}
 
+	newHandoff := latestHandoff(events)
+	if newHandoff != nil && newApproval == nil {
+		m.pendingHandoff = newHandoff
+		m.pendingApproval = nil
+		m.pendingProposal = nil
+		m.refiningApproval = nil
+		m.refiningProposal = nil
+		m.editingProposal = nil
+	}
+
 	newProposal := latestProposal(events)
-	if newProposal != nil && newApproval == nil {
+	if newProposal != nil && newApproval == nil && newHandoff == nil {
 		m.pendingProposal = newProposal
 		m.refiningProposal = nil
 		m.editingProposal = nil
+		m.pendingHandoff = nil
+		m.pendingHandoffPrompt = ""
 		m.pendingApproval = nil
 	}
 
@@ -626,6 +641,13 @@ func (m *Model) syncActionState(events []controller.TranscriptEvent) {
 	}
 	if m.proposalRunPending {
 		m.pendingProposal = nil
+	}
+	if containsEventKind(events, controller.EventSystemNotice) {
+		lastNotice := latestSystemNotice(events)
+		if strings.Contains(strings.ToLower(lastNotice), "returned control to shuttle") {
+			m.pendingHandoff = nil
+			m.pendingHandoffPrompt = ""
+		}
 	}
 	if containsEventKind(events, controller.EventPatchApplyResult) {
 		m.showShellTail = false
@@ -780,6 +802,21 @@ func latestProposal(events []controller.TranscriptEvent) *controller.ProposalPay
 	return nil
 }
 
+func latestHandoff(events []controller.TranscriptEvent) *controller.HandoffRequest {
+	for index := len(events) - 1; index >= 0; index-- {
+		if events[index].Kind != controller.EventHandoff {
+			continue
+		}
+		payload, ok := events[index].Payload.(controller.HandoffRequest)
+		if !ok {
+			continue
+		}
+		handoff := payload
+		return &handoff
+	}
+	return nil
+}
+
 func isActionableProposalPayload(payload controller.ProposalPayload) bool {
 	return strings.TrimSpace(payload.Command) != "" ||
 		payload.Keys != "" ||
@@ -802,6 +839,19 @@ func latestModelInfo(events []controller.TranscriptEvent) *controller.AgentModel
 	}
 
 	return nil
+}
+
+func latestSystemNotice(events []controller.TranscriptEvent) string {
+	for index := len(events) - 1; index >= 0; index-- {
+		if events[index].Kind != controller.EventSystemNotice {
+			continue
+		}
+		payload, ok := events[index].Payload.(controller.TextPayload)
+		if ok {
+			return payload.Text
+		}
+	}
+	return ""
 }
 
 func isAgentOwnedExecution(origin controller.CommandOrigin) bool {
@@ -1023,6 +1073,18 @@ func currentSettingsApprovalIndex(ctrl controller.Controller) int {
 	}
 	for index, entry := range settingsApprovalEntries() {
 		if entry.mode == mode {
+			return index
+		}
+	}
+	return 0
+}
+
+func currentSettingsRuntimeIndex(entries []settingsRuntimeEntry, active shuttleruntime.Selection) int {
+	for index, entry := range entries {
+		if entry.kind != settingsRuntimeEntrySelection {
+			continue
+		}
+		if entry.selection.ID == active.ID {
 			return index
 		}
 	}

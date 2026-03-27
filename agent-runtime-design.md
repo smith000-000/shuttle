@@ -102,26 +102,37 @@ type AgentInput struct {
 }
 
 type SessionContext struct {
-    SessionName          string
-    BottomPaneID         string
-    TrackedShell         TrackedShellTarget
-    WorkingDirectory     string
-    UserShellHistoryFile string
-    RecentShellOutput    string
-    RecentManualCommands []string
-    RecentManualActions  []string
-    ApprovalMode         ApprovalMode
-    CurrentShell         *shell.PromptContext
+    SessionName              string
+    BottomPaneID             string
+    TrackedShell             TrackedShellTarget
+    WorkingDirectory         string
+    LocalWorkspaceRoot       string
+    PreferredExternalRuntime string
+    ExternalRuntimeAvailable bool
+    ExternalResumeAvailable  bool
+    Search                   search.Availability
+    PreferredExternalSearch  search.Availability
+    UserShellHistoryFile     string
+    RecentShellOutput        string
+    RecentManualCommands     []string
+    RecentManualActions      []string
+    ApprovalMode             ApprovalMode
+    CurrentShell             *shell.PromptContext
 }
 
 type TaskContext struct {
-    TaskID             string
-    PriorTranscript    []TranscriptEvent
-    PendingApproval    *ApprovalRequest
-    LastCommandResult  *CommandResultSummary
-    ActivePlan         *ActivePlan
-    PrimaryExecutionID string
-    ExecutionRegistry  []CommandExecution
+    TaskID               string
+    CompactedSummary     string
+    PriorTranscript      []TranscriptEvent
+    PendingApproval      *ApprovalRequest
+    PendingHandoff       *HandoffRequest
+    LastCommandResult    *CommandResultSummary
+    LastPatchApplyResult *PatchApplySummary
+    ActivePlan           *ActivePlan
+    PrimaryExecutionID   string
+    ExecutionRegistry    []CommandExecution
+    CurrentExecution     *CommandExecution
+    RecoverySnapshot     string
 }
 ```
 
@@ -129,9 +140,11 @@ Notes:
 - `RecentShellOutput` should come from Shuttle's observed shell buffer, not from the runtime.
 - `PriorTranscript` should be a compact structured history, not a raw terminal dump.
 - `PendingApproval` allows the runtime to continue a refine or approval flow coherently.
+- `PendingHandoff` allows builtin Shuttle to keep an explicit external-agent handoff suggestion coherent across turns.
 - `RecentManualCommands` and `RecentManualActions` let the runtime resolve prompts like "see the file I just renamed".
 - `ApprovalMode` is Shuttle-owned session policy; it informs the runtime, but the controller remains authoritative about whether a command can auto-run or must stay gated.
 - `TrackedShell` and `CurrentShell` describe the persistent user shell context; approved agent commands may still run in owned execution panes tracked separately in `ExecutionRegistry`.
+- `Search` and `PreferredExternalSearch` are product-owned capability descriptors. They tell the runtime what search surfaces exist without forcing external runtimes such as PI through Shuttle-owned search execution.
 
 ## 3.3 Agent Response
 
@@ -139,10 +152,13 @@ The runtime should return a single structured response per turn.
 
 ```go
 type AgentResponse struct {
-    Message   string
-    Plan      *Plan
-    Proposal  *Proposal
-    Approval  *ApprovalRequest
+    Message       string
+    Plan          *Plan
+    Proposal      *Proposal
+    Approval      *ApprovalRequest
+    Handoff       *HandoffRequest
+    ModelInfo     *AgentModelInfo
+    RuntimeEvents []RuntimeEvent
 }
 
 type Plan struct {
@@ -153,6 +169,7 @@ type Plan struct {
 type Proposal struct {
     Kind        ProposalKind
     Command     string
+    Keys        string
     Patch       string
     Description string
 }
@@ -162,14 +179,26 @@ type ProposalKind string
 const (
     ProposalAnswer  ProposalKind = "answer"
     ProposalCommand ProposalKind = "command"
+    ProposalKeys    ProposalKind = "keys"
     ProposalPatch   ProposalKind = "patch"
 )
+
+type HandoffRequest struct {
+    ID               string
+    Title            string
+    Summary          string
+    Reason           string
+    SuggestedRuntime string
+    ResumeAvailable  bool
+}
 ```
 
 Rules:
 - not every field should be populated on every response
 - the controller decides how the response is rendered into transcript events
 - the controller decides whether a proposal must become an approval card before execution
+- `Handoff` is a first-class Shuttle concept for moving substantial coding work into a preferred external runtime such as PI
+- `RuntimeEvents` are informational activity/status/tool records emitted by external runtimes and rendered by Shuttle into transcript notices and the `F3` activity inspector
 - a `ProposalPatch` is not applied workspace state by itself; it is only a proposed change until Shuttle runs an explicit patch-application flow
 - the runtime must not describe patch-created files as present or runnable until the controller confirms the patch was applied successfully
 

@@ -12,14 +12,50 @@ import (
 )
 
 type stubAgent struct {
-	response  AgentResponse
-	err       error
-	lastInput AgentInput
+	response          AgentResponse
+	externalResponse  AgentResponse
+	activateResponse  AgentResponse
+	resumeResponse    AgentResponse
+	err               error
+	lastInput         AgentInput
+	lastExternalInput AgentInput
+	lastActivateInput AgentInput
+	lastResumeInput   AgentInput
+	returnErr         error
+	externalState     ExternalState
+	runtimeActivity   RuntimeActivitySnapshot
 }
 
 func (s *stubAgent) Respond(_ context.Context, input AgentInput) (AgentResponse, error) {
 	s.lastInput = input
 	return s.response, s.err
+}
+
+func (s *stubAgent) ActivateExternal(_ context.Context, input AgentInput, _ HandoffRequest) (AgentResponse, error) {
+	s.lastActivateInput = input
+	return s.activateResponse, s.err
+}
+
+func (s *stubAgent) SubmitExternalPrompt(_ context.Context, input AgentInput, _ string) (AgentResponse, error) {
+	s.lastExternalInput = input
+	return s.externalResponse, s.err
+}
+
+func (s *stubAgent) ResumeExternal(_ context.Context, input AgentInput) (AgentResponse, error) {
+	s.lastResumeInput = input
+	return s.resumeResponse, s.err
+}
+
+func (s *stubAgent) ReturnToBuiltin() error {
+	return s.returnErr
+}
+
+func (s *stubAgent) ExternalState() ExternalState {
+	return s.externalState
+}
+
+func (s *stubAgent) RuntimeActivity() RuntimeActivitySnapshot {
+	return s.runtimeActivity
 }
 
 func setPrimaryExecutionForTest(controller *LocalController, execution CommandExecution) {

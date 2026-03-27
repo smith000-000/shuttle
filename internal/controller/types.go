@@ -2,8 +2,10 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"time"
 
+	"aiterm/internal/search"
 	"aiterm/internal/shell"
 )
 
@@ -23,17 +25,22 @@ type TrackedShellTarget struct {
 }
 
 type SessionContext struct {
-	SessionName          string
-	BottomPaneID         string
-	TrackedShell         TrackedShellTarget
-	WorkingDirectory     string
-	LocalWorkspaceRoot   string
-	UserShellHistoryFile string
-	RecentShellOutput    string
-	RecentManualCommands []string
-	RecentManualActions  []string
-	ApprovalMode         ApprovalMode
-	CurrentShell         *shell.PromptContext
+	SessionName              string
+	BottomPaneID             string
+	TrackedShell             TrackedShellTarget
+	WorkingDirectory         string
+	LocalWorkspaceRoot       string
+	PreferredExternalRuntime string
+	ExternalRuntimeAvailable bool
+	ExternalResumeAvailable  bool
+	Search                   search.Availability
+	PreferredExternalSearch  search.Availability
+	UserShellHistoryFile     string
+	RecentShellOutput        string
+	RecentManualCommands     []string
+	RecentManualActions      []string
+	ApprovalMode             ApprovalMode
+	CurrentShell             *shell.PromptContext
 }
 
 type TaskContext struct {
@@ -41,6 +48,7 @@ type TaskContext struct {
 	CompactedSummary     string
 	PriorTranscript      []TranscriptEvent
 	PendingApproval      *ApprovalRequest
+	PendingHandoff       *HandoffRequest
 	LastCommandResult    *CommandResultSummary
 	LastPatchApplyResult *PatchApplySummary
 	ActivePlan           *ActivePlan
@@ -51,11 +59,73 @@ type TaskContext struct {
 }
 
 type AgentResponse struct {
-	Message   string
-	Plan      *Plan
-	Proposal  *Proposal
-	Approval  *ApprovalRequest
-	ModelInfo *AgentModelInfo
+	Message       string
+	Plan          *Plan
+	Proposal      *Proposal
+	Approval      *ApprovalRequest
+	Handoff       *HandoffRequest
+	ModelInfo     *AgentModelInfo
+	RuntimeEvents []RuntimeEvent
+}
+
+type RuntimeEvent struct {
+	Runtime string
+	Kind    string
+	Title   string
+	Body    string
+	Detail  string
+}
+
+type HandoffRequest struct {
+	ID               string
+	Title            string
+	Summary          string
+	Reason           string
+	SuggestedRuntime string
+	ResumeAvailable  bool
+}
+
+type ConversationOwner string
+
+const (
+	ConversationOwnerBuiltin  ConversationOwner = "builtin"
+	ConversationOwnerExternal ConversationOwner = "external"
+)
+
+type ExternalState struct {
+	PreferredRuntime string
+	Owner            ConversationOwner
+	HasHistory       bool
+	Resumable        bool
+	Available        bool
+	Detail           string
+	ConfirmationMode string
+	Search           search.Availability
+}
+
+func ExternalConfirmationRequired(state ExternalState) bool {
+	return strings.TrimSpace(strings.ToLower(state.ConfirmationMode)) != "off"
+}
+
+type RuntimeActivityItem struct {
+	Key       string
+	Timestamp time.Time
+	Runtime   string
+	Kind      string
+	Title     string
+	Body      string
+	Detail    string
+	Done      bool
+	Replace   bool
+}
+
+type RuntimeActivitySnapshot struct {
+	Owner     ConversationOwner
+	Active    bool
+	Runtime   string
+	StartedAt time.Time
+	UpdatedAt time.Time
+	Items     []RuntimeActivityItem
 }
 
 type AgentModelInfo struct {
@@ -162,6 +232,7 @@ const (
 	EventPlan             TranscriptEventKind = "plan"
 	EventProposal         TranscriptEventKind = "proposal"
 	EventApproval         TranscriptEventKind = "approval"
+	EventHandoff          TranscriptEventKind = "handoff"
 	EventCommandStart     TranscriptEventKind = "command_start"
 	EventCommandResult    TranscriptEventKind = "command_result"
 	EventPatchApplyResult TranscriptEventKind = "patch_apply_result"
@@ -261,13 +332,17 @@ type ContextWindowUsage struct {
 
 type Controller interface {
 	SubmitAgentPrompt(ctx context.Context, prompt string) ([]TranscriptEvent, error)
+	SubmitExternalPrompt(ctx context.Context, prompt string) ([]TranscriptEvent, error)
 	SubmitRefinement(ctx context.Context, approval ApprovalRequest, note string) ([]TranscriptEvent, error)
 	SubmitProposalRefinement(ctx context.Context, proposal ProposalPayload, note string) ([]TranscriptEvent, error)
+	DecideHandoff(ctx context.Context, handoffID string, accept bool) ([]TranscriptEvent, error)
 	ContinueActivePlan(ctx context.Context) ([]TranscriptEvent, error)
 	ContinueAfterCommand(ctx context.Context) ([]TranscriptEvent, error)
 	ContinueAfterPatchApply(ctx context.Context) ([]TranscriptEvent, error)
 	CheckActiveExecution(ctx context.Context) ([]TranscriptEvent, error)
 	ResumeAfterTakeControl(ctx context.Context) ([]TranscriptEvent, error)
+	ResumeExternal(ctx context.Context) ([]TranscriptEvent, error)
+	ReturnToBuiltin(ctx context.Context) ([]TranscriptEvent, error)
 	RefreshActiveExecution(ctx context.Context) ([]TranscriptEvent, *CommandExecution, error)
 	SubmitShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error)
 	SubmitProposedShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error)
@@ -280,6 +355,8 @@ type Controller interface {
 	PeekShellTail(ctx context.Context, lines int) (string, error)
 	EstimateContextUsage(prompt string) ContextWindowUsage
 	ApprovalMode() ApprovalMode
+	ExternalState() ExternalState
+	RuntimeActivity() RuntimeActivitySnapshot
 	ActiveExecution() *CommandExecution
 	AbandonActiveExecution(reason string) *CommandExecution
 	TakeControlTarget() TrackedShellTarget

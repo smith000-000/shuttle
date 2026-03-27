@@ -15,6 +15,7 @@ import (
 
 	"aiterm/internal/controller"
 	"aiterm/internal/logging"
+	"aiterm/internal/search"
 )
 
 type ResponsesAgent struct {
@@ -100,6 +101,10 @@ type shuttleStructuredResponse struct {
 	ApprovalCommand     string   `json:"approval_command"`
 	ApprovalPatch       string   `json:"approval_patch"`
 	ApprovalRisk        string   `json:"approval_risk"`
+	HandoffTitle        string   `json:"handoff_title"`
+	HandoffSummary      string   `json:"handoff_summary"`
+	HandoffReason       string   `json:"handoff_reason"`
+	HandoffRuntime      string   `json:"handoff_runtime"`
 }
 
 func NewResponsesAgent(profile Profile, client *http.Client) (*ResponsesAgent, error) {
@@ -254,6 +259,12 @@ func (a *ResponsesAgent) CheckHealth(ctx context.Context) error {
 }
 
 func (a *ResponsesAgent) toAgentResponse(input shuttleStructuredResponse) (controller.AgentResponse, error) {
+	return structuredToAgentResponse(input, func(prefix string) string {
+		return a.nextID(prefix)
+	})
+}
+
+func structuredToAgentResponse(input shuttleStructuredResponse, idFactory func(prefix string) string) (controller.AgentResponse, error) {
 	response := controller.AgentResponse{
 		Message: strings.TrimSpace(input.Message),
 	}
@@ -279,11 +290,17 @@ func (a *ResponsesAgent) toAgentResponse(input shuttleStructuredResponse) (contr
 	}
 	response.Proposal = proposal
 
-	approval, err := a.parseApproval(input)
+	approval, err := parseApproval(input, idFactory)
 	if err != nil {
 		return controller.AgentResponse{}, err
 	}
 	response.Approval = approval
+
+	handoff, err := parseHandoff(input, idFactory)
+	if err != nil {
+		return controller.AgentResponse{}, err
+	}
+	response.Handoff = handoff
 
 	return response, nil
 }
@@ -324,7 +341,7 @@ func parseProposal(input shuttleStructuredResponse) (*controller.Proposal, error
 	}, nil
 }
 
-func (a *ResponsesAgent) parseApproval(input shuttleStructuredResponse) (*controller.ApprovalRequest, error) {
+func parseApproval(input shuttleStructuredResponse, idFactory func(prefix string) string) (*controller.ApprovalRequest, error) {
 	if strings.TrimSpace(input.ApprovalKind) == "" &&
 		strings.TrimSpace(input.ApprovalTitle) == "" &&
 		strings.TrimSpace(input.ApprovalSummary) == "" &&
@@ -359,13 +376,29 @@ func (a *ResponsesAgent) parseApproval(input shuttleStructuredResponse) (*contro
 	}
 
 	return &controller.ApprovalRequest{
-		ID:      a.nextID("approval"),
+		ID:      idFactory("approval"),
 		Kind:    kind,
 		Title:   strings.TrimSpace(input.ApprovalTitle),
 		Summary: strings.TrimSpace(input.ApprovalSummary),
 		Command: strings.TrimSpace(input.ApprovalCommand),
 		Patch:   strings.TrimSpace(input.ApprovalPatch),
 		Risk:    risk,
+	}, nil
+}
+
+func parseHandoff(input shuttleStructuredResponse, idFactory func(prefix string) string) (*controller.HandoffRequest, error) {
+	if strings.TrimSpace(input.HandoffTitle) == "" &&
+		strings.TrimSpace(input.HandoffSummary) == "" &&
+		strings.TrimSpace(input.HandoffReason) == "" &&
+		strings.TrimSpace(input.HandoffRuntime) == "" {
+		return nil, nil
+	}
+	return &controller.HandoffRequest{
+		ID:               idFactory("handoff"),
+		Title:            strings.TrimSpace(input.HandoffTitle),
+		Summary:          strings.TrimSpace(input.HandoffSummary),
+		Reason:           strings.TrimSpace(input.HandoffReason),
+		SuggestedRuntime: strings.TrimSpace(input.HandoffRuntime),
 	}, nil
 }
 
@@ -519,6 +552,17 @@ func buildTurnContext(input controller.AgentInput) string {
 	if input.Session.LocalWorkspaceRoot != "" {
 		sessionLines = append(sessionLines, "workspace_root="+input.Session.LocalWorkspaceRoot)
 	}
+	if input.Session.PreferredExternalRuntime != "" {
+		sessionLines = append(sessionLines, "preferred_external_runtime="+input.Session.PreferredExternalRuntime)
+	}
+	if input.Session.ExternalRuntimeAvailable {
+		sessionLines = append(sessionLines, "external_runtime_available=true")
+	}
+	if input.Session.ExternalResumeAvailable {
+		sessionLines = append(sessionLines, "external_resume_available=true")
+	}
+	sessionLines = append(sessionLines, searchSessionLines("search", input.Session.Search)...)
+	sessionLines = append(sessionLines, searchSessionLines("preferred_external_search", input.Session.PreferredExternalSearch)...)
 	if input.Session.ApprovalMode != "" {
 		sessionLines = append(sessionLines, "approval_mode="+string(input.Session.ApprovalMode))
 	}
@@ -685,6 +729,27 @@ func buildTurnContext(input controller.AgentInput) string {
 	}
 
 	return strings.Join(sections, "\n\n")
+}
+
+func searchSessionLines(prefix string, availability search.Availability) []string {
+	if strings.TrimSpace(prefix) == "" {
+		return nil
+	}
+	mode := strings.TrimSpace(string(availability.Mode))
+	if mode == "" {
+		mode = string(search.AvailabilityNone)
+	}
+	lines := []string{prefix + "_mode=" + mode}
+	if availability.Runtime != "" {
+		lines = append(lines, prefix+"_runtime="+availability.Runtime)
+	}
+	if availability.Provider != "" && availability.Provider != search.ProviderNone {
+		lines = append(lines, prefix+"_provider="+string(availability.Provider))
+	}
+	if detail := strings.TrimSpace(availability.Detail); detail != "" {
+		lines = append(lines, prefix+"_detail="+detail)
+	}
+	return lines
 }
 
 type turnContextOptions struct {
@@ -871,6 +936,10 @@ func shuttleAgentResponseSchema() map[string]any {
 			"approval_command",
 			"approval_patch",
 			"approval_risk",
+			"handoff_title",
+			"handoff_summary",
+			"handoff_reason",
+			"handoff_runtime",
 		},
 		"properties": map[string]any{
 			"message": map[string]any{
@@ -921,6 +990,18 @@ func shuttleAgentResponseSchema() map[string]any {
 				"type": "string",
 				"enum": []string{"", "low", "medium", "high"},
 			},
+			"handoff_title": map[string]any{
+				"type": "string",
+			},
+			"handoff_summary": map[string]any{
+				"type": "string",
+			},
+			"handoff_reason": map[string]any{
+				"type": "string",
+			},
+			"handoff_runtime": map[string]any{
+				"type": "string",
+			},
 		},
 	}
 }
@@ -953,6 +1034,11 @@ Rules:
 - If the session context says "approval_mode=dangerous", Shuttle may auto-run agent commands and auto-apply agent patches without confirmation. Only rely on that for clearly intended task work in a trusted workspace, and still avoid destructive or unnecessary actions.
 - If an action is destructive, risky, or should be user-confirmed, leave proposal fields empty and fill the approval fields instead.
 - For approvals, set "approval_kind" to "command", "patch", or "plan" and set "approval_risk" to "low", "medium", or "high".
+- Session context may include "search_*" and "preferred_external_search_*" fields that describe whether Shuttle builtin search is configured and whether the preferred external runtime has native web search.
+- If the session context says an external coding runtime is available and the user is asking for substantial repository coding work, multi-file implementation, architecture work, or an extended coding-agent task, you may suggest a handoff instead of continuing the task yourself.
+- If the task clearly depends on current web information and the current turn lacks usable search while the preferred external runtime has native web search, prefer suggesting a handoff over bluffing or relying on stale knowledge.
+- A handoff is a suggestion only. To suggest one, leave proposal and approval fields empty, keep "message" brief, and fill "handoff_title", "handoff_summary", "handoff_reason", and "handoff_runtime".
+- Do not emit a handoff for simple one-shot shell questions, light inspection, or routine command execution.
 - If the task is a refinement of a pending approval, preserve the original command or patch unless the context clearly requires changing it.
 - If the current turn says an active command is still running, use "message" for a brief status update. Do not emit a plan, proposal, or approval unless the shell is clearly waiting for user intervention.
 - If the current active command state is "awaiting_input", explain what input is likely needed from the shell output or recovery snapshot and tell the user to press F2 to take control. If a small raw keystroke sequence would likely help, you may propose it with "proposal_kind":"keys" and "proposal_keys".

@@ -29,6 +29,16 @@ Recently landed on `main`:
 - a release installer script that downloads the correct archive for the current platform, verifies `SHA256SUMS`, and installs `shuttle` on Linux/macOS; Windows currently uses the published zip assets directly
 - derived release defaults for tmux identity: workspace ID from project path, a managed socket path under runtime state, and an internal session name unless explicitly overridden
 
+Current branch runtime integration work:
+- preferred external-runtime selection is now separated from provider/model selection in config and settings
+- builtin Shuttle remains the default conversation owner and can emit explicit handoff suggestions for larger coding tasks
+- users can now force a direct external-agent turn with `/coder ...`, while bare `/coder` resumes saved external context or returns ownership to builtin when external mode is already active
+- workspace runtime state now persists preferred external-runtime selection, repo-level external-work history, and PI session resume metadata
+- the settings UI now includes preferred external-agent selection without dropping the active external preference during provider switches
+- PI RPC integration is available as the first external coding-agent backend, with Shuttle reusing its existing task context/prompt schema while PI owns its own tool execution in the local workspace
+- Shuttle now carries a first-class `web_search` capability contract in session/runtime context: builtin search remains a Shuttle-owned stub, while PI and future external runtimes can advertise native search plus Shuttle fallback without being forced through a duplicated Shuttle search execution path
+- the interactive tmux harness still does not cover PI/Codex external-runtime loops end to end; that remains a follow-up slice
+
 Execution-monitor redesign / semantic shell hardening status on `semantic-shell-bootstrap`:
 - implemented: first-class command monitor, local managed shell transport, `awaiting_input` detection, `interactive_fullscreen` detection, `lost` execution state, `F2` handoff/reconciliation, raw `KEYS>` terminal input, remote prompt-return reconciliation, and agent-driven `keys` proposals
 - implemented: state-aware agent recovery guidance using active execution state plus a larger recovery snapshot
@@ -85,12 +95,15 @@ Milestone 5 currently includes:
 - native unified-diff patch apply with proposal/approval/apply-result flow
 - local workspace root separation from shell cwd so local patch apply still works when the active shell is remote
 - interactive tmux harness coverage for patch apply and unattended multi-step plan loops
+- runtime selection and persistence scaffolding for alternate coding runtimes
+- initial PI RPC runtime integration with workspace-persisted PI session resume metadata
 
 Milestone 5 still needs:
 - OpenRouter verification and preset-specific tests
 - onboarding and health checks
 - Codex CLI delegation path beyond the current login-based provider support and model suggestions
 - release-grade runtime management for socket/session lifecycle and crash recovery
+- PI runtime diagnostics, capability surfacing, and stronger compatibility/version checks
 - stronger monitor-side confidence for ambiguous remote/container takeovers beyond the now-stable local serial model
 - integration-style tests for tracked-command recovery flows, not just per-layer unit tests
 - pane-stream/fullscreen detection beyond tmux alternate-screen heuristics so aliases, wrappers, and remote fullscreen apps can be recognized from terminal behavior instead of command-name lists alone

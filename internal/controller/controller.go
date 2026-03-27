@@ -94,6 +94,16 @@ type LocalController struct {
 	foregroundAttachInFlight bool
 }
 
+type handoffCapableAgent interface {
+	Agent
+	ActivateExternal(ctx context.Context, input AgentInput, handoff HandoffRequest) (AgentResponse, error)
+	SubmitExternalPrompt(ctx context.Context, input AgentInput, prompt string) (AgentResponse, error)
+	ResumeExternal(ctx context.Context, input AgentInput) (AgentResponse, error)
+	ReturnToBuiltin() error
+	ExternalState() ExternalState
+	RuntimeActivity() RuntimeActivitySnapshot
+}
+
 func New(agent Agent, runner ShellRunner, reader ShellContextReader, session SessionContext) *LocalController {
 	session = normalizeSessionContext(session)
 	controller := &LocalController{
@@ -122,6 +132,7 @@ func normalizeSessionContext(session SessionContext) SessionContext {
 	session.BottomPaneID = strings.TrimSpace(session.BottomPaneID)
 	session.WorkingDirectory = normalizeWorkingDirectory(session.WorkingDirectory)
 	session.LocalWorkspaceRoot = normalizeWorkingDirectory(session.LocalWorkspaceRoot)
+	session.PreferredExternalRuntime = strings.TrimSpace(session.PreferredExternalRuntime)
 	session.UserShellHistoryFile = strings.TrimSpace(session.UserShellHistoryFile)
 	session.RecentShellOutput = strings.TrimSpace(session.RecentShellOutput)
 	session.ApprovalMode = normalizeApprovalMode(session.ApprovalMode)

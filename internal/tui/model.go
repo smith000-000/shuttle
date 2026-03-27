@@ -12,6 +12,8 @@ import (
 	"aiterm/internal/controller"
 	"aiterm/internal/logging"
 	"aiterm/internal/provider"
+	shuttleruntime "aiterm/internal/runtime"
+	"aiterm/internal/search"
 	"aiterm/internal/shell"
 	"aiterm/internal/tmux"
 
@@ -73,6 +75,10 @@ type shellTailMsg struct {
 	err  error
 }
 
+type runtimeActivityMsg struct {
+	snapshot controller.RuntimeActivitySnapshot
+}
+
 func restoreMouseTrackingCmd() tea.Cmd {
 	return func() tea.Msg {
 		return tea.EnableMouseCellMotion()
@@ -106,6 +112,8 @@ const (
 	actionCardReject            actionCardAction = "reject"
 	actionCardRefine            actionCardAction = "refine"
 	actionCardEditProposal      actionCardAction = "edit_proposal"
+	actionCardResumeExternal    actionCardAction = "resume_external"
+	actionCardReturnBuiltin     actionCardAction = "return_builtin"
 )
 
 type actionCardButton struct {
@@ -184,6 +192,7 @@ type dangerousApprovalConfirm struct {
 type providerSwitchedMsg struct {
 	ctrl         controller.Controller
 	profile      provider.Profile
+	runtime      shuttleruntime.Selection
 	err          error
 	persistErr   error
 	settingsStep settingsStep
@@ -225,6 +234,7 @@ type settingsStep string
 const (
 	settingsStepMenu           settingsStep = "menu"
 	settingsStepSession        settingsStep = "session"
+	settingsStepRuntime        settingsStep = "runtime"
 	settingsStepProviders      settingsStep = "providers"
 	settingsStepActiveProvider settingsStep = "active_provider"
 	settingsStepActiveModels   settingsStep = "active_models"
@@ -247,6 +257,21 @@ type settingsProviderEntry struct {
 	disabled  bool
 }
 
+type settingsRuntimeEntry struct {
+	kind      settingsRuntimeEntryKind
+	label     string
+	detail    string
+	selection shuttleruntime.Selection
+	disabled  bool
+}
+
+type settingsRuntimeEntryKind string
+
+const (
+	settingsRuntimeEntrySelection    settingsRuntimeEntryKind = "selection"
+	settingsRuntimeEntryConfirmation settingsRuntimeEntryKind = "confirmation"
+)
+
 type settingsModelChoice struct {
 	profile provider.Profile
 	model   provider.ModelOption
@@ -260,6 +285,7 @@ type settingsModelsLoadedMsg struct {
 type settingsProviderSavedMsg struct {
 	ctrl       controller.Controller
 	profile    provider.Profile
+	runtime    shuttleruntime.Selection
 	err        error
 	persistErr error
 	activated  bool
@@ -271,11 +297,11 @@ type settingsProviderTestedMsg struct {
 }
 
 const (
-	agentTurnTimeout     = 60 * time.Second
-	shellTailPollLines   = 40
-	shellTailPollTimeout = 750 * time.Millisecond
-	firstCheckInDelay    = 10 * time.Second
-	repeatCheckInDelay   = 30 * time.Second
+	agentTurnTimeout       = 60 * time.Second
+	shellTailPollLines     = 40
+	shellTailPollTimeout   = 750 * time.Millisecond
+	firstCheckInDelay      = 10 * time.Second
+	repeatCheckInDelay     = 30 * time.Second
 	maxInteractiveCheckIns = 3
 )
 
@@ -304,12 +330,16 @@ type Model struct {
 	helpScroll                  int
 	detailOpen                  bool
 	detailScroll                int
+	activityOpen                bool
+	activityScroll              int
 	shellHistory                composerHistory
 	agentHistory                composerHistory
 	activePlan                  *controller.ActivePlan
 	shellContext                shell.PromptContext
 	pendingLocalEcho            *Entry
 	pendingApproval             *controller.ApprovalRequest
+	pendingHandoff              *controller.HandoffRequest
+	pendingHandoffPrompt        string
 	pendingProposal             *controller.ProposalPayload
 	startupNotice               *startupSecurityNotice
 	refiningApproval            *controller.ApprovalRequest
@@ -341,6 +371,11 @@ type Model struct {
 	interactiveCheckInPaused    bool
 	lastInterruptNoticeID       string
 	activeProvider              provider.Profile
+	activeRuntime               shuttleruntime.Selection
+	shuttleSearch               search.Availability
+	externalState               controller.ExternalState
+	showExternalResumeBanner    bool
+	runtimeActivity             controller.RuntimeActivitySnapshot
 	overwriteMode               bool
 	onboardingOpen              bool
 	onboardingStep              onboardingStep
@@ -352,13 +387,18 @@ type Model struct {
 	onboardingModelIdx          int
 	loadOnboarding              func() ([]provider.OnboardingCandidate, error)
 	loadModels                  func(provider.Profile) ([]provider.ModelOption, error)
-	switchProvider              func(provider.Profile, *shell.PromptContext) (controller.Controller, provider.Profile, error)
+	switchProvider              func(provider.Profile, *shell.PromptContext) (controller.Controller, provider.Profile, shuttleruntime.Selection, error)
 	saveProvider                func(provider.Profile) error
+	saveRuntime                 func(shuttleruntime.Selection) error
+	saveRuntimeConfirmation     func(bool) error
+	loadRuntimeChoices          func(provider.Profile) []shuttleruntime.Choice
 	testProvider                func(provider.Profile) error
 	settingsOpen                bool
 	settingsStep                settingsStep
 	settingsIndex               int
 	settingsApprovalIdx         int
+	settingsRuntimes            []settingsRuntimeEntry
+	settingsRuntimeIdx          int
 	settingsProviders           []settingsProviderEntry
 	settingsProviderIdx         int
 	settingsConfig              *onboardingFormState
@@ -377,7 +417,7 @@ type Model struct {
 }
 
 func NewModel(workspace tmux.Workspace, ctrl controller.Controller) Model {
-	return Model{
+	model := Model{
 		workspace:         workspace,
 		ctrl:              ctrl,
 		mode:              ShellMode,
@@ -387,6 +427,12 @@ func NewModel(workspace tmux.Workspace, ctrl controller.Controller) Model {
 		inlineDetailEntry: -1,
 		styles:            newStyles(),
 	}
+	if ctrl != nil {
+		model.externalState = ctrl.ExternalState()
+		model.runtimeActivity = ctrl.RuntimeActivity()
+		model.showExternalResumeBanner = model.externalState.Resumable && model.externalState.Owner == controller.ConversationOwnerBuiltin
+	}
+	return model
 }
 
 func initialEntries(workspace tmux.Workspace) []Entry {
@@ -433,8 +479,45 @@ func (m Model) WithProviderOnboarding(
 	m.startupNotice = startupNoticeForProfile(active)
 	m.loadOnboarding = load
 	m.loadModels = loadModels
+	m.switchProvider = func(profile provider.Profile, shellContext *shell.PromptContext) (controller.Controller, provider.Profile, shuttleruntime.Selection, error) {
+		ctrl, switched, err := switcher(profile, shellContext)
+		return ctrl, switched, m.activeRuntime, err
+	}
+	m.saveProvider = saver
+	return m
+}
+
+func (m Model) WithProviderOnboardingRuntimeAware(
+	active provider.Profile,
+	load func() ([]provider.OnboardingCandidate, error),
+	loadModels func(provider.Profile) ([]provider.ModelOption, error),
+	switcher func(provider.Profile, *shell.PromptContext) (controller.Controller, provider.Profile, shuttleruntime.Selection, error),
+	saver func(provider.Profile) error,
+) Model {
+	m.activeProvider = active
+	m.startupNotice = startupNoticeForProfile(active)
+	m.loadOnboarding = load
+	m.loadModels = loadModels
 	m.switchProvider = switcher
 	m.saveProvider = saver
+	return m
+}
+
+func (m Model) WithRuntimeSupport(
+	activeRuntime shuttleruntime.Selection,
+	runtimeSaver func(shuttleruntime.Selection) error,
+	runtimeConfirmationSaver func(bool) error,
+	runtimeChoices func(provider.Profile) []shuttleruntime.Choice,
+) Model {
+	m.activeRuntime = activeRuntime
+	m.saveRuntime = runtimeSaver
+	m.saveRuntimeConfirmation = runtimeConfirmationSaver
+	m.loadRuntimeChoices = runtimeChoices
+	return m
+}
+
+func (m Model) WithSearchSupport(shuttleSearch search.Availability) Model {
+	m.shuttleSearch = shuttleSearch
 	return m
 }
 
@@ -473,6 +556,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.inFlightCancel = nil
 		if len(msg.events) > 0 {
 			m.syncActionState(msg.events)
+		}
+		if m.ctrl != nil {
+			m.externalState = m.ctrl.ExternalState()
+			m.runtimeActivity = m.ctrl.RuntimeActivity()
+			if m.externalState.Owner != controller.ConversationOwnerBuiltin {
+				m.showExternalResumeBanner = false
+			}
 		}
 		contextAction := m.pendingContextAction
 		m.pendingContextAction = contextActionNone
@@ -619,6 +709,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.activeExecution = &updated
 			}
 		}
+		return m, nil
+	case runtimeActivityMsg:
+		m.runtimeActivity = msg.snapshot
 		return m, nil
 	case activeExecutionMsg:
 		if msg.err != nil {
@@ -780,7 +873,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.settingsApprovalIdx = currentSettingsApprovalIndex(m.ctrl)
 			}
 		}
+		m.externalState = m.ctrl.ExternalState()
+		m.runtimeActivity = m.ctrl.RuntimeActivity()
+		m.showExternalResumeBanner = m.externalState.Resumable && m.externalState.Owner == controller.ConversationOwnerBuiltin
 		m.activeProvider = msg.profile
+		m.activeRuntime = msg.runtime
 		m.startupNotice = startupNoticeForProfile(msg.profile)
 		m.onboardingOpen = false
 		m.onboardingStep = onboardingStepProviders
@@ -814,6 +911,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.settingsBanner = ""
 		}
 		m.pendingApproval = nil
+		m.pendingHandoff = nil
 		m.pendingProposal = nil
 		m.refiningApproval = nil
 		m.activePlan = nil
@@ -897,7 +995,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.settingsApprovalIdx = currentSettingsApprovalIndex(m.ctrl)
 				}
 			}
+			m.externalState = m.ctrl.ExternalState()
+			m.runtimeActivity = m.ctrl.RuntimeActivity()
+			m.showExternalResumeBanner = m.externalState.Resumable && m.externalState.Owner == controller.ConversationOwnerBuiltin
 			m.activeProvider = msg.profile
+			m.activeRuntime = msg.runtime
 		}
 		m.settingsStep = settingsStepProviders
 		m.settingsConfig = nil
@@ -946,14 +1048,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		return m, tea.Batch(tickBusy(), m.pollShellTailCmd(), m.pollActiveExecutionCmd(), m.maybeExecutionCheckInCmd(time.Time(msg)))
+		return m, tea.Batch(tickBusy(), m.pollShellTailCmd(), m.pollActiveExecutionCmd(), m.pollRuntimeActivityCmd(), m.maybeExecutionCheckInCmd(time.Time(msg)))
 	case shellContextPollTickMsg:
 		if m.ctrl == nil {
 			return m, nil
 		}
 		return m, tea.Batch(tickShellContext(), m.refreshShellContextCmd())
 	case tea.MouseMsg:
-		if m.helpOpen || m.settingsOpen || m.onboardingOpen || m.detailOpen {
+		if m.helpOpen || m.settingsOpen || m.onboardingOpen || m.detailOpen || m.activityOpen {
 			return m, nil
 		}
 		return m.handleMouse(msg)
@@ -963,6 +1065,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Type == tea.KeyF1 {
 			return m.toggleHelp()
+		}
+		if msg.Type == tea.KeyF3 {
+			return m.toggleRuntimeActivity()
 		}
 		if m.helpOpen {
 			return m.updateHelp(msg)
@@ -984,6 +1089,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.detailOpen {
 			return m.updateDetail(msg)
+		}
+		if m.activityOpen {
+			return m.updateActivity(msg)
 		}
 		if handledModel, handled, cmd := m.handleActionCardKey(msg); handled {
 			return handledModel, cmd
@@ -1187,6 +1295,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m.primaryAction()
 		case tea.KeyCtrlN:
+			if m.pendingHandoff != nil {
+				return m.decideHandoff(false)
+			}
 			if m.pendingProposal != nil {
 				return m.rejectProposal()
 			}
@@ -1274,6 +1385,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.pendingDangerousConfirm = nil
 							return m, nil
 						}
+						if m.pendingHandoff != nil {
+							return m.decideHandoff(false)
+						}
 						if m.pendingProposal != nil {
 							return m.rejectProposal()
 						}
@@ -1289,6 +1403,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					case 'E':
 						if m.pendingProposal != nil {
 							return m.editProposalCommand()
+						}
+					case 'B':
+						if m.externalState.Owner == controller.ConversationOwnerExternal {
+							return m.returnToBuiltin()
 						}
 					}
 				}
@@ -1312,7 +1430,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) composerLocked() bool {
-	return (m.startupNotice != nil || m.pendingDangerousConfirm != nil || m.pendingFullscreen != nil || m.pendingProposal != nil || m.pendingApproval != nil) && m.editingProposal == nil && m.refiningProposal == nil && m.refiningApproval == nil
+	return (m.startupNotice != nil || m.showExternalResumeBanner || m.pendingDangerousConfirm != nil || m.pendingFullscreen != nil || m.pendingHandoff != nil || m.pendingProposal != nil || m.pendingApproval != nil) && m.editingProposal == nil && m.refiningProposal == nil && m.refiningApproval == nil
 }
 
 func (m Model) handleActionCardKey(msg tea.KeyMsg) (tea.Model, bool, tea.Cmd) {
@@ -1328,6 +1446,18 @@ func (m Model) handleActionCardKey(msg tea.KeyMsg) (tea.Model, bool, tea.Cmd) {
 		switch unicode.ToUpper(msg.Runes[0]) {
 		case 'Y':
 			m.startupNotice = nil
+			return m, true, nil
+		}
+		return m, true, nil
+	}
+
+	if m.showExternalResumeBanner {
+		switch unicode.ToUpper(msg.Runes[0]) {
+		case 'Y':
+			model, cmd := m.resumeExternal()
+			return model, true, cmd
+		case 'N':
+			m.showExternalResumeBanner = false
 			return m, true, nil
 		}
 		return m, true, nil
@@ -1362,6 +1492,10 @@ func (m Model) handleActionCardKey(msg tea.KeyMsg) (tea.Model, bool, tea.Cmd) {
 		model, cmd := m.primaryAction()
 		return model, true, cmd
 	case 'N':
+		if m.pendingHandoff != nil {
+			model, cmd := m.decideHandoff(false)
+			return model, true, cmd
+		}
 		if m.pendingProposal != nil {
 			model, cmd := m.rejectProposal()
 			return model, true, cmd
@@ -1380,6 +1514,11 @@ func (m Model) handleActionCardKey(msg tea.KeyMsg) (tea.Model, bool, tea.Cmd) {
 			model, cmd := m.editProposalCommand()
 			return model, true, cmd
 		}
+	case 'B':
+		if m.externalState.Owner == controller.ConversationOwnerExternal {
+			model, cmd := m.returnToBuiltin()
+			return model, true, cmd
+		}
 	}
 
 	return m, true, nil
@@ -1390,8 +1529,10 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) submitWithOptions(appendEnterToFullscreenKeys bool) (tea.Model, tea.Cmd) {
-	if (m.startupNotice != nil || m.pendingDangerousConfirm != nil) && !m.sendingFullscreenKeys {
-		return m, nil
+	if m.composerLocked() && !m.sendingFullscreenKeys {
+		if !(m.mode == AgentMode && strings.HasPrefix(strings.TrimSpace(m.input), "/")) {
+			return m, nil
+		}
 	}
 
 	text := strings.TrimSpace(m.input)
@@ -1508,6 +1649,10 @@ func (m Model) submitWithOptions(appendEnterToFullscreenKeys bool) (tea.Model, t
 func (m Model) handleComposerCommand(text string) (bool, tea.Model, tea.Cmd) {
 	trimmed := strings.TrimSpace(text)
 	lower := strings.ToLower(trimmed)
+	command, _ := splitSlashCommand(trimmed)
+	if command == "/coder" {
+		return m.handleCoderCommand(trimmed)
+	}
 	switch lower {
 	case "/onboard", "/onboarding":
 		m.input = ""
@@ -1569,11 +1714,86 @@ func (m Model) handleComposerCommand(text string) (bool, tea.Model, tea.Cmd) {
 			m.currentHistory().reset()
 			m.appendTranscriptEntry(Entry{
 				Title: "system",
-				Body:  fmt.Sprintf("Unknown slash command: %s. Try /help, /approvals, /new, /compact, /onboard, /provider, /model, or /quit.", trimmed),
+				Body:  fmt.Sprintf("Unknown slash command: %s. Try /help, /approvals, /coder, /new, /compact, /onboard, /provider, /model, or /quit.", trimmed),
 			})
 			return true, m, nil
 		}
 		return false, m, nil
+	}
+}
+
+func splitSlashCommand(text string) (string, string) {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" || !strings.HasPrefix(trimmed, "/") {
+		return "", ""
+	}
+	fields := strings.Fields(trimmed)
+	if len(fields) == 0 {
+		return "", ""
+	}
+	command := strings.ToLower(fields[0])
+	rest := strings.TrimSpace(trimmed[len(fields[0]):])
+	return command, rest
+}
+
+func (m Model) handleCoderCommand(text string) (bool, tea.Model, tea.Cmd) {
+	m.input = ""
+	m.currentHistory().reset()
+	if m.ctrl == nil {
+		m.appendTranscriptEntry(Entry{Title: "error", Body: "controller is not available"})
+		return true, m, nil
+	}
+
+	_, prompt := splitSlashCommand(text)
+	prompt = strings.TrimSpace(prompt)
+	state := m.ctrl.ExternalState()
+
+	switch {
+	case prompt == "" && state.Owner == controller.ConversationOwnerExternal:
+		next, cmd := m.returnToBuiltin()
+		return true, next, cmd
+	case prompt == "" && state.Resumable:
+		next, cmd := m.resumeExternal()
+		return true, next, cmd
+	case prompt == "" && !state.Available:
+		m.appendTranscriptEntry(Entry{
+			Title: "system",
+			Body:  "No external coding agent is configured for this workspace. Pick a preferred external agent in settings first.",
+		})
+		return true, m, nil
+	case prompt == "":
+		m.appendTranscriptEntry(Entry{
+			Title: "system",
+			Body:  "Use `/coder <request>` to route that turn directly to the preferred external coding agent. Bare `/coder` resumes saved external context when available, and toggles back to Shuttle while the external agent owns the conversation.",
+		})
+		return true, m, nil
+	case !state.Available:
+		m.appendTranscriptEntry(Entry{
+			Title: "system",
+			Body:  "No external coding agent is available for this workspace. Pick a supported preferred external agent in settings first.",
+		})
+		return true, m, nil
+	case controller.ExternalConfirmationRequired(state):
+		m.pendingHandoff = &controller.HandoffRequest{
+			ID:               "forced-coder-handoff",
+			Title:            "Route this turn to the external coding agent?",
+			Summary:          prompt,
+			Reason:           "You explicitly asked Shuttle to use the preferred external coding agent for this turn.",
+			SuggestedRuntime: state.PreferredRuntime,
+			ResumeAvailable:  state.Resumable,
+		}
+		m.pendingHandoffPrompt = prompt
+		m.pendingApproval = nil
+		m.pendingProposal = nil
+		return true, m, nil
+	default:
+		m.appendLocalTranscriptEcho(Entry{Title: "user", Body: prompt})
+		next, cmd := m.startControllerRequest(func(next *Model) {
+			next.showExternalResumeBanner = false
+		}, func(ctx context.Context) ([]controller.TranscriptEvent, error) {
+			return m.ctrl.SubmitExternalPrompt(ctx, prompt)
+		}, false)
+		return true, next, cmd
 	}
 }
 
@@ -1685,6 +1905,10 @@ func (m Model) startControllerRequest(mark func(*Model), invoke func(context.Con
 
 func (m Model) primaryAction() (tea.Model, tea.Cmd) {
 	switch {
+	case m.showExternalResumeBanner:
+		return m.resumeExternal()
+	case m.pendingHandoff != nil:
+		return m.decideHandoff(true)
 	case m.pendingApproval == nil && m.pendingProposal == nil && m.interactiveCheckInPaused && executionNeedsUserDrivenResume(m.activeExecution):
 		return m.resumePausedInteractiveCheckIns()
 	case m.pendingApproval != nil:
@@ -1702,6 +1926,75 @@ func (m Model) primaryAction() (tea.Model, tea.Cmd) {
 	default:
 		return m, nil
 	}
+}
+
+func (m Model) decideHandoff(accept bool) (tea.Model, tea.Cmd) {
+	if m.busy || m.ctrl == nil || m.pendingHandoff == nil {
+		return m, nil
+	}
+	handoffID := m.pendingHandoff.ID
+	prompt := strings.TrimSpace(m.pendingHandoffPrompt)
+	if !accept {
+		m.pendingHandoff = nil
+		m.pendingHandoffPrompt = ""
+	} else if prompt != "" {
+		m.pendingHandoff = nil
+		m.pendingHandoffPrompt = ""
+	}
+	m.busy = true
+	m.busyStartedAt = time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), agentTurnTimeout)
+	m.inFlightCancel = cancel
+	return m, tea.Batch(func() tea.Msg {
+		defer cancel()
+		var (
+			events []controller.TranscriptEvent
+			err    error
+		)
+		if prompt != "" {
+			if accept {
+				events, err = m.ctrl.SubmitExternalPrompt(ctx, prompt)
+			} else {
+				events = []controller.TranscriptEvent{
+					{Kind: controller.EventSystemNotice, Payload: controller.TextPayload{Text: "Stayed in Shuttle. External handoff dismissed."}},
+				}
+			}
+		} else {
+			events, err = m.ctrl.DecideHandoff(ctx, handoffID, accept)
+		}
+		return controllerEventsMsg{events: events, err: err}
+	}, tickBusy())
+}
+
+func (m Model) resumeExternal() (tea.Model, tea.Cmd) {
+	if m.busy || m.ctrl == nil {
+		return m, nil
+	}
+	m.showExternalResumeBanner = false
+	m.busy = true
+	m.busyStartedAt = time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), agentTurnTimeout)
+	m.inFlightCancel = cancel
+	return m, tea.Batch(func() tea.Msg {
+		defer cancel()
+		events, err := m.ctrl.ResumeExternal(ctx)
+		return controllerEventsMsg{events: events, err: err}
+	}, tickBusy())
+}
+
+func (m Model) returnToBuiltin() (tea.Model, tea.Cmd) {
+	if m.busy || m.ctrl == nil {
+		return m, nil
+	}
+	m.busy = true
+	m.busyStartedAt = time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), agentTurnTimeout)
+	m.inFlightCancel = cancel
+	return m, tea.Batch(func() tea.Msg {
+		defer cancel()
+		events, err := m.ctrl.ReturnToBuiltin(ctx)
+		return controllerEventsMsg{events: events, err: err}
+	}, tickBusy())
 }
 
 func (m Model) resumePausedInteractiveCheckIns() (tea.Model, tea.Cmd) {

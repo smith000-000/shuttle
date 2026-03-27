@@ -90,6 +90,7 @@ func makeMultilineBody(count int) string {
 
 type fakeController struct {
 	agentEvents              []controller.TranscriptEvent
+	externalPromptEvents     []controller.TranscriptEvent
 	continueEvents           []controller.TranscriptEvent
 	continueAfterPatchEvents []controller.TranscriptEvent
 	checkInEvents            []controller.TranscriptEvent
@@ -98,9 +99,14 @@ type fakeController struct {
 	newTaskEvents            []controller.TranscriptEvent
 	compactTaskEvents        []controller.TranscriptEvent
 	shellCommands            []string
+	externalPrompts          []string
 	appliedPatches           []string
 	decisionEvents           []controller.TranscriptEvent
+	handoffEvents            []controller.TranscriptEvent
+	resumeExternalEvents     []controller.TranscriptEvent
+	returnBuiltinEvents      []controller.TranscriptEvent
 	decisions                []approvalDecisionCall
+	handoffDecisions         []handoffDecisionCall
 	refinements              []refinementCall
 	continueCalls            int
 	continueAfterPatchCalls  int
@@ -115,6 +121,8 @@ type fakeController struct {
 	trackedPaneID            string
 	contextUsage             controller.ContextWindowUsage
 	approvalMode             controller.ApprovalMode
+	externalState            controller.ExternalState
+	runtimeActivity          controller.RuntimeActivitySnapshot
 	refreshedShellContext    *shell.PromptContext
 	refreshShellContextErr   error
 	refreshShellContextCalls int
@@ -122,6 +130,23 @@ type fakeController struct {
 
 func (f *fakeController) SubmitAgentPrompt(_ context.Context, _ string) ([]controller.TranscriptEvent, error) {
 	return append([]controller.TranscriptEvent(nil), f.agentEvents...), nil
+}
+
+func (f *fakeController) SubmitExternalPrompt(_ context.Context, prompt string) ([]controller.TranscriptEvent, error) {
+	f.externalPrompts = append(f.externalPrompts, prompt)
+	if len(f.externalPromptEvents) == 0 {
+		return []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventUserMessage,
+				Payload: controller.TextPayload{Text: prompt},
+			},
+			{
+				Kind:    controller.EventSystemNotice,
+				Payload: controller.TextPayload{Text: "routed to external agent"},
+			},
+		}, nil
+	}
+	return append([]controller.TranscriptEvent(nil), f.externalPromptEvents...), nil
 }
 
 func (f *fakeController) SubmitRefinement(_ context.Context, approval controller.ApprovalRequest, note string) ([]controller.TranscriptEvent, error) {
@@ -277,6 +302,20 @@ func (f *fakeController) DecideApproval(_ context.Context, approvalID string, de
 	return append([]controller.TranscriptEvent(nil), f.decisionEvents...), nil
 }
 
+func (f *fakeController) DecideHandoff(_ context.Context, handoffID string, accept bool) ([]controller.TranscriptEvent, error) {
+	f.handoffDecisions = append(f.handoffDecisions, handoffDecisionCall{
+		handoffID: handoffID,
+		accept:    accept,
+	})
+	if len(f.handoffEvents) == 0 {
+		return []controller.TranscriptEvent{{
+			Kind:    controller.EventSystemNotice,
+			Payload: controller.TextPayload{Text: "handoff handled"},
+		}}, nil
+	}
+	return append([]controller.TranscriptEvent(nil), f.handoffEvents...), nil
+}
+
 func (f *fakeController) StartNewTask(_ context.Context) ([]controller.TranscriptEvent, error) {
 	f.newTaskCalls++
 	if len(f.newTaskEvents) == 0 {
@@ -301,6 +340,26 @@ func (f *fakeController) CompactTask(_ context.Context) ([]controller.Transcript
 		}, nil
 	}
 	return append([]controller.TranscriptEvent(nil), f.compactTaskEvents...), nil
+}
+
+func (f *fakeController) ResumeExternal(_ context.Context) ([]controller.TranscriptEvent, error) {
+	if len(f.resumeExternalEvents) == 0 {
+		return []controller.TranscriptEvent{{
+			Kind:    controller.EventSystemNotice,
+			Payload: controller.TextPayload{Text: "external resumed"},
+		}}, nil
+	}
+	return append([]controller.TranscriptEvent(nil), f.resumeExternalEvents...), nil
+}
+
+func (f *fakeController) ReturnToBuiltin(_ context.Context) ([]controller.TranscriptEvent, error) {
+	if len(f.returnBuiltinEvents) == 0 {
+		return []controller.TranscriptEvent{{
+			Kind:    controller.EventSystemNotice,
+			Payload: controller.TextPayload{Text: "returned to builtin"},
+		}}, nil
+	}
+	return append([]controller.TranscriptEvent(nil), f.returnBuiltinEvents...), nil
 }
 
 func (f *fakeController) SetApprovalMode(_ context.Context, mode controller.ApprovalMode) ([]controller.TranscriptEvent, error) {
@@ -343,6 +402,14 @@ func (f *fakeController) ApprovalMode() controller.ApprovalMode {
 		return controller.ApprovalModeConfirm
 	}
 	return f.approvalMode
+}
+
+func (f *fakeController) ExternalState() controller.ExternalState {
+	return f.externalState
+}
+
+func (f *fakeController) RuntimeActivity() controller.RuntimeActivitySnapshot {
+	return f.runtimeActivity
 }
 
 func (f *fakeController) ActiveExecution() *controller.CommandExecution {
@@ -404,6 +471,11 @@ type approvalDecisionCall struct {
 	approvalID string
 	decision   controller.ApprovalDecision
 	refineText string
+}
+
+type handoffDecisionCall struct {
+	handoffID string
+	accept    bool
 }
 
 type refinementCall struct {

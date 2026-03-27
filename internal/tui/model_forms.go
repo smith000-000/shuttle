@@ -160,6 +160,9 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.settingsStep = settingsStepProviders
 			m.settingsConfig = nil
 			m.settingsBanner = ""
+		case settingsStepRuntime:
+			m.settingsStep = settingsStepMenu
+			m.settingsBanner = ""
 		case settingsStepActiveModels:
 			if m.settingsModelFilter != "" {
 				m.settingsModelFilter = ""
@@ -197,6 +200,10 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.settingsApprovalIdx > 0 {
 				m.settingsApprovalIdx--
 			}
+		case settingsStepRuntime:
+			if m.settingsRuntimeIdx > 0 {
+				m.settingsRuntimeIdx--
+			}
 		case settingsStepProviders, settingsStepActiveProvider:
 			if m.settingsProviderIdx > 0 {
 				m.settingsProviderIdx--
@@ -215,12 +222,16 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyDown:
 		switch m.settingsStep {
 		case settingsStepMenu:
-			if m.settingsIndex < len(settingsMenuEntries())-1 {
+			if m.settingsIndex < len(m.settingsMenuEntries())-1 {
 				m.settingsIndex++
 			}
 		case settingsStepSession:
 			if m.settingsApprovalIdx < len(settingsApprovalEntries())-1 {
 				m.settingsApprovalIdx++
+			}
+		case settingsStepRuntime:
+			if m.settingsRuntimeIdx < len(m.settingsRuntimes)-1 {
+				m.settingsRuntimeIdx++
 			}
 		case settingsStepProviders, settingsStepActiveProvider:
 			if m.settingsProviderIdx < len(m.settingsProviders)-1 {
@@ -362,14 +373,20 @@ func (m Model) switchProfile(profile provider.Profile, step settingsStep) (tea.M
 	m.busy = true
 	m.busyStartedAt = time.Now()
 	return m, func() tea.Msg {
-		ctrl, profile, err := m.switchProvider(profile, shellContext)
+		ctrl, profile, runtimeSelection, err := m.switchProvider(profile, shellContext)
 		var persistErr error
 		if err == nil && m.saveProvider != nil {
 			persistErr = m.saveProvider(profile)
 		}
+		if err == nil && m.saveRuntime != nil {
+			if runtimeErr := m.saveRuntime(runtimeSelection); runtimeErr != nil && persistErr == nil {
+				persistErr = runtimeErr
+			}
+		}
 		return providerSwitchedMsg{
 			ctrl:         ctrl,
 			profile:      profile,
+			runtime:      runtimeSelection,
 			err:          err,
 			persistErr:   persistErr,
 			settingsStep: step,
@@ -436,8 +453,19 @@ func (m Model) applySettingsSelection() (tea.Model, tea.Cmd) {
 			m.settingsBanner = ""
 			return m, nil
 		}
+		if m.settingsIndex == 3 {
+			m.settingsBanner = ""
+			return m.loadSettingsModels()
+		}
+		if m.loadRuntimeChoices != nil {
+			m.settingsRuntimes = buildSettingsRuntimeEntries(m.loadRuntimeChoices(m.activeProvider))
+		} else {
+			m.settingsRuntimes = nil
+		}
+		m.settingsStep = settingsStepRuntime
+		m.settingsRuntimeIdx = currentSettingsRuntimeIndex(m.settingsRuntimes, m.activeRuntime)
 		m.settingsBanner = ""
-		return m.loadSettingsModels()
+		return m, nil
 	case settingsStepSession:
 		entries := settingsApprovalEntries()
 		if len(entries) == 0 {
@@ -457,6 +485,51 @@ func (m Model) applySettingsSelection() (tea.Model, tea.Cmd) {
 			events, err := m.ctrl.SetApprovalMode(context.Background(), selected.mode)
 			return controllerEventsMsg{events: events, err: err}
 		}
+	case settingsStepRuntime:
+		if len(m.settingsRuntimes) == 0 {
+			return m, nil
+		}
+		entry := m.settingsRuntimes[m.settingsRuntimeIdx]
+		if entry.kind == settingsRuntimeEntryConfirmation {
+			nextValue := !controller.ExternalConfirmationRequired(m.externalState)
+			if m.saveRuntimeConfirmation != nil {
+				if err := m.saveRuntimeConfirmation(nextValue); err != nil {
+					m.settingsBanner = fmt.Sprintf("Runtime save failed: %v", err)
+					return m, nil
+				}
+			}
+			if nextValue {
+				m.externalState.ConfirmationMode = "confirm"
+			} else {
+				m.externalState.ConfirmationMode = "off"
+			}
+			if m.ctrl != nil {
+				m.externalState = m.ctrl.ExternalState()
+				if nextValue && !controller.ExternalConfirmationRequired(m.externalState) {
+					m.externalState.ConfirmationMode = "confirm"
+				}
+				if !nextValue && controller.ExternalConfirmationRequired(m.externalState) {
+					m.externalState.ConfirmationMode = "off"
+				}
+			}
+			if nextValue {
+				m.settingsBanner = "External-agent confirmation is on."
+			} else {
+				m.settingsBanner = "External-agent confirmation is off."
+			}
+			return m, nil
+		}
+		if entry.disabled {
+			return m, nil
+		}
+		m.activeRuntime = entry.selection
+		if m.saveRuntime != nil {
+			if err := m.saveRuntime(entry.selection); err != nil {
+				m.settingsBanner = fmt.Sprintf("Runtime save failed: %v", err)
+				return m, nil
+			}
+		}
+		return m.switchSettingsProfile(m.activeProvider, settingsStepRuntime)
 	case settingsStepProviders:
 		if len(m.settingsProviders) == 0 {
 			return m, nil
@@ -607,10 +680,11 @@ func (m Model) saveSettingsProfile(activate bool) (tea.Model, tea.Cmd) {
 				activated:  false,
 			}
 		}
-		ctrl, switchedProfile, err := m.switchProvider(profile, m.currentShellContext())
+		ctrl, switchedProfile, runtimeSelection, err := m.switchProvider(profile, m.currentShellContext())
 		return settingsProviderSavedMsg{
 			ctrl:       ctrl,
 			profile:    switchedProfile,
+			runtime:    runtimeSelection,
 			err:        err,
 			persistErr: persistErr,
 			activated:  err == nil,

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"aiterm/internal/controller"
+	"aiterm/internal/search"
 )
 
 func TestResponsesAgentRespondMapsStructuredOutput(t *testing.T) {
@@ -203,6 +204,27 @@ func TestBuildTurnContextShrinksAfterCompaction(t *testing.T) {
 
 	if len(compacted) >= len(uncompacted) {
 		t.Fatalf("expected compacted context to be smaller, got uncompacted=%d compacted=%d", len(uncompacted), len(compacted))
+	}
+}
+
+func TestBuildTurnContextIncludesSearchCapabilities(t *testing.T) {
+	context := buildTurnContext(controller.AgentInput{
+		Prompt: "research this",
+		Session: controller.SessionContext{
+			Search:                  search.ShuttleAvailability(search.ProviderBrave),
+			PreferredExternalSearch: search.RuntimeAvailability("pi", search.ProviderBrave),
+		},
+	})
+
+	for _, fragment := range []string{
+		"search_mode=shuttle",
+		"search_provider=brave",
+		"preferred_external_search_mode=runtime_native_with_shuttle_fallback",
+		"preferred_external_search_runtime=pi",
+	} {
+		if !strings.Contains(context, fragment) {
+			t.Fatalf("expected %q in turn context, got %q", fragment, context)
+		}
 	}
 }
 

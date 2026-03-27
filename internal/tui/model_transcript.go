@@ -933,6 +933,10 @@ func (m Model) detailPageSize() int {
 	return max(1, m.height/2)
 }
 
+func (m Model) activityPageSize() int {
+	return max(1, m.height/2)
+}
+
 func (m *Model) clampDetailScroll() {
 	if m.detailScroll < 0 {
 		m.detailScroll = 0
@@ -963,6 +967,42 @@ func (m Model) maxDetailScroll() int {
 		return 0
 	}
 
+	return len(lines) - viewportHeight
+}
+
+func (m *Model) clampActivityScroll() {
+	if m.activityScroll < 0 {
+		m.activityScroll = 0
+		return
+	}
+	if m.activityScroll > m.maxActivityScroll() {
+		m.activityScroll = m.maxActivityScroll()
+	}
+}
+
+func (m Model) maxActivityScroll() int {
+	width := m.width
+	if width <= 0 {
+		width = 100
+	}
+	height := m.height
+	if height <= 0 {
+		height = 24
+	}
+	contentWidth := m.contentWidthFor(width, m.styles.detail)
+	headerHeight := lipgloss.Height(strings.Join([]string{
+		"EXTERNAL ACTIVITY",
+		"runtime=pi  state=streaming",
+		"",
+	}, "\n"))
+	lines := runtimeActivityLines(m.runtimeActivity, max(10, contentWidth))
+	viewportHeight := height - headerHeight - m.styles.detail.GetVerticalFrameSize() - 2
+	if viewportHeight < 4 {
+		viewportHeight = 4
+	}
+	if len(lines) <= viewportHeight {
+		return 0
+	}
 	return len(lines) - viewportHeight
 }
 
@@ -1177,6 +1217,16 @@ func eventsToEntries(events []controller.TranscriptEvent, collapseResults bool) 
 		case controller.EventApproval:
 			payload, _ := event.Payload.(controller.ApprovalRequest)
 			entries = append(entries, compactApprovalEntry(payload))
+		case controller.EventHandoff:
+			payload, _ := event.Payload.(controller.HandoffRequest)
+			body := strings.TrimSpace(payload.Summary)
+			if body == "" {
+				body = strings.TrimSpace(payload.Reason)
+			}
+			if body == "" {
+				body = "Builtin Shuttle suggested handing this task to the external coding agent."
+			}
+			entries = append(entries, Entry{Title: "system", Body: body})
 		case controller.EventCommandStart:
 			payload, _ := event.Payload.(controller.CommandStartPayload)
 			entries = append(entries, Entry{Title: "shell", Body: payload.Command})

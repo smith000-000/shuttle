@@ -5,6 +5,8 @@ Current status:
 - Shuttle now defaults to a managed tmux socket under runtime state and a derived internal session name
 - explicit `--socket` / `--session` overrides still exist for development and integration work
 - runtime registry, reconciliation policy, and lifecycle subcommands are still pending
+- the runtime registry now also stores preferred external-runtime selection, repo-level external-work history, and PI session resume metadata
+- the runtime registry also stores the external handoff-confirmation preference per workspace
 
 ## Purpose
 Define how Shuttle should manage tmux sockets, sessions, workspace identity, and crash recovery in a release build so users do not have to think about `--socket` and `--session` flags.
@@ -40,6 +42,7 @@ Everything else is derived from it:
 - tmux session name
 - pane registry
 - persisted session metadata
+- preferred external-runtime selection, external-work history, and runtime session metadata
 
 Users should think in terms of:
 - "start Shuttle here"
@@ -144,6 +147,14 @@ layout_version
 last_seen_at
 status
 ```
+
+The current implementation also stores runtime-facing fields per workspace:
+- selected coding runtime ID and command override
+- PI workspace trust-grant state
+- PI `sessionFile` and `sessionId`
+- PI-generated config directory path
+- external-work history and resumable-state metadata
+- external handoff-confirmation preference
 
 Useful additional fields:
 - hostname

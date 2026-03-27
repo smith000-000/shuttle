@@ -11,12 +11,16 @@ import (
 
 func (c *LocalController) SubmitAgentPrompt(ctx context.Context, prompt string) ([]TranscriptEvent, error) {
 	logging.Trace("controller.submit_agent_prompt", "prompt", prompt)
-	return c.submitAgentTurn(ctx, prompt, buildInitialAgentPrompt(prompt), nil, true)
+	return c.submitAgentTurnWith(ctx, prompt, buildInitialAgentPrompt(prompt), nil, true, func(ctx context.Context, input AgentInput) (AgentResponse, error) {
+		return c.agent.Respond(ctx, input)
+	})
 }
 
 func (c *LocalController) SubmitRefinement(ctx context.Context, approval ApprovalRequest, note string) ([]TranscriptEvent, error) {
 	logging.Trace("controller.submit_refinement", "approval_id", approval.ID, "note", note)
-	return c.submitAgentTurn(ctx, note, note, &approval, true)
+	return c.submitAgentTurnWith(ctx, note, note, &approval, true, func(ctx context.Context, input AgentInput) (AgentResponse, error) {
+		return c.agent.Respond(ctx, input)
+	})
 }
 
 func (c *LocalController) SubmitProposalRefinement(ctx context.Context, proposal ProposalPayload, note string) ([]TranscriptEvent, error) {
@@ -26,7 +30,9 @@ func (c *LocalController) SubmitProposalRefinement(ctx context.Context, proposal
 		"proposal_command", proposal.Command,
 		"note", note,
 	)
-	return c.submitAgentTurn(ctx, note, buildProposalRefinementPrompt(proposal, note), nil, true)
+	return c.submitAgentTurnWith(ctx, note, buildProposalRefinementPrompt(proposal, note), nil, true, func(ctx context.Context, input AgentInput) (AgentResponse, error) {
+		return c.agent.Respond(ctx, input)
+	})
 }
 
 func (c *LocalController) ContinueActivePlan(ctx context.Context) ([]TranscriptEvent, error) {
@@ -61,7 +67,9 @@ func (c *LocalController) ContinueAfterCommand(ctx context.Context) ([]Transcrip
 
 	prompt := buildAutoContinuePrompt(c.task)
 	logging.Trace("controller.continue_after_command")
-	events, err := c.submitAgentTurn(ctx, "", prompt, nil, false)
+	events, err := c.submitAgentTurnWith(ctx, "", prompt, nil, false, func(ctx context.Context, input AgentInput) (AgentResponse, error) {
+		return c.agent.Respond(ctx, input)
+	})
 	if planEvent != nil {
 		events = append([]TranscriptEvent{*planEvent}, events...)
 	}
@@ -69,6 +77,12 @@ func (c *LocalController) ContinueAfterCommand(ctx context.Context) ([]Transcrip
 }
 
 func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string, agentPrompt string, refinement *ApprovalRequest, emitUserMessage bool) ([]TranscriptEvent, error) {
+	return c.submitAgentTurnWith(ctx, userPrompt, agentPrompt, refinement, emitUserMessage, func(ctx context.Context, input AgentInput) (AgentResponse, error) {
+		return c.agent.Respond(ctx, input)
+	})
+}
+
+func (c *LocalController) submitAgentTurnWith(ctx context.Context, userPrompt string, agentPrompt string, refinement *ApprovalRequest, emitUserMessage bool, responder func(context.Context, AgentInput) (AgentResponse, error)) ([]TranscriptEvent, error) {
 	logging.Trace(
 		"controller.agent_turn.start",
 		"user_prompt", userPrompt,
@@ -84,7 +98,7 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 	if emitUserMessage {
 		events = append(events, c.newEvent(EventUserMessage, TextPayload{Text: userPrompt}))
 	}
-	if c.agent == nil {
+	if c.agent == nil || responder == nil {
 		errEvent := c.newEvent(EventError, TextPayload{Text: "agent runtime is not configured"})
 		c.appendEvents(events...)
 		c.appendEvents(errEvent)
@@ -107,7 +121,7 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 		input.Task.PendingApproval = &refinementCopy
 	}
 
-	response, err := c.agent.Respond(ctx, input)
+	response, err := responder(ctx, input)
 	if err != nil {
 		logging.TraceError(
 			"controller.agent_turn.error",
@@ -149,6 +163,20 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 		newEvents = append(newEvents, c.newEvent(EventAgentMessage, TextPayload{Text: response.Message}))
 	}
 
+	for _, runtimeEvent := range response.RuntimeEvents {
+		text := strings.TrimSpace(runtimeEvent.Title)
+		if body := strings.TrimSpace(runtimeEvent.Body); body != "" {
+			if text != "" {
+				text += ": "
+			}
+			text += body
+		}
+		if text == "" {
+			continue
+		}
+		newEvents = append(newEvents, c.newEvent(EventSystemNotice, TextPayload{Text: text}))
+	}
+
 	if response.ModelInfo != nil {
 		modelInfo := *response.ModelInfo
 		newEvents = append(newEvents, c.newEvent(EventModelInfo, modelInfo))
@@ -165,6 +193,15 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 		newEvents = append(newEvents, c.newEvent(EventPlan, activePlan))
 	}
 
+	if response.Handoff != nil {
+		handoffCopy := *response.Handoff
+		c.task.PendingApproval = nil
+		c.task.PendingHandoff = &handoffCopy
+		newEvents = append(newEvents, c.newEvent(EventHandoff, handoffCopy))
+	} else {
+		c.task.PendingHandoff = nil
+	}
+
 	if response.Proposal != nil {
 		newEvents = append(newEvents, c.newEvent(EventProposal, ProposalPayload{
 			Kind:        response.Proposal.Kind,
@@ -178,6 +215,7 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 	if response.Approval != nil {
 		approvalCopy := *response.Approval
 		c.task.PendingApproval = &approvalCopy
+		c.task.PendingHandoff = nil
 		newEvents = append(newEvents, c.newEvent(EventApproval, approvalCopy))
 	}
 	if autoAction.command != "" {
@@ -223,6 +261,11 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 }
 
 func normalizeAgentResponse(response AgentResponse) AgentResponse {
+	if response.Handoff != nil {
+		response.Proposal = nil
+		response.Approval = nil
+	}
+
 	if response.Proposal != nil {
 		proposal := normalizePatchToolProposal(*response.Proposal)
 		if !isActionableProposal(proposal) {

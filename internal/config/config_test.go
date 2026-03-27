@@ -185,6 +185,20 @@ func TestParseRuntimeFlags(t *testing.T) {
 	}
 }
 
+func TestParseSearchProviderFlag(t *testing.T) {
+	cfg, err := Parse([]string{"--search-provider", "brave"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	if cfg.SearchProvider != "brave" {
+		t.Fatalf("expected brave search provider, got %q", cfg.SearchProvider)
+	}
+	if !cfg.SearchFlagsSet {
+		t.Fatal("expected search-provider to mark search flags as explicit")
+	}
+}
+
 func TestParseOllamaDoesNotResolveAPIKey(t *testing.T) {
 	t.Setenv("SHUTTLE_API_KEY", "shuttle-key")
 

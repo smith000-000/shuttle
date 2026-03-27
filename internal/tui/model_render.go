@@ -8,6 +8,8 @@ import (
 
 	"aiterm/internal/controller"
 	"aiterm/internal/provider"
+	shuttleruntime "aiterm/internal/runtime"
+	"aiterm/internal/search"
 	"aiterm/internal/shell"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -81,6 +83,9 @@ func (m Model) View() string {
 	if m.detailOpen {
 		return m.renderScreen(m.renderDetailView())
 	}
+	if m.activityOpen {
+		return m.renderScreen(m.renderActivityView())
+	}
 
 	return m.renderScreen(m.renderMainView())
 }
@@ -114,12 +119,20 @@ func (m Model) renderHeader(width int) string {
 	if m.busy {
 		meta = append(meta, m.styles.modeBusy.Render("BUSY"))
 	}
+	if m.externalState.HasHistory {
+		meta = append(meta, m.styles.modeProposal.Render("EXTERNAL WORK"))
+	}
+	if m.externalState.Owner == controller.ConversationOwnerExternal {
+		meta = append(meta, m.styles.modeApproval.Render("EXTERNAL ACTIVE"))
+	}
 	if m.pendingApproval != nil {
 		risk := strings.ToUpper(string(m.pendingApproval.Risk))
 		if risk == "" {
 			risk = "REVIEW"
 		}
 		meta = append(meta, m.styles.modeApproval.Render("APPROVAL "+risk))
+	} else if m.pendingHandoff != nil {
+		meta = append(meta, m.styles.modeProposal.Render("HANDOFF"))
 	} else if m.refiningApproval != nil {
 		meta = append(meta, m.styles.modeProposal.Render("REFINING"))
 	} else if m.pendingProposal != nil && (m.pendingProposal.Command != "" || m.pendingProposal.Keys != "" || m.pendingProposal.Patch != "") {
@@ -235,6 +248,21 @@ func (m Model) currentActionCardSpec() *actionCardSpec {
 		}
 	}
 
+	if m.showExternalResumeBanner {
+		return &actionCardSpec{
+			title: "External Work Available",
+			body: []string{
+				"Shuttle has saved external coding-agent context for this workspace.",
+				"Resume the external agent now, or stay in Shuttle builtin mode.",
+			},
+			buttons: []actionCardButton{
+				{label: "Y resume external", action: actionCardResumeExternal},
+				{label: "N stay in Shuttle", action: actionCardReject},
+			},
+			borderColor: lipgloss.Color("63"),
+		}
+	}
+
 	if m.pendingDangerousConfirm != nil {
 		return &actionCardSpec{
 			title: "Enable Dangerous Mode",
@@ -244,6 +272,28 @@ func (m Model) currentActionCardSpec() *actionCardSpec {
 				{label: "N cancel", action: actionCardCancelDangerous},
 			},
 			borderColor: lipgloss.Color("160"),
+		}
+	}
+
+	if m.pendingHandoff != nil {
+		body := []string{
+			m.pendingHandoff.Title,
+			m.pendingHandoff.Summary,
+		}
+		if reason := strings.TrimSpace(m.pendingHandoff.Reason); reason != "" {
+			body = append(body, "reason: "+reason)
+		}
+		if runtimeID := strings.TrimSpace(m.pendingHandoff.SuggestedRuntime); runtimeID != "" {
+			body = append(body, "runtime: "+runtimeID)
+		}
+		return &actionCardSpec{
+			title: "External Agent Handoff",
+			body:  body,
+			buttons: []actionCardButton{
+				{label: "Y hand off", action: actionCardApprove},
+				{label: "N stay in Shuttle", action: actionCardReject},
+			},
+			borderColor: lipgloss.Color("63"),
 		}
 	}
 
@@ -299,6 +349,20 @@ func (m Model) currentActionCardSpec() *actionCardSpec {
 				{label: "R refine", action: actionCardRefine},
 			},
 			borderColor: lipgloss.Color("160"),
+		}
+	}
+
+	if m.externalState.Owner == controller.ConversationOwnerExternal {
+		return &actionCardSpec{
+			title: "External Agent Active",
+			body: []string{
+				"An external coding agent currently owns this conversation.",
+				"New agent turns will continue in the external runtime until you return to Shuttle builtin mode.",
+			},
+			buttons: []actionCardButton{
+				{label: "B return to Shuttle", action: actionCardReturnBuiltin},
+			},
+			borderColor: lipgloss.Color("63"),
 		}
 	}
 
@@ -507,7 +571,11 @@ func (m Model) renderComposer(width int) string {
 
 func (m Model) renderFooter(width int) string {
 	if m.detailOpen {
-		parts := []string{"[Esc] close", "[Up/Down] scroll", "[PgUp/PgDn] page", "[Home/End] bounds", "[F2] shell", "[Ctrl+C] quit"}
+		parts := []string{"[Esc] close", "[Up/Down] scroll", "[PgUp/PgDn] page", "[Home/End] bounds", "[F2] shell", "[F3] activity", "[Ctrl+C] quit"}
+		return m.styles.footer.Width(width).Render(strings.Join(parts, "  "))
+	}
+	if m.activityOpen {
+		parts := []string{"[Esc] close", "[Up/Down] scroll", "[PgUp/PgDn] page", "[Home/End] bounds", "[F2] shell", "[F3] hide", "[Ctrl+C] quit"}
 		return m.styles.footer.Width(width).Render(strings.Join(parts, "  "))
 	}
 
@@ -740,13 +808,17 @@ func (m Model) footerParts(width int) []string {
 
 	switch {
 	case width < 72:
-		parts := []string{"[F1]", "[Ctrl+]]", "[Tab]", "[→]", "[Pg]", "[Enter]", "[Esc]", "[F2]", "[F10]", "[Ctrl+O]", "[Ctrl+C]"}
+		parts := []string{"[F1]", "[F3]", "[Ctrl+]]", "[Tab]", "[→]", "[Pg]", "[Enter]", "[Esc]", "[F2]", "[F10]", "[Ctrl+O]", "[Ctrl+C]"}
 		if m.canSendActiveKeys() {
 			parts = append(parts, "[S]")
 		}
 		if m.startupNotice != nil {
 			parts = append(parts, "[Y]")
+		} else if m.showExternalResumeBanner {
+			parts = append(parts, "[Y/N]")
 		} else if m.pendingFullscreen != nil {
+			parts = append(parts, "[Y/N]")
+		} else if m.pendingHandoff != nil {
 			parts = append(parts, "[Y/N]")
 		} else if m.pendingApproval != nil {
 			parts = append(parts, "[Y/N/R]")
@@ -760,17 +832,23 @@ func (m Model) footerParts(width int) []string {
 			parts = append(parts, "[Y/N/R/E]")
 		} else if m.interactiveCheckInPaused && executionNeedsUserDrivenResume(m.activeExecution) {
 			parts = append(parts, "[Ctrl+G]", "[R]")
+		} else if m.externalState.Owner == controller.ConversationOwnerExternal {
+			parts = append(parts, "[B]")
 		}
 		return parts
 	case width < 100:
-		parts := []string{"[F1] help", "[Ctrl+]] mode", "[Tab] cycle/tab", "[→] accept", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Enter] submit", escHint, "[F2] shell", "[F10] settings", "[Ctrl+C] quit"}
+		parts := []string{"[F1] help", "[F3] activity", "[Ctrl+]] mode", "[Tab] cycle/tab", "[→] accept", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Enter] submit", escHint, "[F2] shell", "[F10] settings", "[Ctrl+C] quit"}
 		if m.canSendActiveKeys() {
 			parts = append(parts, "[S] keys")
 		}
 		if m.startupNotice != nil {
 			parts = append(parts, "[Y] continue")
+		} else if m.showExternalResumeBanner {
+			parts = append(parts, "[Y/N] external")
 		} else if m.pendingFullscreen != nil {
 			parts = append(parts, "[Y/N] fullscreen")
+		} else if m.pendingHandoff != nil {
+			parts = append(parts, "[Y/N] handoff")
 		} else if m.pendingApproval != nil {
 			parts = append(parts, "[Y/N/R]")
 		} else if m.editingProposal != nil {
@@ -783,18 +861,24 @@ func (m Model) footerParts(width int) []string {
 			parts = append(parts, "[Y/N/R/E]")
 		} else if m.interactiveCheckInPaused && executionNeedsUserDrivenResume(m.activeExecution) {
 			parts = append(parts, "[Ctrl+G] resume", "[R] agent")
+		} else if m.externalState.Owner == controller.ConversationOwnerExternal {
+			parts = append(parts, "[B] return")
 		}
 		return parts
 	}
 
-	parts := []string{"[F1] help", "[Ctrl+]] mode", "[Tab] cycle/tab", "[→] accept", "[Ctrl+O] detail", "[Enter] submit", escHint, "[Ctrl+J] newline", "[F2] shell", "[F10] settings"}
+	parts := []string{"[F1] help", "[F3] activity", "[Ctrl+]] mode", "[Tab] cycle/tab", "[→] accept", "[Ctrl+O] detail", "[Enter] submit", escHint, "[Ctrl+J] newline", "[F2] shell", "[F10] settings"}
 	if m.canSendActiveKeys() {
 		parts = append(parts, "[S] send keys")
 	}
 	if m.startupNotice != nil {
 		parts = append(parts, "[Y] continue")
+	} else if m.showExternalResumeBanner {
+		parts = append(parts, "[Y] resume external", "[N] stay in Shuttle")
 	} else if m.pendingFullscreen != nil {
 		parts = append(parts, "[Y] send anyway", "[N] cancel")
+	} else if m.pendingHandoff != nil {
+		parts = append(parts, "[Y] hand off", "[N] stay in Shuttle")
 	} else if m.pendingApproval != nil {
 		if m.pendingApproval.Kind == controller.ApprovalPatch {
 			parts = append(parts, "[Y] apply", "[N] reject", "[R] refine")
@@ -813,6 +897,8 @@ func (m Model) footerParts(width int) []string {
 		parts = append(parts, "[Y] continue", "[N] reject", "[R] ask agent", "[E] tweak command")
 	} else if m.interactiveCheckInPaused && executionNeedsUserDrivenResume(m.activeExecution) {
 		parts = append(parts, "[Ctrl+G] resume", "[R] tell agent")
+	} else if m.externalState.Owner == controller.ConversationOwnerExternal {
+		parts = append(parts, "[B] return to Shuttle")
 	}
 	parts = append(parts, "[Ctrl+C] quit")
 	return parts
@@ -935,6 +1021,49 @@ func (m Model) renderDetailView() string {
 	return m.styles.detail.Width(contentWidth).Height(height).Render(strings.Join(lines, "\n"))
 }
 
+func (m Model) renderActivityView() string {
+	width := m.width
+	if width <= 0 {
+		width = 100
+	}
+	height := m.height
+	if height <= 0 {
+		height = 24
+	}
+
+	contentWidth := m.contentWidthFor(width, m.styles.detail)
+	snapshot := m.runtimeActivity
+	runtimeLabel := strings.TrimSpace(snapshot.Runtime)
+	if runtimeLabel == "" {
+		runtimeLabel = "none"
+	}
+	stateLabel := "idle"
+	if snapshot.Active {
+		stateLabel = "streaming"
+	}
+	lines := []string{
+		m.styles.detailTitle.Render("EXTERNAL ACTIVITY"),
+		m.styles.detailMeta.Render(fmt.Sprintf("runtime=%s  state=%s", runtimeLabel, stateLabel)),
+		"",
+	}
+
+	bodyLines := runtimeActivityLines(snapshot, max(10, contentWidth))
+	viewportHeight := height - lipgloss.Height(strings.Join(lines, "\n")) - m.styles.detail.GetVerticalFrameSize() - 2
+	if viewportHeight < 4 {
+		viewportHeight = 4
+	}
+	bodyLines = detailWindow(bodyLines, m.activityScroll, viewportHeight)
+	for _, line := range bodyLines {
+		if strings.HasPrefix(line, "> ") {
+			lines = append(lines, m.styles.detailMeta.Render(strings.TrimPrefix(line, "> ")))
+			continue
+		}
+		lines = append(lines, m.styles.detailBody.Render(line))
+	}
+	lines = append(lines, "", m.styles.detailMeta.Render(m.renderActivityFooter(contentWidth)))
+	return m.styles.detail.Width(contentWidth).Height(height).Render(strings.Join(lines, "\n"))
+}
+
 func (m Model) renderHelpView() string {
 	width := m.width
 	if width <= 0 {
@@ -1021,7 +1150,7 @@ func (m Model) renderSettingsView() string {
 	contentWidth := m.contentWidthFor(width, m.styles.detail)
 	lines := []string{
 		m.styles.detailTitle.Render("SETTINGS"),
-		m.styles.detailMeta.Render("Manage providers and choose the active model"),
+		m.styles.detailMeta.Render("Manage the preferred external coding agent, providers, and the active model"),
 	}
 	if strings.TrimSpace(m.settingsBanner) != "" {
 		lines = append(lines, m.styles.detailMeta.Render(m.settingsBanner), "")
@@ -1032,6 +1161,10 @@ func (m Model) renderSettingsView() string {
 		lines = append(lines, m.styles.detailBody.Render("Session Settings"))
 		lines = append(lines, m.styles.detailMeta.Render("Adjust session-local behavior such as approval level."))
 		lines = append(lines, m.renderSettingsApprovalModes(contentWidth)...)
+	case settingsStepRuntime:
+		lines = append(lines, m.styles.detailBody.Render("Preferred External Agent"))
+		lines = append(lines, m.styles.detailMeta.Render("Choose which external coding agent Shuttle should hand larger coding tasks to in this workspace."))
+		lines = append(lines, m.renderSettingsRuntimes(contentWidth)...)
 	case settingsStepProviders:
 		lines = append(lines, m.styles.detailBody.Render("Configure Providers"))
 		lines = append(lines, m.styles.detailMeta.Render("Edit provider settings and save them for future sessions."))
@@ -1068,6 +1201,8 @@ func helpContentLines(width int, mode Mode, canSendKeys bool) []string {
 		"/approvals confirm: keep safe commands as proposals and require approval for risky actions",
 		"/approvals auto: auto-run safe local inspection and test commands during agent work",
 		"/approvals dangerous: disable Shuttle approval gating for agent commands and patches in this session",
+		"/coder <request>: route this turn directly to the preferred external coding agent and keep it active",
+		"/coder: resume saved external context when available, or return to Shuttle while external control is active",
 		"/new: start a fresh task without restarting Shuttle or losing shell continuity",
 		"/compact: summarize older task context and keep a shorter live context window",
 		"/onboard or /onboarding: open provider onboarding",
@@ -1078,6 +1213,7 @@ func helpContentLines(width int, mode Mode, canSendKeys bool) []string {
 		"",
 		"# Global Keys",
 		"F1: open or close this help view",
+		"F3: open or close the external-agent activity inspector",
 		"F2: take control of the persistent shell, or the active temporary execution pane when an owned interactive command needs direct input",
 		"F10: open settings",
 		"Ctrl+C: quit Shuttle",
@@ -1154,8 +1290,9 @@ func helpContentLines(width int, mode Mode, canSendKeys bool) []string {
 }
 
 func (m Model) renderSettingsMenu(contentWidth int) []string {
-	lines := make([]string, 0, len(settingsMenuEntries())+2)
-	for index, entry := range settingsMenuEntries() {
+	menuEntries := m.settingsMenuEntries()
+	lines := make([]string, 0, len(menuEntries)+2)
+	for index, entry := range menuEntries {
 		lines = append(lines, m.renderSettingsRow(entry.label, index == m.settingsIndex, false, false))
 	}
 	if contentWidth > 0 {
@@ -1178,6 +1315,46 @@ func (m Model) renderSettingsApprovalModes(contentWidth int) []string {
 	}
 	_ = contentWidth
 	return lines
+}
+
+func (m Model) renderSettingsRuntimes(contentWidth int) []string {
+	confirmLabel := "on"
+	if !controller.ExternalConfirmationRequired(m.externalState) {
+		confirmLabel = "off"
+	}
+	lines := []string{
+		m.renderSettingsCurrentLine("Preferred: " + string(m.activeRuntime.ID)),
+		m.renderSettingsCurrentLine("Builtin web search: " + searchAvailabilitySummary(m.shuttleSearch)),
+		m.renderSettingsCurrentLine("External web search: " + searchAvailabilitySummary(m.activeRuntime.Search)),
+		m.renderSettingsCurrentLine("Show confirmation dialog: " + confirmLabel),
+	}
+	for index, entry := range m.settingsRuntimes {
+		current := false
+		switch entry.kind {
+		case settingsRuntimeEntrySelection:
+			current = entry.selection.ID == m.activeRuntime.ID
+		case settingsRuntimeEntryConfirmation:
+			current = controller.ExternalConfirmationRequired(m.externalState)
+		}
+		lines = append(lines, m.renderSettingsRow(entry.label, index == m.settingsRuntimeIdx, current, entry.disabled))
+		if entry.detail != "" {
+			for _, line := range wrapParagraphs(entry.detail, max(10, contentWidth-2)) {
+				lines = append(lines, m.renderSettingsMetaLine(line, index == m.settingsRuntimeIdx, current, entry.disabled))
+			}
+		}
+		if entry.kind == settingsRuntimeEntrySelection && entry.selection.ID == shuttleruntime.RuntimePi && !entry.selection.Granted {
+			lines = append(lines, m.renderSettingsMetaLine("The first PI handoff grants PI direct read/write/edit/bash access in this workspace.", index == m.settingsRuntimeIdx, current, entry.disabled))
+		}
+	}
+	return lines
+}
+
+func searchAvailabilitySummary(availability search.Availability) string {
+	summary := strings.TrimSpace(availability.Summary())
+	if summary == "" {
+		return "unavailable"
+	}
+	return summary
 }
 
 func (m Model) renderSettingsProviders(contentWidth int) []string {
@@ -1555,13 +1732,46 @@ func currentProviderModelLabel(profile provider.Profile) string {
 	return fmt.Sprintf("%s (%s) / %s", providerLabel, profile.Preset, profile.Model)
 }
 
-func settingsMenuEntries() []settingsMenuEntry {
-	return []settingsMenuEntry{
+func (m Model) settingsMenuEntries() []settingsMenuEntry {
+	entries := []settingsMenuEntry{
 		{label: "Session Settings"},
 		{label: "Configure Providers"},
 		{label: "Change Active Provider"},
 		{label: "Select Model"},
 	}
+	if m.loadRuntimeChoices != nil || m.saveRuntime != nil || m.activeRuntime.ID != "" {
+		entries = append(entries, settingsMenuEntry{label: "Preferred External Agent"})
+	}
+	return entries
+}
+
+func buildSettingsRuntimeEntries(choices []shuttleruntime.Choice) []settingsRuntimeEntry {
+	entries := make([]settingsRuntimeEntry, 0, len(choices)+1)
+	for _, choice := range choices {
+		detail := choice.Detail
+		if summary := searchAvailabilitySummary(choice.Selection.Search); summary != "unavailable" {
+			if strings.TrimSpace(detail) != "" && !strings.HasSuffix(strings.TrimSpace(detail), ".") {
+				detail += "."
+			}
+			if strings.TrimSpace(detail) != "" {
+				detail += " "
+			}
+			detail += "Search: " + summary + "."
+		}
+		entries = append(entries, settingsRuntimeEntry{
+			kind:      settingsRuntimeEntrySelection,
+			label:     choice.Label,
+			detail:    detail,
+			selection: choice.Selection,
+			disabled:  choice.Disabled,
+		})
+	}
+	entries = append(entries, settingsRuntimeEntry{
+		kind:   settingsRuntimeEntryConfirmation,
+		label:  "Show confirmation dialog",
+		detail: "When enabled, `/coder ...` stages the same external-agent handoff confirmation card before launching. Turn it off to route `/coder ...` directly to the preferred external agent.",
+	})
+	return entries
 }
 
 func settingsApprovalEntries() []settingsApprovalEntry {
@@ -1884,6 +2094,8 @@ func settingsFooter(width int, step settingsStep) string {
 		switch step {
 		case settingsStepSession:
 			return "Enter set mode  Esc back  Up/Down move  F2 shell  F10 close"
+		case settingsStepRuntime:
+			return "Enter switch/toggle  Esc back  Up/Down move  F2 shell  F10 close"
 		case settingsStepProviders:
 			return "Enter edit  Esc back  Up/Down move  F2 shell  F10 close"
 		case settingsStepActiveProvider:
@@ -1900,6 +2112,8 @@ func settingsFooter(width int, step settingsStep) string {
 	switch step {
 	case settingsStepSession:
 		return "Enter set session approval mode  Esc back  Up/Down move  F2 shell  F10 close"
+	case settingsStepRuntime:
+		return "Enter set preferred external agent or toggle confirmation  Esc back  Up/Down move  F2 shell  F10 close"
 	case settingsStepProviders:
 		return "Enter edit provider settings  Esc back  Up/Down move  F2 shell  F10 close"
 	case settingsStepActiveProvider:
