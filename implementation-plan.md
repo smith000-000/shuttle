@@ -36,8 +36,9 @@ Current branch runtime integration work:
 - workspace runtime state now persists preferred external-runtime selection, repo-level external-work history, and PI session resume metadata
 - the settings UI now includes preferred external-agent selection without dropping the active external preference during provider switches
 - PI RPC integration is available as the first external coding-agent backend, with Shuttle reusing its existing task context/prompt schema while PI owns its own tool execution in the local workspace
+- a selectable `fake_pi` runtime is available for local testing, auto-building the repository-local fake PI RPC helper when the source checkout includes it
 - Shuttle now carries a first-class `web_search` capability contract in session/runtime context: builtin search remains a Shuttle-owned stub, while PI and future external runtimes can advertise native search plus Shuttle fallback without being forced through a duplicated Shuttle search execution path
-- the interactive tmux harness still does not cover PI/Codex external-runtime loops end to end; that remains a follow-up slice
+- the interactive tmux harness now covers builtin-to-PI handoff, live runtime-activity streaming through the real `F3` inspector, and full app restart into the external-work resume flow; additional runtimes such as Codex still remain a follow-up slice
 
 Execution-monitor redesign / semantic shell hardening status on `semantic-shell-bootstrap`:
 - implemented: first-class command monitor, local managed shell transport, `awaiting_input` detection, `interactive_fullscreen` detection, `lost` execution state, `F2` handoff/reconciliation, raw `KEYS>` terminal input, remote prompt-return reconciliation, and agent-driven `keys` proposals

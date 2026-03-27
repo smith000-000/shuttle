@@ -83,12 +83,15 @@ func (a *PIAgent) Respond(ctx context.Context, input controller.AgentInput) (con
 	}
 	defer process.close()
 
+	switchedSession := false
 	if strings.TrimSpace(a.state.PISessionFile) != "" {
 		if err := process.switchSession(ctx, a.state.PISessionFile); err != nil {
 			// Ignore stale resume targets and fall back to a fresh/default session.
+		} else {
+			switchedSession = true
 		}
 	}
-	if strings.TrimSpace(a.state.PITaskID) != strings.TrimSpace(input.Task.TaskID) {
+	if shouldStartPINewSession(switchedSession, input.PreserveExternalSession, a.state.PITaskID, input.Task.TaskID) {
 		if err := process.newSession(ctx); err != nil {
 			return controller.AgentResponse{}, err
 		}
@@ -595,6 +598,16 @@ func piProviderName(profile provider.Profile) string {
 	default:
 		return strings.TrimSpace(string(profile.Preset))
 	}
+}
+
+func shouldStartPINewSession(switchedSession bool, preserveExternalSession bool, storedTaskID string, inputTaskID string) bool {
+	if !switchedSession {
+		return true
+	}
+	if preserveExternalSession {
+		return false
+	}
+	return strings.TrimSpace(storedTaskID) != strings.TrimSpace(inputTaskID)
 }
 
 func effectivePIModel(profile provider.Profile) string {

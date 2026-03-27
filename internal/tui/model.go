@@ -196,6 +196,7 @@ type providerSwitchedMsg struct {
 	err          error
 	persistErr   error
 	settingsStep settingsStep
+	runtimeOnly  bool
 }
 
 type providerModelsLoadedMsg struct {
@@ -892,7 +893,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.settingsStep = msg.settingsStep
 			m.settingsConfig = nil
 			m.settingsProviderIdx = m.currentSettingsProviderIndex()
-			m.settingsBanner = fmt.Sprintf("Active provider switched to %s.", msg.profile.Name)
+			if msg.runtimeOnly {
+				m.settingsBanner = fmt.Sprintf("Preferred external agent changed to %s.", settingsRuntimeLabel(msg.runtime))
+			} else {
+				m.settingsBanner = fmt.Sprintf("Active provider switched to %s.", msg.profile.Name)
+			}
 			if msg.settingsStep == settingsStepActiveModels {
 				m.applySettingsModelFilter()
 			}
@@ -919,10 +924,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.approvalInFlight = false
 		m.proposalRunPending = false
 		m.directShellPending = false
-		m.entries = append(m.entries, Entry{
-			Title: "system",
-			Body:  fmt.Sprintf("Provider switched to %s (%s, %s, auth %s).", msg.profile.Name, msg.profile.Preset, msg.profile.Model, providerAuthSourceLabel(msg.profile)),
-		})
+		if msg.runtimeOnly {
+			m.entries = append(m.entries, Entry{
+				Title: "system",
+				Body:  fmt.Sprintf("Preferred external agent changed to %s.", settingsRuntimeLabel(msg.runtime)),
+			})
+		} else {
+			m.entries = append(m.entries, Entry{
+				Title: "system",
+				Body:  fmt.Sprintf("Provider switched to %s (%s, %s, auth %s).", msg.profile.Name, msg.profile.Preset, msg.profile.Model, providerAuthSourceLabel(msg.profile)),
+			})
+		}
 		if msg.persistErr != nil {
 			m.entries = append(m.entries, Entry{
 				Title: "error",

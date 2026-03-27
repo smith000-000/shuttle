@@ -351,6 +351,69 @@ func TestRuntimeSettingsShowSearchStatus(t *testing.T) {
 	}
 }
 
+func TestRuntimeSettingsSelectionUsesRuntimeBannerInsteadOfProviderBanner(t *testing.T) {
+	switchedCtrl := &fakeController{
+		externalState: controller.ExternalState{
+			PreferredRuntime: "fake_pi",
+			Available:        true,
+		},
+	}
+	model := NewModel(fakeWorkspace(), &fakeController{
+		externalState: controller.ExternalState{
+			PreferredRuntime: "pi",
+			Available:        true,
+		},
+	}).WithProviderOnboardingRuntimeAware(
+		provider.Profile{Preset: provider.PresetCodexCLI, Name: "Codex CLI", Model: "gpt-5-codex"},
+		nil,
+		nil,
+		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, shuttleruntime.Selection, error) {
+			return switchedCtrl, profile, shuttleruntime.Selection{ID: shuttleruntime.RuntimeFakePi}, nil
+		},
+		func(provider.Profile) error { return nil },
+	).WithRuntimeSupport(
+		shuttleruntime.Selection{ID: shuttleruntime.RuntimePi},
+		func(shuttleruntime.Selection) error { return nil },
+		func(bool) error { return nil },
+		func(provider.Profile) []shuttleruntime.Choice {
+			return nil
+		},
+	)
+	model.settingsOpen = true
+	model.settingsStep = settingsStepRuntime
+	model.settingsRuntimes = buildSettingsRuntimeEntries([]shuttleruntime.Choice{
+		{Selection: shuttleruntime.Selection{ID: shuttleruntime.RuntimePi}, Label: "pi"},
+		{Selection: shuttleruntime.Selection{ID: shuttleruntime.RuntimeFakePi}, Label: "fake pi"},
+	})
+	model.settingsRuntimeIdx = 1
+
+	updated, cmd := model.applySettingsSelection()
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected runtime selection to rebuild the controller")
+	}
+	switchMsg, ok := cmd().(providerSwitchedMsg)
+	if !ok {
+		t.Fatalf("expected providerSwitchedMsg, got %T", cmd())
+	}
+	if !switchMsg.runtimeOnly {
+		t.Fatal("expected runtime selection to mark providerSwitchedMsg as runtimeOnly")
+	}
+
+	updated, _ = model.Update(switchMsg)
+	model = updated.(Model)
+	if model.activeRuntime.ID != shuttleruntime.RuntimeFakePi {
+		t.Fatalf("expected active runtime fake_pi, got %#v", model.activeRuntime)
+	}
+	if model.settingsBanner != "Preferred external agent changed to fake pi." {
+		t.Fatalf("unexpected settings banner %q", model.settingsBanner)
+	}
+	last := model.entries[len(model.entries)-1]
+	if last.Body != "Preferred external agent changed to fake pi." {
+		t.Fatalf("unexpected transcript notice %#v", last)
+	}
+}
+
 func TestSlashApprovalsAutoCallsController(t *testing.T) {
 	ctrl := &fakeController{}
 	model := NewModel(fakeWorkspace(), ctrl)

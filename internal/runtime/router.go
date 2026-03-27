@@ -113,6 +113,7 @@ func (r *Router) ActivateExternal(ctx context.Context, input controller.AgentInp
 	input.Session.Search = r.selection.Search
 	input.Session.PreferredExternalSearch = r.selection.Search
 	input.Prompt = buildExternalHandoffPrompt(handoff)
+	input.PreserveExternalSession = r.state.ExternalResumable
 	r.owner = controller.ConversationOwnerExternal
 	r.activity.Start(controller.ConversationOwnerExternal, string(r.selection.ID))
 
@@ -152,6 +153,7 @@ func (r *Router) SubmitExternalPrompt(ctx context.Context, input controller.Agen
 	input.Session.Search = r.selection.Search
 	input.Session.PreferredExternalSearch = r.selection.Search
 	input.Prompt = buildExternalDirectPrompt(prompt, takeover, r.state.ExternalResumable)
+	input.PreserveExternalSession = takeover && r.state.ExternalResumable
 	r.owner = controller.ConversationOwnerExternal
 	r.activity.Start(controller.ConversationOwnerExternal, string(r.selection.ID))
 
@@ -186,6 +188,7 @@ func (r *Router) ResumeExternal(ctx context.Context, input controller.AgentInput
 	input.Session.Search = r.selection.Search
 	input.Session.PreferredExternalSearch = r.selection.Search
 	input.Prompt = buildExternalResumePrompt()
+	input.PreserveExternalSession = true
 	r.owner = controller.ConversationOwnerExternal
 	r.activity.Start(controller.ConversationOwnerExternal, string(r.selection.ID))
 	response, err := agent.Respond(ctx, input)
@@ -275,6 +278,15 @@ func (r *Router) externalAgentLocked() (controller.Agent, error) {
 	switch r.selection.ID {
 	case RuntimePi:
 		return NewPIAgent(r.cfg, r.profile, r.selection, r.state, r.activity)
+	case RuntimeFakePi:
+		command, err := ensureFakePIBinary(r.cfg)
+		if err != nil {
+			return nil, err
+		}
+		selection := r.selection
+		selection.Command = command
+		r.selection = selection
+		return NewPIAgent(r.cfg, r.profile, selection, r.state, r.activity)
 	default:
 		return nil, fmt.Errorf("unsupported external runtime %q", r.selection.ID)
 	}

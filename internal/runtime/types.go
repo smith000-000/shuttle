@@ -11,6 +11,7 @@ type ID string
 const (
 	RuntimeBuiltin ID = "builtin"
 	RuntimePi      ID = "pi"
+	RuntimeFakePi  ID = "fake_pi"
 	RuntimeAuto    ID = "auto"
 )
 

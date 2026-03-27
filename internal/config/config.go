@@ -125,7 +125,7 @@ func Parse(args []string) (Config, error) {
 	fs.StringVar(&cfg.ProviderBaseURL, "base-url", providerBaseURL, "base URL for the selected provider API")
 	fs.StringVar(&cfg.ProviderCLICommand, "cli-command", providerCLICommand, "CLI command path for CLI-backed providers")
 	fs.StringVar((*string)(&cfg.SearchProvider), "search-provider", string(searchProvider), "Shuttle builtin web search provider: none, brave, or perplexity")
-	fs.StringVar(&cfg.RuntimeType, "runtime", runtimeType, "preferred external coding runtime to hand larger tasks to: builtin, pi, codex_sdk, or auto")
+	fs.StringVar(&cfg.RuntimeType, "runtime", runtimeType, "preferred external coding runtime to hand larger tasks to: builtin, pi, fake_pi, codex_sdk, or auto")
 	fs.StringVar(&cfg.RuntimeCommand, "runtime-command", runtimeCommand, "command path for the selected external coding runtime")
 	fs.BoolVar(&cfg.AllowPlaintextProviderSecrets, "allow-plaintext-provider-secrets", allowPlaintextProviderSecrets, "allow less-secure local plaintext fallback for provider secrets when OS keyring is unavailable")
 
@@ -349,6 +349,8 @@ func normalizeRuntimeType(value string) string {
 		return "codex_sdk"
 	case "pi-runtime":
 		return "pi"
+	case "fakepi", "fake-pi":
+		return "fake_pi"
 	default:
 		return strings.ToLower(strings.TrimSpace(value))
 	}

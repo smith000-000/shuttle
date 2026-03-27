@@ -217,7 +217,12 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			CurrentShell:            initialShellContextPtr(initialShellContext),
 		})
 		switchProvider := func(profile provider.Profile, shellContext *shell.PromptContext) (controller.Controller, provider.Profile, shuttleruntime.Selection, error) {
-			agent, selection, err := shuttleruntime.NewFromProfile(runtimeCfg, profile, provider.FactoryOptions{})
+			switchCfg := runtimeCfg
+			switchCfg, err = shuttleruntime.ApplyStoredRuntimeConfig(switchCfg)
+			if err != nil {
+				return nil, provider.Profile{}, shuttleruntime.Selection{}, err
+			}
+			agent, selection, err := shuttleruntime.NewFromProfile(switchCfg, profile, provider.FactoryOptions{})
 			if err != nil {
 				return nil, provider.Profile{}, shuttleruntime.Selection{}, err
 			}

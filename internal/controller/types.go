@@ -14,9 +14,10 @@ type Agent interface {
 }
 
 type AgentInput struct {
-	Session SessionContext
-	Task    TaskContext
-	Prompt  string
+	Session                 SessionContext
+	Task                    TaskContext
+	Prompt                  string
+	PreserveExternalSession bool
 }
 
 type TrackedShellTarget struct {

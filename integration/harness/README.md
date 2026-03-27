@@ -12,6 +12,8 @@ Current coverage:
 - patch proposal -> failed apply -> corrected retry -> auto-continue
 - command proposal -> run -> auto-continue
 - checklist plan -> command -> eval -> command -> completion without `Ctrl+G`
+- builtin handoff suggestion -> approve -> PI RPC external turn -> `F3` runtime activity streaming
+- full app restart -> external-work banner -> resume external context -> PI RPC activity streaming
 
 Artifacts:
 - each test writes trace, pane captures, and provider request logs into a temp
@@ -33,3 +35,9 @@ Run the patch-focused test script:
 Requirements:
 - `tmux`
 - `go`
+
+Notes:
+- the external-runtime harness path uses a repository-local fake PI RPC helper so
+  the test can exercise the real Shuttle handoff/controller/TUI loop without a
+  network dependency or a separately installed coding runtime
+- future external runtimes such as Codex still need their own harness coverage

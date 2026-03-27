@@ -52,6 +52,7 @@ What is working now:
   - trust grant applied on the first confirmed Shuttle handoff into PI
   - PI session-file resume metadata stored in Shuttle runtime state
   - PI support for `openai`, `anthropic`, `openrouter`, `custom`, `openwebui`, and `codex_cli`-style OpenAI/Codex mapping
+- a selectable `Fake PI` runtime for local testing, which auto-builds the repository-local fake PI RPC helper when available
 - provider secret handling with:
   - OS keyring persistence
   - session-only fallback
@@ -73,7 +74,7 @@ What is still in progress:
 - transcript/UI cleanup and continued TUI/controller decomposition
 - multi-card or parallel execution UI
 - release packaging
-- full tmux-harness coverage for external coding-runtime loops such as PI handoff, live runtime activity streaming, and resume-after-restart
+- full tmux-harness coverage for additional external coding runtimes beyond the current PI handoff/runtime-activity/restart path, especially future runtimes such as Codex
 
 ## Requirements
 
@@ -164,13 +165,23 @@ Important variables:
 - `SHUTTLE_STATE_DIR`: optional persistent state directory for logs and shell history
 - `SHUTTLE_RUNTIME_DIR`: optional private runtime directory for staged shell scripts and semantic shell state
 - `SHUTTLE_SEARCH_PROVIDER`: optional Shuttle builtin search provider stub: `none`, `brave`, or `perplexity`
-- `SHUTTLE_RUNTIME`: optional preferred external coding runtime such as `builtin` or `pi`
+- `SHUTTLE_RUNTIME`: optional preferred external coding runtime such as `builtin`, `pi`, or `fake_pi`
 - `SHUTTLE_RUNTIME_COMMAND`: optional command path override for the selected coding runtime
 - `SHUTTLE_ALLOW_PLAINTEXT_PROVIDER_SECRETS`: allow an explicit less-secure local file fallback if OS keyring storage is unavailable
 - `SHUTTLE_TRACE`: `off`, `safe`, or `sensitive`
 - `SHUTTLE_TRACE_CONSENT`: must be true or passed as `--trace-consent` when using sensitive trace
 
 `launch.sh` loads `./env.sh` if present, otherwise it falls back to `./env.sh.sample`.
+
+Install coding-agent CLIs with the repo helper:
+
+```bash
+scripts/install-coding-agents.sh pi
+scripts/install-coding-agents.sh --scope global codex
+scripts/install-coding-agents.sh all
+```
+
+By default this installs into Shuttle-managed local paths under `~/.local/share/shuttle/coding-agents`. Use `--scope global` to install with `npm -g` instead.
 
 Release-oriented tmux defaults:
 - Shuttle now derives a stable workspace ID from the absolute project path
@@ -198,7 +209,7 @@ Integration-only tests:
 make test-integration
 ```
 
-Current integration coverage includes real tmux/TUI flows for builtin proposal, patch, and auto-continue behavior. External coding-runtime loops such as PI handoff, runtime-event streaming, and resume-after-restart are still primarily manual-test territory for now.
+Current integration coverage includes real tmux/TUI flows for builtin proposal, patch, auto-continue, builtin-to-PI handoff with live `F3` runtime-activity streaming, and full app restart into the external-work resume banner and resumed PI context. Additional external runtimes are still primarily manual-test territory for now.
 
 Run from source without the launcher:
 

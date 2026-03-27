@@ -390,6 +390,7 @@ func (m Model) switchProfile(profile provider.Profile, step settingsStep) (tea.M
 			err:          err,
 			persistErr:   persistErr,
 			settingsStep: step,
+			runtimeOnly:  step == settingsStepRuntime,
 		}
 	}
 }

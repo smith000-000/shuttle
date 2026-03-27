@@ -108,9 +108,19 @@ type interactiveHarness struct {
 	tuiPaneID    string
 	topPaneID    string
 	provider     *scriptedProviderServer
+	options      interactiveHarnessOptions
+}
+
+type interactiveHarnessOptions struct {
+	runtimeType    string
+	runtimeCommand string
 }
 
 func newInteractiveHarness(t *testing.T, workspaceDir string, provider *scriptedProviderServer) *interactiveHarness {
+	return newInteractiveHarnessWithOptions(t, workspaceDir, provider, interactiveHarnessOptions{})
+}
+
+func newInteractiveHarnessWithOptions(t *testing.T, workspaceDir string, provider *scriptedProviderServer, options interactiveHarnessOptions) *interactiveHarness {
 	t.Helper()
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
@@ -162,6 +172,7 @@ func newInteractiveHarness(t *testing.T, workspaceDir string, provider *scripted
 		outerClient:  outerClient,
 		innerClient:  innerClient,
 		provider:     provider,
+		options:      options,
 	}
 
 	t.Cleanup(func() {
@@ -207,8 +218,16 @@ func (h *interactiveHarness) start() {
 		h.t.Fatalf("expected one outer pane, got %#v", panes)
 	}
 	h.tuiPaneID = panes[0].ID
+	h.launchShuttle(h.options)
+}
 
-	command := strings.Join([]string{
+func (h *interactiveHarness) launchShuttle(options interactiveHarnessOptions) {
+	h.t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	commandParts := []string{
 		"cd " + shellQuote(h.repoRoot),
 		"&&",
 		"go run ./cmd/shuttle",
@@ -224,7 +243,15 @@ func (h *interactiveHarness) start() {
 		"--auth api_key",
 		"--base-url " + shellQuote(h.provider.URL()+"/v1"),
 		"--model gpt-5-test",
-	}, " ")
+	}
+	if runtimeType := strings.TrimSpace(options.runtimeType); runtimeType != "" {
+		commandParts = append(commandParts, "--runtime "+shellQuote(runtimeType))
+	}
+	if runtimeCommand := strings.TrimSpace(options.runtimeCommand); runtimeCommand != "" {
+		commandParts = append(commandParts, "--runtime-command "+shellQuote(runtimeCommand))
+	}
+
+	command := strings.Join(commandParts, " ")
 	if err := h.outerClient.SendLiteralKeys(ctx, h.tuiPaneID, command); err != nil {
 		h.t.Fatalf("SendLiteralKeys() error = %v", err)
 	}
@@ -234,6 +261,34 @@ func (h *interactiveHarness) start() {
 
 	h.waitForOuterPaneContains("[F1] help", 45*time.Second)
 	h.waitForInnerWorkspace(45 * time.Second)
+}
+
+func (h *interactiveHarness) restartShuttle(options interactiveHarnessOptions) {
+	h.t.Helper()
+	h.quitShuttle()
+	h.launchShuttle(options)
+}
+
+func (h *interactiveHarness) quitShuttle() {
+	h.t.Helper()
+
+	for attempt := 0; attempt < 3; attempt++ {
+		for _, key := range []string{"C-c", "C-c"} {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			err := h.outerClient.SendKeys(ctx, h.tuiPaneID, key, false)
+			cancel()
+			if err != nil {
+				h.t.Fatalf("SendKeys(%s) error = %v", key, err)
+			}
+			time.Sleep(150 * time.Millisecond)
+		}
+		if pane, ok := h.waitForOuterPaneToLeaveCommands([]string{"go", "shuttle"}, 5*time.Second); ok {
+			h.topPaneID = pane.ID
+			return
+		}
+	}
+
+	h.t.Fatal("timed out waiting for Shuttle to exit after Ctrl+C")
 }
 
 func (h *interactiveHarness) submitPrompt(prompt string) {
@@ -310,6 +365,34 @@ func (h *interactiveHarness) waitForOuterPaneContainsAny(fragments []string, tim
 	}
 }
 
+func (h *interactiveHarness) waitForOuterPaneToLeaveCommands(commands []string, timeout time.Duration) (tmux.Pane, bool) {
+	h.t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	disallowed := map[string]struct{}{}
+	for _, command := range commands {
+		command = strings.TrimSpace(command)
+		if command != "" {
+			disallowed[command] = struct{}{}
+		}
+	}
+
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		pane, err := h.outerClient.PaneInfo(ctx, h.tuiPaneID)
+		cancel()
+		if err == nil {
+			if _, blocked := disallowed[strings.TrimSpace(pane.CurrentCommand)]; !blocked {
+				return pane, true
+			}
+		}
+		if time.Now().After(deadline) {
+			return pane, false
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
 func (h *interactiveHarness) waitForFile(path string, content string, timeout time.Duration) {
 	h.t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -324,6 +407,21 @@ func (h *interactiveHarness) waitForFile(path string, content string, timeout ti
 	}
 	data, _ := os.ReadFile(path)
 	h.t.Fatalf("timed out waiting for file %s with content %q, got %q", path, content, string(data))
+}
+
+func (h *interactiveHarness) waitForFileContains(path string, fragment string, timeout time.Duration) string {
+	h.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil && strings.Contains(string(data), fragment) {
+			return string(data)
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	data, _ := os.ReadFile(path)
+	h.t.Fatalf("timed out waiting for file %s to contain %q.\nLast contents:\n%s", path, fragment, string(data))
+	return ""
 }
 
 func (h *interactiveHarness) waitForInnerWorkspace(timeout time.Duration) {
@@ -380,6 +478,42 @@ func mustJSONString(value string) string {
 		panic(err)
 	}
 	return string(data)
+}
+
+func buildFakePIRuntime(t *testing.T) string {
+	t.Helper()
+
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go not installed")
+	}
+
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("Abs() error = %v", err)
+	}
+
+	buildDir := t.TempDir()
+	binaryPath := filepath.Join(buildDir, "fake-pi-runtime")
+	cacheDir := filepath.Join(buildDir, "gocache")
+	tmpDir := filepath.Join(buildDir, "gotmp")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(gocache) error = %v", err)
+	}
+	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(gotmpdir) error = %v", err)
+	}
+
+	command := exec.Command("go", "build", "-o", binaryPath, "./integration/harness/cmd/fakepi")
+	command.Dir = repoRoot
+	command.Env = append(os.Environ(),
+		"GOCACHE="+cacheDir,
+		"GOTMPDIR="+tmpDir,
+	)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go build fake PI runtime error = %v\n%s", err, string(output))
+	}
+	return binaryPath
 }
 
 func TestInteractiveHarnessAppliesPatchProposal(t *testing.T) {
@@ -499,4 +633,83 @@ func TestInteractiveHarnessPlanLoopAutoContinuesAcrossMultipleActions(t *testing
 		"[x] 3. Report completion.",
 		"... (1 more steps, Ctrl+O to inspect)",
 	}, 30*time.Second)
+}
+
+func TestInteractiveHarnessBuiltinHandoffStreamsExternalRuntimeActivity(t *testing.T) {
+	workspaceDir := t.TempDir()
+	fakePI := buildFakePIRuntime(t)
+	provider := newScriptedProviderServer(t, []scriptedProviderResponse{
+		{
+			expectContains: "Turn this tiny script idea into a multi-user counting app with user accounts and history.",
+			structuredJSON: `{"message":"This task should move into the external coding agent.","plan_summary":"","plan_steps":[],"proposal_kind":"","proposal_command":"","proposal_keys":"","proposal_patch":"","proposal_description":"","approval_kind":"","approval_title":"","approval_summary":"","approval_command":"","approval_patch":"","approval_risk":"","handoff_title":"Hand off to the external coding agent?","handoff_summary":"Build a larger multi-user counting application in the repository.","handoff_reason":"This is substantial coding work that should continue in the preferred external runtime.","handoff_runtime":"pi"}`,
+		},
+	})
+
+	h := newInteractiveHarnessWithOptions(t, workspaceDir, provider, interactiveHarnessOptions{
+		runtimeType:    "pi",
+		runtimeCommand: fakePI,
+	})
+
+	h.submitPrompt("Turn this tiny script idea into a multi-user counting app with user accounts and history.")
+	h.waitForOuterPaneContains("External Agent Handoff", 30*time.Second)
+	h.waitForOuterPaneContains("runtime: pi", 30*time.Second)
+	h.waitForOuterPaneContains("Y hand off  N stay in Shuttle", 30*time.Second)
+
+	h.pressKey("y")
+	h.pressKey("F3")
+	h.waitForOuterPaneContains("pi assistant", 30*time.Second)
+	h.waitForOuterPaneContains("pi bash [done]", 30*time.Second)
+	h.waitForOuterPaneContains("PI finished the current turn.", 30*time.Second)
+
+	h.pressKey("F3")
+	h.waitForOuterPaneContains("Fake PI completed the external task.", 30*time.Second)
+	h.waitForOuterPaneContains("Handing the task to the external coding agent.", 30*time.Second)
+	h.waitForOuterPaneContains("pi bash: {\"exit\":0,\"stdout\":\"fake pi runtime ran a task\"}", 30*time.Second)
+
+	registryPath := filepath.Join(h.stateDir, "runtime-registry.json")
+	h.waitForFileContains(registryPath, `"external_has_history": true`, 10*time.Second)
+	h.waitForFileContains(registryPath, `"external_resumable": true`, 10*time.Second)
+	h.waitForFileContains(registryPath, `"pi_session_file":`, 10*time.Second)
+	h.waitForFileContains(registryPath, `"runtime_id": "pi"`, 10*time.Second)
+}
+
+func TestInteractiveHarnessRestartsAndResumesExternalRuntime(t *testing.T) {
+	workspaceDir := t.TempDir()
+	fakePI := buildFakePIRuntime(t)
+	provider := newScriptedProviderServer(t, []scriptedProviderResponse{
+		{
+			expectContains: "Turn this tiny script idea into a multi-user counting app with user accounts and history.",
+			structuredJSON: `{"message":"This task should move into the external coding agent.","plan_summary":"","plan_steps":[],"proposal_kind":"","proposal_command":"","proposal_keys":"","proposal_patch":"","proposal_description":"","approval_kind":"","approval_title":"","approval_summary":"","approval_command":"","approval_patch":"","approval_risk":"","handoff_title":"Hand off to the external coding agent?","handoff_summary":"Build a larger multi-user counting application in the repository.","handoff_reason":"This is substantial coding work that should continue in the preferred external runtime.","handoff_runtime":"pi"}`,
+		},
+	})
+
+	h := newInteractiveHarnessWithOptions(t, workspaceDir, provider, interactiveHarnessOptions{
+		runtimeType:    "pi",
+		runtimeCommand: fakePI,
+	})
+
+	h.submitPrompt("Turn this tiny script idea into a multi-user counting app with user accounts and history.")
+	h.waitForOuterPaneContains("External Agent Handoff", 30*time.Second)
+	h.pressKey("y")
+	h.waitForOuterPaneContains("Fake PI completed the external task.", 30*time.Second)
+	h.waitForOuterPaneContains("Handing the task to the external coding agent.", 30*time.Second)
+
+	h.restartShuttle(interactiveHarnessOptions{})
+	h.waitForOuterPaneContains("External Work Available", 30*time.Second)
+	h.waitForOuterPaneContains("Resume the external agent now, or stay in Shuttle builtin mode.", 30*time.Second)
+	h.waitForOuterPaneContains("External Work", 30*time.Second)
+
+	h.pressKey("y")
+	h.pressKey("F3")
+	h.waitForOuterPaneContains("pi assistant", 30*time.Second)
+	h.waitForOuterPaneContains("pi bash [done]", 30*time.Second)
+	h.waitForOuterPaneContains("PI finished the current turn.", 30*time.Second)
+
+	h.pressKey("F3")
+	h.waitForOuterPaneContains("Resumed external coding-agent context for this workspace.", 30*time.Second)
+	h.waitForOuterPaneContains("Fake PI completed the external task.", 30*time.Second)
+
+	registryPath := filepath.Join(h.stateDir, "runtime-registry.json")
+	h.waitForFileContains(registryPath, `"external_resumable": true`, 10*time.Second)
+	h.waitForFileContains(registryPath, `"runtime_id": "pi"`, 10*time.Second)
 }

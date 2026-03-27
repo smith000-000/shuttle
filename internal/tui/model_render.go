@@ -1774,6 +1774,22 @@ func buildSettingsRuntimeEntries(choices []shuttleruntime.Choice) []settingsRunt
 	return entries
 }
 
+func settingsRuntimeLabel(selection shuttleruntime.Selection) string {
+	switch selection.ID {
+	case shuttleruntime.RuntimePi:
+		return "pi"
+	case shuttleruntime.RuntimeFakePi:
+		return "fake pi"
+	case shuttleruntime.RuntimeBuiltin:
+		return "builtin only"
+	default:
+		if label := strings.TrimSpace(string(selection.ID)); label != "" {
+			return label
+		}
+		return "builtin only"
+	}
+}
+
 func settingsApprovalEntries() []settingsApprovalEntry {
 	return []settingsApprovalEntry{
 		{label: "Confirm", mode: controller.ApprovalModeConfirm},

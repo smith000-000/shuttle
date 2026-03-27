@@ -185,6 +185,17 @@ func TestParseRuntimeFlags(t *testing.T) {
 	}
 }
 
+func TestParseFakePIRuntimeFlag(t *testing.T) {
+	cfg, err := Parse([]string{"--runtime", "fake-pi"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	if cfg.RuntimeType != "fake_pi" {
+		t.Fatalf("expected fake_pi runtime, got %q", cfg.RuntimeType)
+	}
+}
+
 func TestParseSearchProviderFlag(t *testing.T) {
 	cfg, err := Parse([]string{"--search-provider", "brave"})
 	if err != nil {
