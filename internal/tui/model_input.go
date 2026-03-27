@@ -12,7 +12,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mattn/go-runewidth"
+	xansi "github.com/charmbracelet/x/ansi"
 )
 
 func (m *Model) currentHistory() *composerHistory {
@@ -561,7 +561,7 @@ func (m Model) exitConfirmActive() bool {
 }
 
 func tickBusy() tea.Cmd {
-	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+	return tea.Tick(120*time.Millisecond, func(t time.Time) tea.Msg {
 		return busyTickMsg(t)
 	})
 }
@@ -589,48 +589,7 @@ func wrapText(value string, width int) []string {
 		return []string{""}
 	}
 
-	remaining := value
-	lines := make([]string, 0, 2)
-	for runewidth.StringWidth(remaining) > width {
-		cut := 0
-		currentWidth := 0
-		lastSpace := -1
-		for index, r := range remaining {
-			runeWidth := runewidth.RuneWidth(r)
-			if currentWidth+runeWidth > width {
-				break
-			}
-			currentWidth += runeWidth
-			cut = index + len(string(r))
-			if r == ' ' || r == '\t' {
-				lastSpace = cut
-			}
-		}
-
-		if cut <= 0 {
-			break
-		}
-
-		breakAt := cut
-		if lastSpace > 0 {
-			breakAt = lastSpace
-		}
-
-		chunk := strings.TrimRight(remaining[:breakAt], " \t")
-		if chunk == "" {
-			chunk = remaining[:cut]
-			breakAt = cut
-		}
-
-		lines = append(lines, chunk)
-		remaining = strings.TrimLeft(remaining[breakAt:], " \t")
-		if remaining == "" {
-			return lines
-		}
-	}
-
-	lines = append(lines, remaining)
-	return lines
+	return strings.Split(xansi.Wrap(value, width, " \t"), "\n")
 }
 
 func trimLastRune(value string) string {

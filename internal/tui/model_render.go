@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -517,27 +518,29 @@ func (m Model) renderFooter(width int) string {
 
 func (m Model) renderStatusLine(width int) string {
 	left := m.renderShellContext()
-	rightParts := make([]string, 0, 4)
+	rightParts := make([]string, 0, 7)
 	if m.exitConfirmActive() {
-		rightParts = append(rightParts, m.styles.statusBusy.Render("Hit Ctrl-C again to exit"))
+		rightParts = append(rightParts, m.styles.statusDanger.Render("ctrl-c again to exit"))
 	}
 	if m.shellContext.Root {
-		rightParts = append(rightParts, m.styles.statusRoot.Render("ROOT"))
+		rightParts = append(rightParts, m.styles.statusRoot.Render("root"))
 	}
 	if m.shellContext.Remote {
-		rightParts = append(rightParts, m.styles.statusRemote.Render("REMOTE"))
+		rightParts = append(rightParts, m.styles.statusRemote.Render("remote"))
+	}
+	if approvalLabel := m.renderApprovalModeLabel(m.hasModelStatus()); approvalLabel != "" {
+		rightParts = append(rightParts, approvalLabel)
 	}
 	if modelStatus := m.renderModelStatus(); modelStatus != "" {
-		rightParts = append(rightParts, m.styles.statusRemote.Render(modelStatus))
+		rightParts = append(rightParts, modelStatus)
 	}
-	if m.busy {
-		elapsed := 0
-		if !m.busyStartedAt.IsZero() {
-			elapsed = int(time.Since(m.busyStartedAt).Seconds())
-		}
-		rightParts = append(rightParts, m.styles.statusBusy.Render(fmt.Sprintf("Working (%ds)", elapsed)))
+	if usageLabel := m.renderContextUsageLabel(); usageLabel != "" {
+		rightParts = append(rightParts, usageLabel)
 	}
-	right := strings.Join(rightParts, " ")
+	if busyLabel := m.renderBusyStatus(); busyLabel != "" {
+		rightParts = append(rightParts, busyLabel)
+	}
+	right := joinStatusSegments(m.styles.statusMuted.Render("*"), rightParts)
 
 	if left == "" && right == "" {
 		return ""
@@ -565,29 +568,15 @@ func (m Model) renderStatusLine(width int) string {
 
 func (m Model) renderModelStatus() string {
 	label, providerLabel := m.statusModelLabel()
-	approvalLabel := m.renderApprovalModeLabel(label != "")
-	if label == "" && approvalLabel == "" {
+	if label == "" {
 		return ""
 	}
 
-	parts := make([]string, 0, 3)
-	if approvalLabel != "" {
-		parts = append(parts, approvalLabel)
+	modelText := label
+	if providerLabel != "" {
+		modelText = providerLabel + " / " + label
 	}
-	if label != "" {
-		modelText := "MODEL "
-		if providerLabel != "" {
-			modelText += providerLabel + " / " + label
-		} else {
-			modelText += label
-		}
-		parts = append(parts, modelText)
-	}
-	text := strings.Join(parts, "  ")
-	if usageLabel := m.renderContextUsageLabel(); usageLabel != "" {
-		text += "  " + usageLabel
-	}
-	return text
+	return m.styles.statusRemote.Render(modelText)
 }
 
 func (m Model) renderApprovalModeLabel(includeDefault bool) string {
@@ -598,7 +587,14 @@ func (m Model) renderApprovalModeLabel(includeDefault bool) string {
 	if mode != controller.ApprovalModeAuto && mode != controller.ApprovalModeDanger && !includeDefault {
 		return ""
 	}
-	return controller.ApprovalModeStatusLabel(mode)
+	switch mode {
+	case controller.ApprovalModeAuto:
+		return m.styles.statusWarn.Render("auto")
+	case controller.ApprovalModeDanger:
+		return m.styles.statusDanger.Render("dangerous")
+	default:
+		return m.styles.statusConfirm.Render("confirm")
+	}
 }
 
 func (m Model) statusModelLabel() (string, string) {
@@ -629,15 +625,104 @@ func (m Model) renderContextUsageLabel() string {
 	}
 
 	usage := m.ctrl.EstimateContextUsage(m.contextUsagePrompt())
-	if usage.ApproxPromptTokens <= 0 {
+	window := currentModelContextWindow(m.activeProvider)
+	if usage.ApproxPromptTokens <= 0 && window <= 0 {
 		return ""
 	}
 
-	label := "CTX ~" + formatStatusTokenCount(usage.ApproxPromptTokens)
-	if window := currentModelContextWindow(m.activeProvider); window > 0 {
-		label += "/" + formatStatusTokenCount(window)
+	if window <= 0 {
+		return m.styles.statusMuted.Render("~" + formatStatusTokenCount(usage.ApproxPromptTokens))
 	}
-	return label
+	pct := 0.0
+	if window > 0 {
+		pct = float64(usage.ApproxPromptTokens) / float64(window)
+	}
+	style := m.contextUsageStyle(pct)
+	bar := renderContextASCIIBar(12, pct)
+	label := fmt.Sprintf("%s %s/%s", bar, formatStatusTokenCount(usage.ApproxPromptTokens), formatStatusTokenCount(window))
+	return style.Render(label)
+}
+
+func (m Model) renderBusyStatus() string {
+	if !m.busy {
+		return ""
+	}
+	elapsed := time.Duration(0)
+	if !m.busyStartedAt.IsZero() {
+		elapsed = time.Since(m.busyStartedAt)
+	}
+	return m.styles.statusBusy.Render(fmt.Sprintf("%s Working %s", busySpinnerFrame(m.busyStartedAt), formatBusyElapsed(elapsed)))
+}
+
+func (m Model) hasModelStatus() bool {
+	label, _ := m.statusModelLabel()
+	return label != ""
+}
+
+func (m Model) contextUsageStyle(pct float64) lipgloss.Style {
+	switch {
+	case pct <= 0:
+		return m.styles.statusMuted
+	case pct < 0.40:
+		return m.styles.statusConfirm
+	case pct < 0.75:
+		return m.styles.statusWarn
+	default:
+		return m.styles.statusDanger
+	}
+}
+
+func busySpinnerFrame(startedAt time.Time) string {
+	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	if startedAt.IsZero() {
+		return frames[0]
+	}
+	step := int(time.Since(startedAt) / (100 * time.Millisecond))
+	if step < 0 {
+		step = 0
+	}
+	return frames[step%len(frames)]
+}
+
+func formatBusyElapsed(elapsed time.Duration) string {
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	seconds := int(elapsed / time.Second)
+	if seconds < 100 {
+		return fmt.Sprintf("(%2ds)", seconds)
+	}
+	rounded := elapsed.Round(time.Second)
+	if rounded < time.Second {
+		rounded = time.Second
+	}
+	return "(" + rounded.String() + ")"
+}
+
+func renderContextASCIIBar(width int, pct float64) string {
+	if width <= 0 {
+		return ""
+	}
+	pct = math.Max(0, math.Min(1, pct))
+	filled := int(math.Round(pct * float64(width)))
+	if pct > 0 && filled == 0 {
+		filled = 1
+	}
+	if filled > width {
+		filled = width
+	}
+	return "[" + strings.Repeat("#", filled) + strings.Repeat(".", width-filled) + "]"
+}
+
+func joinStatusSegments(separator string, segments []string) string {
+	filtered := make([]string, 0, len(segments))
+	for _, segment := range segments {
+		if strings.TrimSpace(segment) == "" {
+			continue
+		}
+		filtered = append(filtered, segment)
+	}
+	return strings.Join(filtered, " "+separator+" ")
 }
 
 func (m Model) contextUsagePrompt() string {
@@ -928,6 +1013,10 @@ func (m Model) renderDetailView() string {
 	}
 	bodyLines = detailWindow(bodyLines, m.detailScroll, viewportHeight)
 	for _, line := range bodyLines {
+		if entry.Title == "result" {
+			lines = append(lines, line)
+			continue
+		}
 		lines = append(lines, m.styles.detailBody.Render(line))
 	}
 	lines = append(lines, "", m.styles.detailMeta.Render(m.renderDetailFooter(contentWidth)))
@@ -1126,7 +1215,8 @@ func helpContentLines(width int, mode Mode, canSendKeys bool) []string {
 	lines = append(lines,
 		"",
 		"# Mouse",
-		"Click a transcript icon/tag: expand or collapse inline detail for that entry",
+		"Click a transcript icon/tag: open the full detail view for that entry",
+		"Click a long shell-result command header: expand or collapse wrapped command text",
 		"Mouse wheel over transcript: scroll transcript",
 		"Click shell label in the shell-tail block: same as F2 take control",
 		"Shift-drag: use your terminal's normal text selection while Bubble Tea mouse mode is active",

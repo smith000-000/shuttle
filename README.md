@@ -310,11 +310,17 @@ Transcript result notes:
 - successful silent commands collapse to a compact result line instead of showing `exit=0` and `(no output)`
 - silent directory-changing commands can show the resulting cwd
 - result tags are exit-aware: nonzero exits no longer render as green success entries
+- completed shell commands now collapse into a single result block that shows the command header plus inline output, instead of keeping a separate expandable preview row
+- `Ctrl+O` still opens the full detail view for the selected transcript entry, and clicking a transcript icon does the same
+- very long result-command headers stay single-line by default and can be expanded inline by clicking the command text
+- model-reply metadata is kept in the selected entry's `Ctrl+O` detail view instead of as a separate visible transcript row
+- the initial workspace-ready system notice is retained in trace data but hidden from the default transcript view
 
 Status line notes:
-- the lower-right status can show the current approvals mode, especially when `auto` is active
-- the lower-right model label now includes an approximate live context-usage estimate
-- when Shuttle knows the selected model's context window, the estimate is shown against that limit
+- the lower-right status uses compact inline segments separated with `*`, instead of filled badge backgrounds
+- approvals render as lowercase `confirm`, `auto`, or `dangerous`
+- the active model renders as `provider / model`, and context usage shows as a color-coded ASCII fill bar with current usage against the known window when available
+- active work renders as a braille spinner plus a fixed-width elapsed-seconds label until it grows into minute-scale durations
 
 The TUI is intentionally keyboard-first. Current behavior is still evolving, so see [ui-scratchpad.md](ui-scratchpad.md) for active UX backlog notes.
 

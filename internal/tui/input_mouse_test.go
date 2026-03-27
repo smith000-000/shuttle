@@ -181,7 +181,7 @@ func TestTabCyclesShellPathCompletionCandidatesInline(t *testing.T) {
 	}
 }
 
-func TestMouseClickTranscriptEntryOpensInlineDetail(t *testing.T) {
+func TestMouseClickTranscriptTagOpensDetailView(t *testing.T) {
 	model := NewModel(fakeWorkspace(), nil)
 	model.width = 80
 	model.height = 24
@@ -203,15 +203,12 @@ func TestMouseClickTranscriptEntryOpensInlineDetail(t *testing.T) {
 	if next.selectedEntry != 0 {
 		t.Fatalf("expected clicked entry to become selected, got %d", next.selectedEntry)
 	}
-	if next.inlineDetailEntry != 0 {
-		t.Fatalf("expected inline detail to open for entry 0, got %d", next.inlineDetailEntry)
-	}
-	if rendered := strings.Join(next.renderEntryLines(0, next.entries[0], next.currentTranscriptWidth()), "\n"); !strings.Contains(rendered, "Ctrl+O for more") && !strings.Contains(rendered, "detail line one") {
-		t.Fatalf("expected rendered entry to include inline detail, got %q", rendered)
+	if !next.detailOpen {
+		t.Fatal("expected transcript tag click to open detail view")
 	}
 }
 
-func TestMouseClickTranscriptBodyDoesNotOpenInlineDetail(t *testing.T) {
+func TestMouseClickTranscriptBodyDoesNotOpenDetailView(t *testing.T) {
 	model := NewModel(fakeWorkspace(), nil)
 	model.width = 80
 	model.height = 24
@@ -229,31 +226,100 @@ func TestMouseClickTranscriptBodyDoesNotOpenInlineDetail(t *testing.T) {
 	})
 	next := updated.(Model)
 
-	if next.inlineDetailEntry != -1 {
-		t.Fatalf("expected transcript body click to leave inline detail closed, got %d", next.inlineDetailEntry)
+	if next.detailOpen {
+		t.Fatal("expected transcript body click to leave detail view closed")
 	}
 }
 
-func TestMouseClickOutsideTranscriptClosesInlineDetail(t *testing.T) {
+func TestMouseClickLongResultCommandTogglesExpansion(t *testing.T) {
 	model := NewModel(fakeWorkspace(), nil)
 	model.width = 80
 	model.height = 24
 	model.entries = []Entry{
-		{Title: "agent", Body: "Hello", Detail: "detail line one"},
+		{
+			Title:   "result",
+			Command: "printf 'this command header is intentionally long enough to cross the transcript expansion threshold for mouse testing'",
+			Body:    "line one\nline two",
+			Detail:  "command:\nprintf 'this command header is intentionally long enough to cross the transcript expansion threshold for mouse testing'\n\nexit=0\n\nline one\nline two",
+			TagKind: entryTagResultSuccess,
+		},
 	}
 	model.selectedEntry = 0
-	model.inlineDetailEntry = 0
+	lines := model.transcriptWindowDisplay(model.transcriptDisplayLines(model.currentTranscriptWidth()), model.currentTranscriptHeight())
+	y := transcriptLineIndexForEntry(model, 0)
+	line := lines[y]
+	if !line.commandClickable {
+		t.Fatal("expected long command header to be clickable")
+	}
 
 	updated, _ := model.Update(tea.MouseMsg{
-		X:      0,
-		Y:      model.currentTranscriptHeight(),
+		X:      line.commandStart,
+		Y:      y,
 		Button: tea.MouseButtonLeft,
 		Action: tea.MouseActionPress,
 	})
 	next := updated.(Model)
 
-	if next.inlineDetailEntry != -1 {
-		t.Fatalf("expected click away to close inline detail, got %d", next.inlineDetailEntry)
+	if next.expandedCommandEntry != 0 {
+		t.Fatalf("expected long command header to expand, got %d", next.expandedCommandEntry)
+	}
+	y = transcriptLineIndexForEntry(next, 0)
+	lines = next.transcriptWindowDisplay(next.transcriptDisplayLines(next.currentTranscriptWidth()), next.currentTranscriptHeight())
+	line = lines[y]
+
+	updated, _ = next.Update(tea.MouseMsg{
+		X:      line.commandStart,
+		Y:      y,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	next = updated.(Model)
+
+	if next.expandedCommandEntry != -1 {
+		t.Fatalf("expected second click to collapse expanded command header, got %d", next.expandedCommandEntry)
+	}
+}
+
+func TestMouseClickResultOverflowHintOpensDetailView(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.width = 80
+	model.height = 8
+	model.entries = []Entry{
+		{
+			Title:   "result",
+			Command: "seq 1 30",
+			Body:    makeMultilineBody(30),
+			Detail:  "command:\nseq 1 30\n\nexit=0\n\n" + makeMultilineBody(30),
+			TagKind: entryTagResultSuccess,
+		},
+	}
+	model.selectedEntry = 0
+
+	lines := model.transcriptWindowDisplay(model.transcriptDisplayLines(model.currentTranscriptWidth()), model.currentTranscriptHeight())
+	targetY := -1
+	targetX := -1
+	for index, line := range lines {
+		if !line.detailClickable {
+			continue
+		}
+		targetY = index
+		targetX = line.detailStart
+		break
+	}
+	if targetY < 0 {
+		t.Fatal("expected overflow hint line to be present")
+	}
+
+	updated, _ := model.Update(tea.MouseMsg{
+		X:      targetX,
+		Y:      targetY,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	next := updated.(Model)
+
+	if !next.detailOpen {
+		t.Fatal("expected overflow hint click to open detail view")
 	}
 }
 

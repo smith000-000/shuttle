@@ -293,7 +293,7 @@ func TestCtrlCClearsComposerThenArmsExit(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected exit confirm timer command")
 	}
-	if !strings.Contains(model.View(), "Hit Ctrl-C again to exit") {
+	if !strings.Contains(model.View(), "ctrl-c again to exit") {
 		t.Fatalf("expected exit warning in status line, got %q", model.View())
 	}
 
@@ -426,11 +426,31 @@ func TestBusyStatusLineRendersAboveComposer(t *testing.T) {
 	}
 
 	view := model.View()
-	if !strings.Contains(view, "Working (") {
+	if !strings.Contains(view, "Working ") {
 		t.Fatalf("expected busy status line, got %q", view)
+	}
+	if !strings.Contains(view, "( 0s)") {
+		t.Fatalf("expected fixed-width busy timer, got %q", view)
 	}
 	if !strings.Contains(view, "localuser@workstation ~/workspace/project git:(main) %") {
 		t.Fatalf("expected shell context line, got %q", view)
+	}
+}
+
+func TestInitialWorkspaceReadyNoticeIsHiddenFromTranscript(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.width = 80
+	model.height = 20
+
+	view := model.View()
+	if strings.Contains(view, "Workspace ready. Top pane:") {
+		t.Fatalf("expected startup notice to stay out of the visible transcript, got %q", view)
+	}
+	if len(model.entries) == 0 || !model.entries[0].Hidden {
+		t.Fatalf("expected startup notice to remain in trace as a hidden entry, got %#v", model.entries)
+	}
+	if !strings.Contains(model.entries[0].Body, "Workspace ready. Top pane:") {
+		t.Fatalf("expected startup notice body to remain available, got %#v", model.entries[0])
 	}
 }
 
@@ -448,10 +468,10 @@ func TestRemoteShellContextRendersRemoteBadge(t *testing.T) {
 	}
 
 	view := model.View()
-	if !strings.Contains(view, "ROOT") {
+	if !strings.Contains(view, "root") {
 		t.Fatalf("expected root badge, got %q", view)
 	}
-	if !strings.Contains(view, "REMOTE") {
+	if !strings.Contains(view, "remote") {
 		t.Fatalf("expected remote badge, got %q", view)
 	}
 	if !strings.Contains(view, "root@web01 /srv/app #") {
@@ -543,6 +563,40 @@ func TestTranscriptEntrySelectionUsesAltArrows(t *testing.T) {
 	if model.selectedEntry != 4 {
 		t.Fatalf("expected selected entry 4, got %d", model.selectedEntry)
 	}
+	if strings.Contains(model.View(), "›") {
+		t.Fatalf("expected transcript selection to use background highlight instead of arrow marker, got %q", model.View())
+	}
+}
+
+func TestTranscriptSelectionScrollsEntryIntoView(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.width = 80
+	model.height = 8
+	model.entries = makeTranscriptEntries(12)
+	model.transcriptFollow = false
+	model.transcriptScroll = 3
+	model.selectedEntry = 3
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
+	model = updated.(Model)
+	if model.selectedEntry != 2 {
+		t.Fatalf("expected selected entry 2, got %d", model.selectedEntry)
+	}
+	if model.transcriptScroll != 2 {
+		t.Fatalf("expected alt-up to align selected entry at top, got scroll=%d", model.transcriptScroll)
+	}
+
+	model.transcriptScroll = 2
+	model.transcriptFollow = false
+	model.selectedEntry = 5
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown, Alt: true})
+	model = updated.(Model)
+	if model.selectedEntry != 6 {
+		t.Fatalf("expected selected entry 6, got %d", model.selectedEntry)
+	}
+	if model.transcriptScroll != 3 {
+		t.Fatalf("expected alt-down to align selected entry at bottom, got scroll=%d", model.transcriptScroll)
+	}
 }
 
 func TestDetailViewOpensAndCloses(t *testing.T) {
@@ -587,13 +641,16 @@ func TestDetailViewScrolls(t *testing.T) {
 }
 
 func TestCommandResultEntryIsCollapsedInTranscriptButPreservedInDetail(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.width = 80
+	model.height = 8
 	events := []controller.TranscriptEvent{
 		{
 			Kind: controller.EventCommandResult,
 			Payload: controller.CommandResultSummary{
-				Command:  "seq 1 10",
+				Command:  "seq 1 30",
 				ExitCode: 0,
-				Summary:  makeMultilineBody(10),
+				Summary:  makeMultilineBody(30),
 			},
 		},
 	}
@@ -603,16 +660,58 @@ func TestCommandResultEntryIsCollapsedInTranscriptButPreservedInDetail(t *testin
 		t.Fatalf("expected one entry, got %d", len(entries))
 	}
 
-	if !strings.Contains(entries[0].Body, "... (4 more lines, Ctrl+O to inspect)") {
-		t.Fatalf("expected collapsed preview, got %q", entries[0].Body)
+	model.entries = entries
+	renderedLines := model.renderEntryLines(0, entries[0], model.currentTranscriptWidth())
+	rendered := make([]string, 0, len(renderedLines))
+	for _, line := range renderedLines {
+		rendered = append(rendered, line.text)
 	}
 
-	if !strings.Contains(entries[0].Detail, "command:\nseq 1 10") {
+	if !strings.Contains(strings.Join(rendered, "\n"), "Ctrl+O to inspect") {
+		t.Fatalf("expected viewport-capped preview, got %q", strings.Join(rendered, "\n"))
+	}
+
+	if !strings.Contains(rendered[0], "seq 1 30") {
+		t.Fatalf("expected command header on first line, got %q", rendered[0])
+	}
+
+	if !strings.Contains(entries[0].Detail, "command:\nseq 1 30") {
 		t.Fatalf("expected detail to retain command metadata, got %q", entries[0].Detail)
 	}
 
-	if !strings.Contains(entries[0].Detail, "line 9") {
+	if !strings.Contains(entries[0].Detail, "line 29") {
 		t.Fatalf("expected detail to retain full output, got %q", entries[0].Detail)
+	}
+}
+
+func TestModelInfoMovesIntoDetailInsteadOfVisibleTranscriptRow(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.width = 100
+	model.height = 20
+
+	updated, _ := model.Update(controllerEventsMsg{events: []controller.TranscriptEvent{
+		{Kind: controller.EventAgentMessage, Payload: controller.TextPayload{Text: "done"}},
+		{Kind: controller.EventModelInfo, Payload: controller.AgentModelInfo{
+			ProviderPreset: "ollama",
+			RequestedModel: "qwen3.5:35b-a3b",
+			ResponseModel:  "qwen3.5:35b-a3b",
+		}},
+	}})
+	model = updated.(Model)
+
+	view := model.View()
+	if strings.Contains(view, "reply model:") {
+		t.Fatalf("expected model info to stay out of visible transcript, got %q", view)
+	}
+	if len(model.entries) < 2 {
+		t.Fatalf("expected agent entry to remain in trace, got %#v", model.entries)
+	}
+	detail := model.entries[len(model.entries)-1].Detail
+	if !strings.Contains(detail, "reply model:\nqwen3.5:35b-a3b") {
+		t.Fatalf("expected model info in entry detail, got %q", detail)
+	}
+	if !strings.Contains(detail, "provider:\nOllama") {
+		t.Fatalf("expected provider info in entry detail, got %q", detail)
 	}
 }
 
@@ -633,8 +732,8 @@ func TestCommandResultEntryCanRenderExpandedForDirectShellUse(t *testing.T) {
 		t.Fatalf("expected one entry, got %d", len(entries))
 	}
 
-	if strings.Contains(entries[0].Body, "Ctrl+O to inspect") {
-		t.Fatalf("expected expanded shell result without inspect hint, got %q", entries[0].Body)
+	if entries[0].Command != "seq 1 10" {
+		t.Fatalf("expected command metadata on result entry, got %#v", entries[0])
 	}
 
 	if !strings.Contains(entries[0].Body, "line 9") {

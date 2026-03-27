@@ -593,8 +593,16 @@ func TestAgentRunResultStaysCollapsedInTranscript(t *testing.T) {
 		t.Fatalf("expected result entry, got %s", last.Title)
 	}
 
-	if !strings.Contains(last.Body, "Ctrl+O to inspect") {
-		t.Fatalf("expected agent-triggered result to stay collapsed, got %q", last.Body)
+	if last.Command != "ls -lah" {
+		t.Fatalf("expected command metadata on combined result entry, got %#v", last)
+	}
+	if !strings.Contains(last.Body, "line 9") {
+		t.Fatalf("expected inline output on result entry, got %q", last.Body)
+	}
+	for _, entry := range model.entries {
+		if entry.Title == "shell" && entry.Body == "ls -lah" {
+			t.Fatalf("expected shell start row to collapse into the final result entry, got %#v", model.entries)
+		}
 	}
 }
 

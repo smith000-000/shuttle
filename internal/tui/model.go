@@ -28,9 +28,11 @@ const (
 
 type Entry struct {
 	Title   string
+	Command string
 	Body    string
 	Detail  string
 	TagKind entryTagKind
+	Hidden  bool
 }
 
 type entryTagKind string
@@ -86,10 +88,16 @@ type activeExecutionMsg struct {
 }
 
 type transcriptRenderLine struct {
-	text       string
-	entryIndex int
-	tagStart   int
-	tagEnd     int
+	text             string
+	entryIndex       int
+	tagStart         int
+	tagEnd           int
+	commandStart     int
+	commandEnd       int
+	commandClickable bool
+	detailStart      int
+	detailEnd        int
+	detailClickable  bool
 }
 
 type actionCardAction string
@@ -271,11 +279,11 @@ type settingsProviderTestedMsg struct {
 }
 
 const (
-	agentTurnTimeout     = 60 * time.Second
-	shellTailPollLines   = 40
-	shellTailPollTimeout = 750 * time.Millisecond
-	firstCheckInDelay    = 10 * time.Second
-	repeatCheckInDelay   = 30 * time.Second
+	agentTurnTimeout       = 60 * time.Second
+	shellTailPollLines     = 40
+	shellTailPollTimeout   = 750 * time.Millisecond
+	firstCheckInDelay      = 10 * time.Second
+	repeatCheckInDelay     = 30 * time.Second
 	maxInteractiveCheckIns = 3
 )
 
@@ -299,7 +307,7 @@ type Model struct {
 	busyStartedAt               time.Time
 	transcriptScroll            int
 	transcriptFollow            bool
-	inlineDetailEntry           int
+	expandedCommandEntry        int
 	helpOpen                    bool
 	helpScroll                  int
 	detailOpen                  bool
@@ -378,22 +386,23 @@ type Model struct {
 
 func NewModel(workspace tmux.Workspace, ctrl controller.Controller) Model {
 	return Model{
-		workspace:         workspace,
-		ctrl:              ctrl,
-		mode:              ShellMode,
-		transcriptFollow:  true,
-		entries:           initialEntries(workspace),
-		selectedEntry:     0,
-		inlineDetailEntry: -1,
-		styles:            newStyles(),
+		workspace:            workspace,
+		ctrl:                 ctrl,
+		mode:                 ShellMode,
+		transcriptFollow:     true,
+		entries:              initialEntries(workspace),
+		selectedEntry:        0,
+		expandedCommandEntry: -1,
+		styles:               newStyles(),
 	}
 }
 
 func initialEntries(workspace tmux.Workspace) []Entry {
 	return []Entry{
 		{
-			Title: "system",
-			Body:  fmt.Sprintf("Workspace ready. Top pane: %s. Bottom pane TUI is active.", workspace.TopPane.ID),
+			Title:  "system",
+			Body:   fmt.Sprintf("Workspace ready. Top pane: %s. Bottom pane TUI is active.", workspace.TopPane.ID),
+			Hidden: true,
 		},
 	}
 }
@@ -467,7 +476,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 		pinned := m.isTranscriptPinned()
 		autoContinue := m.shouldAutoContinue(msg.events)
-		eventEntries := m.consumePendingLocalEcho(eventsToEntries(msg.events, !m.directShellPending))
+		eventEntries := m.withCommandResultFallback(m.collapseCommandEntries(m.consumePendingLocalEcho(eventsToEntries(msg.events, !m.directShellPending))))
+		eventEntries = m.attachLatestModelInfo(msg.events, eventEntries)
 		m.busy = false
 		m.busyStartedAt = time.Time{}
 		m.inFlightCancel = nil
@@ -626,7 +636,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if len(msg.events) > 0 {
 			pinned := m.isTranscriptPinned()
-			m.entries = append(m.entries, eventsToEntries(msg.events, !m.directShellPending)...)
+			eventEntries := m.withCommandResultFallback(m.collapseCommandEntries(eventsToEntries(msg.events, !m.directShellPending)))
+			eventEntries = m.attachLatestModelInfo(msg.events, eventEntries)
+			m.entries = append(m.entries, eventEntries...)
 			m.syncActionState(msg.events)
 			if pinned {
 				m.scrollTranscriptToBottom()
@@ -693,7 +705,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		pinned := m.isTranscriptPinned()
-		m.entries = append(m.entries, eventsToEntries(msg.events, true)...)
+		eventEntries := m.withCommandResultFallback(m.collapseCommandEntries(eventsToEntries(msg.events, true)))
+		eventEntries = m.attachLatestModelInfo(msg.events, eventEntries)
+		m.entries = append(m.entries, eventEntries...)
 		if pinned {
 			m.scrollTranscriptToBottom()
 		} else {
@@ -1005,8 +1019,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.setInput("")
 				return m, nil
 			}
-			if m.inlineDetailEntry >= 0 {
-				m.inlineDetailEntry = -1
+			if m.expandedCommandEntry >= 0 {
+				m.expandedCommandEntry = -1
 				return m, nil
 			}
 			if m.clearCompletion() {
@@ -1630,7 +1644,7 @@ func (m *Model) applySuccessfulContextAction(action contextActionKind) {
 		m.selectedEntry = len(m.entries) - 1
 		m.transcriptScroll = 0
 		m.transcriptFollow = true
-		m.inlineDetailEntry = -1
+		m.expandedCommandEntry = -1
 		m.detailOpen = false
 		m.detailScroll = 0
 		m.pendingApproval = nil

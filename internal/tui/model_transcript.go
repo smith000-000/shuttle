@@ -6,11 +6,15 @@ import (
 	"strings"
 
 	"aiterm/internal/controller"
+	"aiterm/internal/provider"
 	"aiterm/internal/shell"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 )
+
+const transcriptSelectedBackground = "236"
 
 func (m Model) transcriptLines(width int) []string {
 	displayLines := m.transcriptDisplayLines(width)
@@ -25,37 +29,33 @@ func (m Model) transcriptLines(width int) []string {
 func (m Model) transcriptDisplayLines(width int) []transcriptRenderLine {
 	lines := make([]transcriptRenderLine, 0, len(m.entries)*2)
 	for index, entry := range m.entries {
-		prefix := "  "
-		if index == m.selectedEntry {
-			prefix = "› "
-		}
-		tag := m.renderTag(entry)
-		tagStart := lipgloss.Width(prefix)
-		tagEnd := tagStart + lipgloss.Width(tag)
-		rendered := m.renderEntryLines(index, entry, width)
-		for lineIndex, line := range rendered {
-			displayLine := transcriptRenderLine{text: line, entryIndex: index, tagStart: -1, tagEnd: -1}
-			if lineIndex == 0 {
-				displayLine.tagStart = tagStart
-				displayLine.tagEnd = tagEnd
-			}
-			lines = append(lines, displayLine)
-		}
+		lines = append(lines, m.renderEntryLines(index, entry, width)...)
 	}
 
 	return lines
 }
 
-func (m Model) renderEntryLines(index int, entry Entry, width int) []string {
+func (m Model) renderEntryLines(index int, entry Entry, width int) []transcriptRenderLine {
+	if entry.Hidden {
+		return nil
+	}
 	prefix := "  "
-	if index == m.selectedEntry {
-		prefix = "› "
+	if entry.Title == "result" && strings.TrimSpace(entry.Command) != "" {
+		return m.renderResultEntryLines(index, entry, width, prefix)
 	}
 
-	tag := m.renderTag(entry)
+	selected := index == m.selectedEntry
+	tag := m.renderTag(entry, selected)
+	tagStart := lipgloss.Width(prefix)
+	tagEnd := tagStart + lipgloss.Width(tag)
 	tagWidth := lipgloss.Width(tag)
 	bodyWidth := max(10, width-lipgloss.Width(prefix)-tagWidth-1)
 	bodyStyle := m.renderBodyStyle(entry)
+	prefixStyle := lipgloss.NewStyle()
+	if selected {
+		bodyStyle = bodyStyle.Copy().Background(lipgloss.Color(transcriptSelectedBackground))
+		prefixStyle = prefixStyle.Background(lipgloss.Color(transcriptSelectedBackground))
+	}
 	indent := strings.Repeat(" ", lipgloss.Width(prefix)+tagWidth+1)
 
 	rawLines := strings.Split(entry.Body, "\n")
@@ -63,14 +63,19 @@ func (m Model) renderEntryLines(index int, entry Entry, width int) []string {
 		rawLines = []string{""}
 	}
 
-	rendered := make([]string, 0, len(rawLines))
+	rendered := make([]transcriptRenderLine, 0, len(rawLines))
 	firstBody := wrapText(rawLines[0], bodyWidth)
 	if len(firstBody) == 0 {
 		firstBody = []string{""}
 	}
-	rendered = append(rendered, prefix+tag+" "+bodyStyle.Render(firstBody[0]))
+	rendered = append(rendered, transcriptRenderLine{
+		text:       prefixStyle.Render(prefix) + tag + " " + bodyStyle.Render(firstBody[0]),
+		entryIndex: index,
+		tagStart:   tagStart,
+		tagEnd:     tagEnd,
+	})
 	for _, wrapped := range firstBody[1:] {
-		rendered = append(rendered, indent+bodyStyle.Render(wrapped))
+		rendered = append(rendered, transcriptRenderLine{text: prefixStyle.Render(indent) + bodyStyle.Render(wrapped), entryIndex: index, tagStart: -1, tagEnd: -1})
 	}
 
 	for _, rawLine := range rawLines[1:] {
@@ -79,16 +84,94 @@ func (m Model) renderEntryLines(index int, entry Entry, width int) []string {
 			wrappedLines = []string{""}
 		}
 		for _, wrapped := range wrappedLines {
-			rendered = append(rendered, indent+bodyStyle.Render(wrapped))
+			rendered = append(rendered, transcriptRenderLine{text: prefixStyle.Render(indent) + bodyStyle.Render(wrapped), entryIndex: index, tagStart: -1, tagEnd: -1})
 		}
 	}
 
-	if m.inlineDetailEntry == index && index == m.selectedEntry && strings.TrimSpace(entry.Detail) != "" {
-		for _, line := range m.inlineDetailLines(entry, bodyWidth) {
-			rendered = append(rendered, indent+m.styles.detailMeta.Render("  "+line))
+	return rendered
+}
+
+func (m Model) renderResultEntryLines(index int, entry Entry, width int, prefix string) []transcriptRenderLine {
+	selected := index == m.selectedEntry
+	tag := m.renderResultTag(entry, selected)
+	prefixWidth := lipgloss.Width(prefix)
+	tagStart := prefixWidth
+	tagEnd := tagStart + lipgloss.Width(tag)
+	firstLineWidth := max(10, width-prefixWidth-lipgloss.Width(tag)-1)
+	bodyWidth := max(10, width-prefixWidth)
+	command := strings.TrimSpace(entry.Command)
+	if command == "" {
+		command = "(unknown command)"
+	}
+
+	commandExpandable := xansi.StringWidth(command) > m.resultCommandThreshold(width)
+	commandText := command
+	if commandExpandable && m.expandedCommandEntry != index {
+		commandText = xansi.Truncate(command, m.resultCommandThreshold(width), "…")
+	}
+
+	commandLines := wrapText(commandText, firstLineWidth)
+	if len(commandLines) == 0 {
+		commandLines = []string{""}
+	}
+
+	commandStyle := lipgloss.NewStyle()
+	prefixStyle := lipgloss.NewStyle()
+	detailHintStyle := m.styles.detailMeta
+	if selected {
+		commandStyle = commandStyle.Background(lipgloss.Color(transcriptSelectedBackground))
+		prefixStyle = prefixStyle.Background(lipgloss.Color(transcriptSelectedBackground))
+		detailHintStyle = detailHintStyle.Copy().Background(lipgloss.Color(transcriptSelectedBackground))
+	}
+
+	rendered := make([]transcriptRenderLine, 0, len(commandLines)+4)
+	commandStart := tagEnd + 1
+	commandEnd := commandStart + lipgloss.Width(commandLines[0])
+	rendered = append(rendered, transcriptRenderLine{
+		text:             prefixStyle.Render(prefix) + tag + " " + commandStyle.Render(commandLines[0]),
+		entryIndex:       index,
+		tagStart:         tagStart,
+		tagEnd:           tagEnd,
+		commandStart:     commandStart,
+		commandEnd:       commandEnd,
+		commandClickable: commandExpandable,
+	})
+
+	bodyIndent := strings.Repeat(" ", prefixWidth)
+	for _, wrapped := range commandLines[1:] {
+		rendered = append(rendered, transcriptRenderLine{text: prefixStyle.Render(bodyIndent) + commandStyle.Render(wrapped), entryIndex: index, tagStart: -1, tagEnd: -1})
+	}
+
+	if body := strings.TrimSpace(entry.Body); body != "" {
+		for _, rawLine := range strings.Split(body, "\n") {
+			wrappedLines := wrapText(rawLine, bodyWidth)
+			if len(wrappedLines) == 0 {
+				wrappedLines = []string{""}
+			}
+			for _, wrapped := range wrappedLines {
+				rendered = append(rendered, transcriptRenderLine{text: prefixStyle.Render(bodyIndent) + commandStyle.Render(wrapped), entryIndex: index, tagStart: -1, tagEnd: -1})
+			}
 		}
 	}
 
+	limit := m.resultDisplayLineLimit()
+	if len(rendered) <= limit {
+		return rendered
+	}
+
+	hidden := len(rendered) - (limit - 1)
+	detailText := fmt.Sprintf("... (%d more lines, Ctrl+O to inspect)", hidden)
+	detailStart := lipgloss.Width(bodyIndent)
+	detailEnd := detailStart + lipgloss.Width(detailText)
+	rendered = append(rendered[:limit-1], transcriptRenderLine{
+		text:            prefixStyle.Render(bodyIndent) + detailHintStyle.Render(detailText),
+		entryIndex:      index,
+		tagStart:        -1,
+		tagEnd:          -1,
+		detailStart:     detailStart,
+		detailEnd:       detailEnd,
+		detailClickable: true,
+	})
 	return rendered
 }
 
@@ -113,13 +196,25 @@ func (m Model) renderBodyStyle(entry Entry) lipgloss.Style {
 }
 
 func (m Model) renderTranscript(width int, height int) string {
-	lines := m.transcriptWindow(m.transcriptLines(width), height)
-	for index, line := range lines {
-		if line == "" {
-			lines[index] = strings.Repeat(" ", max(1, width))
+	displayLines := m.transcriptWindowDisplay(m.transcriptDisplayLines(width), height)
+	lines := make([]string, 0, len(displayLines))
+	for _, line := range displayLines {
+		text := line.text
+		if text == "" {
+			text = strings.Repeat(" ", max(1, width))
 		}
+		if line.entryIndex >= 0 && line.entryIndex == m.selectedEntry {
+			lines = append(lines, lipgloss.PlaceHorizontal(
+				width,
+				lipgloss.Left,
+				text,
+				lipgloss.WithWhitespaceBackground(m.styles.transcriptSelected.GetBackground()),
+			))
+			continue
+		}
+		lines = append(lines, m.styles.transcript.Width(width).MaxWidth(width).Render(text))
 	}
-	return m.styles.transcript.Width(width).MaxWidth(width).Render(strings.Join(lines, "\n"))
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) transcriptViewportHeight(actionCard string, planCard string, activeExecutionCard string, statusLine string, shellTail string, composer string, footer string, screenHeight int) int {
@@ -286,6 +381,7 @@ func (m *Model) selectPreviousEntry() {
 	m.clampSelection()
 	if m.selectedEntry > 0 {
 		m.selectedEntry--
+		m.ensureSelectedEntryVisible(-1)
 	}
 }
 
@@ -293,34 +389,34 @@ func (m *Model) selectNextEntry() {
 	m.clampSelection()
 	if m.selectedEntry < len(m.entries)-1 {
 		m.selectedEntry++
+		m.ensureSelectedEntryVisible(1)
 	}
 }
 
-func (m Model) inlineDetailLineLimit() int {
-	height := m.height
-	if height <= 0 {
-		height = 24
+func (m Model) rawTranscriptViewportHeight() int {
+	width := m.currentTranscriptWidth()
+	actionCard := m.renderActionCard(m.contentWidthFor(width, m.styles.actionCard))
+	planCard := m.renderPlanCard(m.contentWidthFor(width, m.styles.actionCard))
+	activeExecutionCard := m.renderActiveExecutionCard(m.contentWidthFor(width, m.styles.actionCard))
+	statusLine := m.renderStatusLine(m.contentWidthFor(width, m.styles.status))
+	shellTail := m.renderShellTail(m.contentWidthFor(width, m.styles.tail))
+	composer := m.renderComposer(m.contentWidthFor(width, m.activeComposerStyle()))
+	footer := m.renderFooter(width)
+
+	screenHeight := m.height
+	if screenHeight <= 0 {
+		screenHeight = 24
 	}
-	return max(4, height*3/10)
+
+	return m.transcriptViewportHeight(actionCard, planCard, activeExecutionCard, statusLine, shellTail, composer, footer, screenHeight)
 }
 
-func (m Model) inlineDetailLines(entry Entry, width int) []string {
-	body := strings.TrimSpace(entry.Detail)
-	if body == "" {
-		return nil
-	}
+func (m Model) resultDisplayLineLimit() int {
+	return max(4, m.rawTranscriptViewportHeight()*3)
+}
 
-	lines := wrapParagraphs(body, max(10, width-2))
-	if len(lines) == 0 {
-		return nil
-	}
-
-	limit := m.inlineDetailLineLimit()
-	if len(lines) > limit {
-		lines = append(lines[:limit], "… Ctrl+O for more")
-	}
-
-	return lines
+func (m Model) resultCommandThreshold(width int) int {
+	return max(10, width*9/10)
 }
 
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -345,24 +441,34 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 
 	entryIndex, ok := m.transcriptTagEntryAtMouse(msg.X, msg.Y)
+	if ok {
+		m.selectedEntry = entryIndex
+		m.clampSelection()
+		m.ensureSelectedEntryVisible(0)
+		return m.openDetail()
+	}
+
+	entryIndex, ok = m.transcriptDetailEntryAtMouse(msg.X, msg.Y)
+	if ok {
+		m.selectedEntry = entryIndex
+		m.clampSelection()
+		m.ensureSelectedEntryVisible(0)
+		return m.openDetail()
+	}
+
+	entryIndex, ok = m.transcriptCommandEntryAtMouse(msg.X, msg.Y)
 	if !ok {
-		if m.inlineDetailEntry >= 0 {
-			m.inlineDetailEntry = -1
-		}
 		return m, nil
 	}
 
 	m.selectedEntry = entryIndex
 	m.clampSelection()
-	if strings.TrimSpace(m.entries[entryIndex].Detail) == "" {
-		m.inlineDetailEntry = -1
+	m.ensureSelectedEntryVisible(0)
+	if m.expandedCommandEntry == entryIndex {
+		m.expandedCommandEntry = -1
 		return m, nil
 	}
-	if m.inlineDetailEntry == entryIndex {
-		m.inlineDetailEntry = -1
-		return m, nil
-	}
-	m.inlineDetailEntry = entryIndex
+	m.expandedCommandEntry = entryIndex
 	return m, nil
 }
 
@@ -396,6 +502,94 @@ func (m Model) transcriptTagEntryAtMouse(x int, y int) (int, bool) {
 	}
 
 	return entryIndex, true
+}
+
+func (m Model) transcriptCommandEntryAtMouse(x int, y int) (int, bool) {
+	if !m.mouseInTranscript(x, y) {
+		return 0, false
+	}
+
+	lines := m.transcriptWindowDisplay(m.transcriptDisplayLines(m.currentTranscriptWidth()), m.currentTranscriptHeight())
+	line := lines[y]
+	if !line.commandClickable || line.commandStart < 0 || line.commandEnd <= line.commandStart || x < line.commandStart || x >= line.commandEnd {
+		return 0, false
+	}
+
+	entryIndex := line.entryIndex
+	if entryIndex < 0 || entryIndex >= len(m.entries) {
+		return 0, false
+	}
+
+	return entryIndex, true
+}
+
+func (m Model) transcriptDetailEntryAtMouse(x int, y int) (int, bool) {
+	if !m.mouseInTranscript(x, y) {
+		return 0, false
+	}
+
+	lines := m.transcriptWindowDisplay(m.transcriptDisplayLines(m.currentTranscriptWidth()), m.currentTranscriptHeight())
+	line := lines[y]
+	if !line.detailClickable || line.detailStart < 0 || line.detailEnd <= line.detailStart || x < line.detailStart || x >= line.detailEnd {
+		return 0, false
+	}
+
+	entryIndex := line.entryIndex
+	if entryIndex < 0 || entryIndex >= len(m.entries) {
+		return 0, false
+	}
+
+	return entryIndex, true
+}
+
+func (m *Model) ensureSelectedEntryVisible(direction int) {
+	firstLine, lastLine, ok := m.selectedEntryLineBounds()
+	if !ok {
+		return
+	}
+
+	height := m.currentTranscriptHeight()
+	if height <= 0 {
+		return
+	}
+
+	start := m.transcriptScroll
+	if m.transcriptFollow {
+		start = m.maxTranscriptScroll()
+	}
+	end := start + height - 1
+
+	switch {
+	case direction < 0 && firstLine < start:
+		m.transcriptScroll = firstLine
+		m.transcriptFollow = false
+	case direction > 0 && lastLine > end:
+		m.transcriptScroll = max(0, lastLine-height+1)
+		m.transcriptFollow = false
+	case direction == 0 && (firstLine < start || lastLine > end):
+		m.transcriptScroll = max(0, min(firstLine, max(0, lastLine-height+1)))
+		m.transcriptFollow = false
+	}
+	m.clampTranscriptScroll()
+}
+
+func (m Model) selectedEntryLineBounds() (int, int, bool) {
+	lines := m.transcriptDisplayLines(m.currentTranscriptWidth())
+	firstLine := -1
+	lastLine := -1
+	for index, line := range lines {
+		if line.entryIndex != m.selectedEntry {
+			continue
+		}
+		if firstLine < 0 {
+			firstLine = index
+		}
+		lastLine = index
+	}
+	if firstLine < 0 {
+		return 0, 0, false
+	}
+	return firstLine, lastLine, true
 }
 
 func (m Model) actionCardActionAtMouse(x int, y int) (actionCardAction, bool) {
@@ -1059,93 +1253,108 @@ func (m Model) halfPageScrollSize() int {
 	return max(1, m.currentTranscriptHeight()/2)
 }
 
-func (m Model) renderTag(entry Entry) string {
+func (m Model) renderTag(entry Entry, selected bool) string {
 	title := entry.Title
 	if transcriptEmojiEnabled() {
 		switch entry.TagKind {
 		case entryTagResultSuccess:
-			return m.styles.glyphResult.Render("✅")
+			return m.transcriptTagStyle(m.styles.glyphResult, selected).Render("✅")
 		case entryTagResultError:
-			return m.styles.glyphError.Render("❌")
+			return m.transcriptTagStyle(m.styles.glyphError, selected).Render("❌")
 		case entryTagResultNoExec:
-			return m.styles.glyphError.Render("🚫")
+			return m.transcriptTagStyle(m.styles.glyphError, selected).Render("🚫")
 		case entryTagResultNotFound:
-			return m.styles.glyphError.Render("❓")
+			return m.transcriptTagStyle(m.styles.glyphError, selected).Render("❓")
 		case entryTagResultSignal:
-			return m.styles.glyphSystem.Render("💥")
+			return m.transcriptTagStyle(m.styles.glyphSystem, selected).Render("💥")
 		case entryTagResultSigInt:
-			return m.styles.glyphSystem.Render("⚡")
+			return m.transcriptTagStyle(m.styles.glyphSystem, selected).Render("⚡")
 		case entryTagResultCustom:
-			return m.styles.glyphSystem.Render("🛠️")
+			return m.transcriptTagStyle(m.styles.glyphSystem, selected).Render("🛠️")
 		case entryTagResultFatal:
-			return m.styles.glyphError.Render("🧨")
+			return m.transcriptTagStyle(m.styles.glyphError, selected).Render("🧨")
 		}
 		switch title {
 		case "system":
-			return m.styles.glyphSystem.Render("⚙")
+			return m.transcriptTagStyle(m.styles.glyphSystem, selected).Render("⚙")
 		case "user":
-			return m.styles.glyphShell.Render("👤")
+			return m.transcriptTagStyle(m.styles.glyphShell, selected).Render("👤")
 		case "shell":
-			return m.styles.glyphShell.Render("💻")
+			return m.transcriptTagStyle(m.styles.glyphShell, selected).Render("💻")
 		case "result":
-			return m.styles.glyphResult.Render("✅")
+			return m.transcriptTagStyle(m.styles.glyphResult, selected).Render("✅")
 		case "agent":
-			return m.styles.glyphAgent.Render("🤖")
+			return m.transcriptTagStyle(m.styles.glyphAgent, selected).Render("🤖")
 		case "plan":
-			return m.styles.glyphAgent.Render("🗺️")
+			return m.transcriptTagStyle(m.styles.glyphAgent, selected).Render("🗺️")
 		case "proposal":
-			return m.styles.glyphAgent.Render("📝")
+			return m.transcriptTagStyle(m.styles.glyphAgent, selected).Render("📝")
 		case "approval":
-			return m.styles.glyphError.Render("⚠️")
+			return m.transcriptTagStyle(m.styles.glyphError, selected).Render("⚠️")
 		case "error":
-			return m.styles.glyphError.Render("⛔")
+			return m.transcriptTagStyle(m.styles.glyphError, selected).Render("⛔")
 		default:
-			return m.styles.glyphSystem.Render("•")
+			return m.transcriptTagStyle(m.styles.glyphSystem, selected).Render("•")
 		}
 	}
 
 	text := strings.ToUpper(title)
 	switch entry.TagKind {
 	case entryTagResultSuccess:
-		return m.styles.tagResult.Render("RESULT")
+		return m.transcriptTagStyle(m.styles.tagResult, selected).Render("RESULT")
 	case entryTagResultError:
-		return m.styles.tagError.Render("ERROR")
+		return m.transcriptTagStyle(m.styles.tagError, selected).Render("ERROR")
 	case entryTagResultNoExec:
-		return m.styles.tagError.Render("NOEXEC")
+		return m.transcriptTagStyle(m.styles.tagError, selected).Render("NOEXEC")
 	case entryTagResultNotFound:
-		return m.styles.tagError.Render("MISSING")
+		return m.transcriptTagStyle(m.styles.tagError, selected).Render("MISSING")
 	case entryTagResultSignal:
-		return m.styles.tagSystem.Render("SIGNAL")
+		return m.transcriptTagStyle(m.styles.tagSystem, selected).Render("SIGNAL")
 	case entryTagResultSigInt:
-		return m.styles.tagSystem.Render("INT")
+		return m.transcriptTagStyle(m.styles.tagSystem, selected).Render("INT")
 	case entryTagResultCustom:
-		return m.styles.tagSystem.Render("CUSTOM")
+		return m.transcriptTagStyle(m.styles.tagSystem, selected).Render("CUSTOM")
 	case entryTagResultFatal:
-		return m.styles.tagError.Render("FATAL")
+		return m.transcriptTagStyle(m.styles.tagError, selected).Render("FATAL")
 	}
 
 	switch title {
 	case "system":
-		return m.styles.tagSystem.Render(text)
+		return m.transcriptTagStyle(m.styles.tagSystem, selected).Render(text)
 	case "user":
-		return m.styles.tagShell.Render(text)
+		return m.transcriptTagStyle(m.styles.tagShell, selected).Render(text)
 	case "shell":
-		return m.styles.tagShell.Render(text)
+		return m.transcriptTagStyle(m.styles.tagShell, selected).Render(text)
 	case "result":
-		return m.styles.tagResult.Render(text)
+		return m.transcriptTagStyle(m.styles.tagResult, selected).Render(text)
 	case "agent":
-		return m.styles.tagAgent.Render(text)
+		return m.transcriptTagStyle(m.styles.tagAgent, selected).Render(text)
 	case "plan":
-		return m.styles.tagAgent.Render(text)
+		return m.transcriptTagStyle(m.styles.tagAgent, selected).Render(text)
 	case "proposal":
-		return m.styles.tagAgent.Render(text)
+		return m.transcriptTagStyle(m.styles.tagAgent, selected).Render(text)
 	case "approval":
-		return m.styles.tagError.Render(text)
+		return m.transcriptTagStyle(m.styles.tagError, selected).Render(text)
 	case "error":
-		return m.styles.tagError.Render(text)
+		return m.transcriptTagStyle(m.styles.tagError, selected).Render(text)
 	default:
-		return m.styles.tagSystem.Render(text)
+		return m.transcriptTagStyle(m.styles.tagSystem, selected).Render(text)
 	}
+}
+
+func (m Model) renderResultTag(entry Entry, selected bool) string {
+	if transcriptEmojiEnabled() {
+		return m.transcriptTagStyle(m.styles.glyphShell, selected).Render("💻") + m.renderTag(entry, selected)
+	}
+
+	return m.transcriptTagStyle(m.styles.tagShell, selected).Render("CMD") + " " + m.renderTag(entry, selected)
+}
+
+func (m Model) transcriptTagStyle(style lipgloss.Style, selected bool) lipgloss.Style {
+	if !selected {
+		return style
+	}
+	return style.Copy().Background(lipgloss.Color(transcriptSelectedBackground))
 }
 
 func transcriptEmojiEnabled() bool {
@@ -1159,6 +1368,7 @@ func transcriptEmojiEnabled() bool {
 }
 
 func eventsToEntries(events []controller.TranscriptEvent, collapseResults bool) []Entry {
+	_ = collapseResults
 	entries := make([]Entry, 0, len(events))
 	for _, event := range events {
 		switch event.Kind {
@@ -1192,10 +1402,9 @@ func eventsToEntries(events []controller.TranscriptEvent, collapseResults bool) 
 			body := fullBody
 			if !hasVisibleOutput {
 				body = silentSuccessTranscriptBody(payload)
-			} else if collapseResults {
-				body = compactResultPreview(fullBody, 6)
 			}
 			if payload.State == controller.CommandExecutionCanceled {
+				body = strings.TrimSpace(strings.TrimPrefix("status=canceled\n"+body, "\n"))
 				detail := []string{
 					"command:",
 					payload.Command,
@@ -1208,13 +1417,15 @@ func eventsToEntries(events []controller.TranscriptEvent, collapseResults bool) 
 				}
 				entries = append(entries, Entry{
 					Title:   "result",
-					Body:    "status=canceled\n" + body,
+					Command: payload.Command,
+					Body:    body,
 					Detail:  strings.Join(detail, "\n"),
 					TagKind: tagKind,
 				})
 				break
 			}
 			if payload.State == controller.CommandExecutionLost {
+				body = strings.TrimSpace(strings.TrimPrefix("status=lost\n"+body, "\n"))
 				detail := []string{
 					"command:",
 					payload.Command,
@@ -1233,14 +1444,19 @@ func eventsToEntries(events []controller.TranscriptEvent, collapseResults bool) 
 				}
 				entries = append(entries, Entry{
 					Title:   "result",
-					Body:    "status=lost\n" + body,
+					Command: payload.Command,
+					Body:    body,
 					Detail:  strings.Join(detail, "\n"),
 					TagKind: tagKind,
 				})
 				break
 			}
+			if body == "" && payload.ExitCode != 0 {
+				body = fmt.Sprintf("exit=%d", payload.ExitCode)
+			}
 			entries = append(entries, Entry{
 				Title:   "result",
+				Command: payload.Command,
 				Body:    body,
 				Detail:  formatResultDetail(payload.Command, payload.ExitCode, detailBody),
 				TagKind: tagKind,
@@ -1249,19 +1465,6 @@ func eventsToEntries(events []controller.TranscriptEvent, collapseResults bool) 
 			payload, _ := event.Payload.(controller.PatchApplySummary)
 			entries = append(entries, compactPatchApplyEntry(payload))
 		case controller.EventModelInfo:
-			payload, _ := event.Payload.(controller.AgentModelInfo)
-			model := strings.TrimSpace(payload.ResponseModel)
-			if model == "" {
-				model = strings.TrimSpace(payload.RequestedModel)
-			}
-			body := "provider model metadata unavailable"
-			if model != "" {
-				body = "reply model: " + model
-			}
-			if payload.RequestedModel != "" && payload.ResponseModel != "" && payload.RequestedModel != payload.ResponseModel {
-				body = fmt.Sprintf("reply model: %s (requested %s)", payload.ResponseModel, payload.RequestedModel)
-			}
-			entries = append(entries, Entry{Title: "system", Body: body})
 		case controller.EventSystemNotice:
 			payload, _ := event.Payload.(controller.TextPayload)
 			entries = append(entries, Entry{Title: "system", Body: payload.Text})
@@ -1271,6 +1474,41 @@ func eventsToEntries(events []controller.TranscriptEvent, collapseResults bool) 
 		}
 	}
 	return entries
+}
+
+func formatModelInfoDetail(payload controller.AgentModelInfo) string {
+	lines := []string{}
+	if providerLabel := strings.TrimSpace(payload.ProviderPreset); providerLabel != "" {
+		lines = append(lines, "provider:", settingsProviderLabel(provider.ProviderPreset(providerLabel)), "")
+	}
+
+	responseModel := strings.TrimSpace(payload.ResponseModel)
+	requestedModel := strings.TrimSpace(payload.RequestedModel)
+	switch {
+	case responseModel != "":
+		lines = append(lines, "reply model:", responseModel)
+	case requestedModel != "":
+		lines = append(lines, "reply model:", requestedModel)
+	default:
+		lines = append(lines, "reply model:", "provider model metadata unavailable")
+	}
+	if requestedModel != "" && requestedModel != responseModel {
+		lines = append(lines, "", "requested model:", requestedModel)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func appendDetailSection(entry *Entry, section string) {
+	section = strings.TrimSpace(section)
+	if section == "" {
+		return
+	}
+	base := strings.TrimSpace(entry.DetailBody())
+	if base == "" {
+		entry.Detail = section
+		return
+	}
+	entry.Detail = base + "\n\n" + section
 }
 
 func containsEventKind(events []controller.TranscriptEvent, kind controller.TranscriptEventKind) bool {
