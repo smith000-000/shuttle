@@ -86,20 +86,29 @@ type responsesError struct {
 }
 
 type shuttleStructuredResponse struct {
-	Message             string   `json:"message"`
-	PlanSummary         string   `json:"plan_summary"`
-	PlanSteps           []string `json:"plan_steps"`
-	ProposalKind        string   `json:"proposal_kind"`
-	ProposalCommand     string   `json:"proposal_command"`
-	ProposalKeys        string   `json:"proposal_keys"`
-	ProposalPatch       string   `json:"proposal_patch"`
-	ProposalDescription string   `json:"proposal_description"`
-	ApprovalKind        string   `json:"approval_kind"`
-	ApprovalTitle       string   `json:"approval_title"`
-	ApprovalSummary     string   `json:"approval_summary"`
-	ApprovalCommand     string   `json:"approval_command"`
-	ApprovalPatch       string   `json:"approval_patch"`
-	ApprovalRisk        string   `json:"approval_risk"`
+	Message                string   `json:"message"`
+	PlanSummary            string   `json:"plan_summary"`
+	PlanSteps              []string `json:"plan_steps"`
+	ProposalKind           string   `json:"proposal_kind"`
+	ProposalCommand        string   `json:"proposal_command"`
+	ProposalKeys           string   `json:"proposal_keys"`
+	ProposalPatch          string   `json:"proposal_patch"`
+	ProposalPatchTarget    string   `json:"proposal_patch_target"`
+	ProposalEditPath       string   `json:"proposal_edit_path"`
+	ProposalEditOperation  string   `json:"proposal_edit_operation"`
+	ProposalEditAnchorText string   `json:"proposal_edit_anchor_text"`
+	ProposalEditOldText    string   `json:"proposal_edit_old_text"`
+	ProposalEditNewText    string   `json:"proposal_edit_new_text"`
+	ProposalEditStartLine  int      `json:"proposal_edit_start_line"`
+	ProposalEditEndLine    int      `json:"proposal_edit_end_line"`
+	ProposalDescription    string   `json:"proposal_description"`
+	ApprovalKind           string   `json:"approval_kind"`
+	ApprovalTitle          string   `json:"approval_title"`
+	ApprovalSummary        string   `json:"approval_summary"`
+	ApprovalCommand        string   `json:"approval_command"`
+	ApprovalPatch          string   `json:"approval_patch"`
+	ApprovalPatchTarget    string   `json:"approval_patch_target"`
+	ApprovalRisk           string   `json:"approval_risk"`
 }
 
 func NewResponsesAgent(profile Profile, client *http.Client) (*ResponsesAgent, error) {
@@ -293,6 +302,13 @@ func parseProposal(input shuttleStructuredResponse) (*controller.Proposal, error
 		strings.TrimSpace(input.ProposalCommand) == "" &&
 		strings.TrimSpace(input.ProposalKeys) == "" &&
 		strings.TrimSpace(input.ProposalPatch) == "" &&
+		strings.TrimSpace(input.ProposalEditPath) == "" &&
+		strings.TrimSpace(input.ProposalEditOperation) == "" &&
+		strings.TrimSpace(input.ProposalEditAnchorText) == "" &&
+		strings.TrimSpace(input.ProposalEditOldText) == "" &&
+		strings.TrimSpace(input.ProposalEditNewText) == "" &&
+		input.ProposalEditStartLine == 0 &&
+		input.ProposalEditEndLine == 0 &&
 		strings.TrimSpace(input.ProposalDescription) == "" {
 		return nil, nil
 	}
@@ -307,12 +323,36 @@ func parseProposal(input shuttleStructuredResponse) (*controller.Proposal, error
 			kind = controller.ProposalKeys
 		case strings.TrimSpace(input.ProposalPatch) != "":
 			kind = controller.ProposalPatch
+		case strings.TrimSpace(input.ProposalEditOperation) != "" || strings.TrimSpace(input.ProposalEditPath) != "":
+			kind = controller.ProposalEdit
+		case strings.EqualFold(strings.TrimSpace(input.ProposalKind), string(controller.ProposalInspectContext)):
+			kind = controller.ProposalInspectContext
 		default:
 			kind = controller.ProposalAnswer
 		}
-	case controller.ProposalAnswer, controller.ProposalCommand, controller.ProposalKeys, controller.ProposalPatch:
+	case controller.ProposalAnswer, controller.ProposalCommand, controller.ProposalKeys, controller.ProposalPatch, controller.ProposalEdit, controller.ProposalInspectContext:
 	default:
 		return nil, fmt.Errorf("unsupported proposal kind %q", input.ProposalKind)
+	}
+
+	var edit *controller.EditIntent
+	if kind == controller.ProposalEdit {
+		operation := controller.EditOperation(strings.TrimSpace(input.ProposalEditOperation))
+		switch operation {
+		case controller.EditInsertBefore, controller.EditInsertAfter, controller.EditReplaceExact, controller.EditReplaceRange:
+		default:
+			return nil, fmt.Errorf("unsupported edit operation %q", input.ProposalEditOperation)
+		}
+		edit = &controller.EditIntent{
+			Target:     normalizePatchTarget(input.ProposalPatchTarget),
+			Path:       strings.TrimSpace(input.ProposalEditPath),
+			Operation:  operation,
+			AnchorText: input.ProposalEditAnchorText,
+			OldText:    input.ProposalEditOldText,
+			NewText:    input.ProposalEditNewText,
+			StartLine:  input.ProposalEditStartLine,
+			EndLine:    input.ProposalEditEndLine,
+		}
 	}
 
 	return &controller.Proposal{
@@ -320,6 +360,8 @@ func parseProposal(input shuttleStructuredResponse) (*controller.Proposal, error
 		Command:     strings.TrimSpace(input.ProposalCommand),
 		Keys:        input.ProposalKeys,
 		Patch:       strings.TrimSpace(input.ProposalPatch),
+		PatchTarget: normalizePatchTarget(input.ProposalPatchTarget),
+		Edit:        edit,
 		Description: strings.TrimSpace(input.ProposalDescription),
 	}, nil
 }
@@ -359,14 +401,24 @@ func (a *ResponsesAgent) parseApproval(input shuttleStructuredResponse) (*contro
 	}
 
 	return &controller.ApprovalRequest{
-		ID:      a.nextID("approval"),
-		Kind:    kind,
-		Title:   strings.TrimSpace(input.ApprovalTitle),
-		Summary: strings.TrimSpace(input.ApprovalSummary),
-		Command: strings.TrimSpace(input.ApprovalCommand),
-		Patch:   strings.TrimSpace(input.ApprovalPatch),
-		Risk:    risk,
+		ID:          a.nextID("approval"),
+		Kind:        kind,
+		Title:       strings.TrimSpace(input.ApprovalTitle),
+		Summary:     strings.TrimSpace(input.ApprovalSummary),
+		Command:     strings.TrimSpace(input.ApprovalCommand),
+		Patch:       strings.TrimSpace(input.ApprovalPatch),
+		PatchTarget: normalizePatchTarget(input.ApprovalPatchTarget),
+		Risk:        risk,
 	}, nil
+}
+
+func normalizePatchTarget(value string) controller.PatchTarget {
+	switch controller.PatchTarget(strings.TrimSpace(value)) {
+	case controller.PatchTargetRemoteShell:
+		return controller.PatchTargetRemoteShell
+	default:
+		return controller.PatchTargetLocalWorkspace
+	}
 }
 
 func (a *ResponsesAgent) nextID(prefix string) string {
@@ -501,10 +553,16 @@ func buildTurnContext(input controller.AgentInput) string {
 	options := turnContextOptionsForTask(input.Task)
 
 	sessionLines := []string{}
+	remoteShellActive := false
 	if input.Session.CurrentShell != nil && strings.TrimSpace(input.Session.CurrentShell.PromptLine()) != "" {
 		sessionLines = append(sessionLines, "prompt="+input.Session.CurrentShell.PromptLine())
 		if input.Session.CurrentShell.Remote {
+			remoteShellActive = true
 			sessionLines = append(sessionLines, "remote=true")
+			if input.Session.WorkingDirectory != "" {
+				sessionLines = append(sessionLines, "remote_patch_root="+input.Session.WorkingDirectory)
+				sessionLines = append(sessionLines, "remote_cwd="+input.Session.WorkingDirectory)
+			}
 		}
 	}
 	if input.Session.SessionName != "" {
@@ -513,11 +571,16 @@ func buildTurnContext(input controller.AgentInput) string {
 	if input.Session.TrackedShell.SessionName != "" {
 		sessionLines = append(sessionLines, "tracked_session="+input.Session.TrackedShell.SessionName)
 	}
-	if input.Session.WorkingDirectory != "" {
+	if input.Session.WorkingDirectory != "" && !remoteShellActive {
 		sessionLines = append(sessionLines, "cwd="+input.Session.WorkingDirectory)
 	}
 	if input.Session.LocalWorkspaceRoot != "" {
-		sessionLines = append(sessionLines, "workspace_root="+input.Session.LocalWorkspaceRoot)
+		if remoteShellActive {
+			sessionLines = append(sessionLines, "local_workspace_root="+input.Session.LocalWorkspaceRoot)
+			sessionLines = append(sessionLines, "local_workspace_note=local workspace paths are not remote shell paths")
+		} else {
+			sessionLines = append(sessionLines, "workspace_root="+input.Session.LocalWorkspaceRoot)
+		}
 	}
 	if input.Session.ApprovalMode != "" {
 		sessionLines = append(sessionLines, "approval_mode="+string(input.Session.ApprovalMode))
@@ -527,6 +590,43 @@ func buildTurnContext(input controller.AgentInput) string {
 	}
 	if input.Session.BottomPaneID != "" {
 		sessionLines = append(sessionLines, "bottom_pane="+input.Session.BottomPaneID)
+	}
+	if input.Session.RemoteCapabilities != nil {
+		caps := input.Session.RemoteCapabilities
+		if caps.Identity != "" {
+			sessionLines = append(sessionLines, "remote_identity="+caps.Identity)
+		}
+		capBits := []string{}
+		if caps.Git {
+			capBits = append(capBits, "git")
+		}
+		if caps.Python3 {
+			capBits = append(capBits, "python3")
+		}
+		if caps.Base64 {
+			capBits = append(capBits, "base64")
+		}
+		if caps.Mktemp {
+			capBits = append(capBits, "mktemp")
+		}
+		if len(capBits) > 0 {
+			sessionLines = append(sessionLines, "remote_capabilities="+strings.Join(capBits, ","))
+		}
+		if caps.ShellFamily != "" {
+			sessionLines = append(sessionLines, "remote_shell="+caps.ShellFamily)
+		}
+		if caps.System != "" {
+			sessionLines = append(sessionLines, "remote_system="+caps.System)
+		}
+		if caps.OSRelease != "" {
+			sessionLines = append(sessionLines, "remote_os_release="+caps.OSRelease)
+		}
+		if caps.LastSuccessfulTransport != "" {
+			sessionLines = append(sessionLines, "remote_last_patch_transport="+string(caps.LastSuccessfulTransport))
+		}
+		if caps.Source != "" {
+			sessionLines = append(sessionLines, "remote_capability_source="+caps.Source)
+		}
 	}
 	if len(sessionLines) > 0 {
 		sections = append(sections, "Session:\n"+strings.Join(sessionLines, "\n"))
@@ -581,6 +681,18 @@ func buildTurnContext(input controller.AgentInput) string {
 		}
 		if strings.TrimSpace(last.WorkspaceRoot) != "" {
 			lines = append(lines, "workspace_root="+last.WorkspaceRoot)
+		}
+		if strings.TrimSpace(string(last.Target)) != "" {
+			lines = append(lines, "target="+string(last.Target))
+		}
+		if strings.TrimSpace(last.TargetLabel) != "" {
+			lines = append(lines, "target_label="+clipText(last.TargetLabel, 160))
+		}
+		if strings.TrimSpace(string(last.Transport)) != "" {
+			lines = append(lines, "transport="+string(last.Transport))
+		}
+		if strings.TrimSpace(last.CapabilitySource) != "" {
+			lines = append(lines, "capability_source="+last.CapabilitySource)
 		}
 		if strings.TrimSpace(last.Validation) != "" {
 			lines = append(lines, "validation="+last.Validation)
@@ -672,6 +784,7 @@ func buildTurnContext(input controller.AgentInput) string {
 		}
 		if pending.Patch != "" {
 			approvalLines = append(approvalLines, "patch="+clipText(pending.Patch, 1200))
+			approvalLines = append(approvalLines, "patch_target="+string(pending.PatchTarget))
 		}
 		sections = append(sections, "Pending approval under refinement:\n"+strings.Join(approvalLines, "\n"))
 	}
@@ -807,6 +920,9 @@ func summarizeTranscriptEvent(event controller.TranscriptEvent) string {
 	case controller.EventPatchApplyResult:
 		payload, _ := event.Payload.(controller.PatchApplySummary)
 		if payload.Applied {
+			if strings.TrimSpace(string(payload.Transport)) != "" {
+				return fmt.Sprintf("%s: transport=%s created=%d updated=%d deleted=%d renamed=%d", event.Kind, payload.Transport, payload.Created, payload.Updated, payload.Deleted, payload.Renamed)
+			}
 			return fmt.Sprintf("%s: created=%d updated=%d deleted=%d renamed=%d", event.Kind, payload.Created, payload.Updated, payload.Deleted, payload.Renamed)
 		}
 		return fmt.Sprintf("%s: failed %s", event.Kind, clipText(payload.Error, 180))
@@ -864,12 +980,21 @@ func shuttleAgentResponseSchema() map[string]any {
 			"proposal_command",
 			"proposal_keys",
 			"proposal_patch",
+			"proposal_patch_target",
+			"proposal_edit_path",
+			"proposal_edit_operation",
+			"proposal_edit_anchor_text",
+			"proposal_edit_old_text",
+			"proposal_edit_new_text",
+			"proposal_edit_start_line",
+			"proposal_edit_end_line",
 			"proposal_description",
 			"approval_kind",
 			"approval_title",
 			"approval_summary",
 			"approval_command",
 			"approval_patch",
+			"approval_patch_target",
 			"approval_risk",
 		},
 		"properties": map[string]any{
@@ -887,7 +1012,7 @@ func shuttleAgentResponseSchema() map[string]any {
 			},
 			"proposal_kind": map[string]any{
 				"type": "string",
-				"enum": []string{"", "answer", "command", "keys", "patch"},
+				"enum": []string{"", "answer", "command", "keys", "patch", "edit", "inspect_context"},
 			},
 			"proposal_command": map[string]any{
 				"type": "string",
@@ -897,6 +1022,32 @@ func shuttleAgentResponseSchema() map[string]any {
 			},
 			"proposal_patch": map[string]any{
 				"type": "string",
+			},
+			"proposal_patch_target": map[string]any{
+				"type": "string",
+				"enum": []string{"", "local_workspace", "tracked_remote_shell"},
+			},
+			"proposal_edit_path": map[string]any{
+				"type": "string",
+			},
+			"proposal_edit_operation": map[string]any{
+				"type": "string",
+				"enum": []string{"", "insert_before", "insert_after", "replace_exact", "replace_range"},
+			},
+			"proposal_edit_anchor_text": map[string]any{
+				"type": "string",
+			},
+			"proposal_edit_old_text": map[string]any{
+				"type": "string",
+			},
+			"proposal_edit_new_text": map[string]any{
+				"type": "string",
+			},
+			"proposal_edit_start_line": map[string]any{
+				"type": "integer",
+			},
+			"proposal_edit_end_line": map[string]any{
+				"type": "integer",
 			},
 			"proposal_description": map[string]any{
 				"type": "string",
@@ -917,6 +1068,10 @@ func shuttleAgentResponseSchema() map[string]any {
 			"approval_patch": map[string]any{
 				"type": "string",
 			},
+			"approval_patch_target": map[string]any{
+				"type": "string",
+				"enum": []string{"", "local_workspace", "tracked_remote_shell"},
+			},
 			"approval_risk": map[string]any{
 				"type": "string",
 				"enum": []string{"", "low", "medium", "high"},
@@ -936,23 +1091,67 @@ Rules:
 - Do not emit a plan for simple descriptive, factual, or status-summary requests.
 - If an active plan is present in context, prefer continuing it from the current in-progress or pending step instead of inventing a new unrelated plan.
 - For requests to inspect the current directory, repository, files, environment, or system state, prefer a "proposal_command" over answering from stale context.
+- When certainty about the active shell identity or location matters, such as current user@host, cwd, remote/local state, or active remote target, prefer "proposal_kind":"inspect_context" instead of guessing or relying on stale context text.
 - Only answer directly from shell state when the current turn already includes the necessary command result, or when the user is explicitly asking for a summary of a result that is already in context.
 - Never imply that you executed a shell command unless Shuttle has actual command/result context for it.
 - Never imply that a proposed patch or diff has already been applied.
 - Do not claim that files created by a proposed patch already exist, are executable, or can be referenced by later commands until Shuttle explicitly confirms the patch was applied.
-- Patch proposals and approvals must use git-style unified diff text in "proposal_patch" or "approval_patch", relative to the local workspace root shown in context.
+- Patch proposals and approvals must use git-style unified diff text in "proposal_patch" or "approval_patch".
+- For ordinary single-file text edits, prefer "proposal_kind":"edit" over hand-authoring a raw diff. Shuttle will synthesize the exact unified diff from your structured edit intent.
+- If you emit a patch, you must also set "proposal_patch_target" or "approval_patch_target" to either "local_workspace" or "tracked_remote_shell".
+- If you emit an edit proposal, you must set "proposal_patch_target" to either "local_workspace" or "tracked_remote_shell".
 - Do not emit the non-standard "*** Begin Patch" format.
-- When you emit a patch, output only the raw unified diff text with exact hunk headers and counts. Do not wrap the diff in prose, bullets, or code fences.
-- Patch application mutates the local workspace root, not the active remote shell host. If the shell prompt is remote, keep local patch effects and remote shell effects clearly separate.
+- Treat "proposal_patch" and "approval_patch" as strict tool payloads, not normal prose fields.
+- When you emit a patch, output only the raw unified diff text with exact hunk headers and counts. Do not wrap the diff in prose, bullets, labels, explanations, or code fences.
+- A valid patch payload must start immediately with the first diff header line. Do not put any text before it.
+- A valid patch payload must be complete. Do not truncate the diff body. Do not omit trailing diff lines that are required by the hunk.
+- For insertion hunks, the new count in @@ -old_start,old_count +new_start,new_count @@ must equal the old count plus the number of inserted lines.
+- Prefer the smallest possible diff with a single file and minimal context when the requested edit is small.
+- Minimal valid example:
+  diff --git a/hello.txt b/hello.txt
+  --- a/hello.txt
+  +++ b/hello.txt
+  @@ -1 +1 @@
+  -hello
+  +hello world
+- Minimal valid insertion example:
+  diff --git a/foo.txt b/foo.txt
+  --- a/foo.txt
+  +++ b/foo.txt
+  @@ -2,2 +2,4 @@
+   keep line before
+  +inserted line one
+  +inserted line two
+   keep line after
+- "local_workspace" patches are relative to the local workspace root shown in context.
+- Invalid examples:
+  - "Here is the patch:" before the diff
+  - wrapping the diff in fenced code blocks
+  - labels like "patch:" or bullets before the diff
+  - incomplete hunks or truncated patch text
+  - insertion hunks whose +new_count does not match the number of context-plus-added lines
+- "local_workspace" patches are relative to the local workspace root shown in context.
+- "local_workspace" patches are relative to the local workspace root shown in context.
+- "tracked_remote_shell" patches target the currently active remote shell environment. Only use that target when the user clearly wants to change files on the active remote shell target rather than the local workspace.
+- "tracked_remote_shell" patch paths are relative to the active remote cwd shown in session context. Do not use absolute paths in remote patches.
 - Never propose a shell command that invokes apply_patch, git apply, patch, or any heredoc-based patch application tool for local workspace edits. Use "proposal_kind":"patch" or patch approval fields instead.
+- When the user asks to edit or create a text file on the active remote shell target, prefer a "proposal_kind":"patch" with "proposal_patch_target":"tracked_remote_shell" instead of proposing raw shell mutation commands like sed -i, perl -pi, cat > file, tee, or overwrite redirection.
+- Prefer "proposal_kind":"edit" for common single-file text changes such as insert before/after a unique anchor, replace exact text, or replace a known line range. Reserve raw "proposal_kind":"patch" for multi-file changes, creates, deletes, renames, or advanced diffs that cannot be expressed as one structured text edit.
+- Only fall back to a raw remote shell mutation command when a remote patch is clearly not viable from context. If you do that, request approval instead of using a proposal.
 - If you propose a shell action, set "proposal_kind" to "command" and fill "proposal_command".
+- If you need Shuttle to refresh and report the authoritative current shell identity/location, set "proposal_kind" to "inspect_context". Do not also fill command, keys, or patch fields for that action.
 - If you propose sending a small raw key sequence to an already-active prompt or fullscreen app, set "proposal_kind" to "keys" and fill "proposal_keys". Use a literal newline in "proposal_keys" when Enter should be sent. For non-printing tmux key events such as Ctrl+C or Escape, use tokens like "<Ctrl+C>" or "<Esc>" inside "proposal_keys".
-- If you propose a patch, set "proposal_kind" to "patch" and fill "proposal_patch".
+- If you propose a patch, set "proposal_kind" to "patch", fill "proposal_patch", and set "proposal_patch_target".
+- If you propose an edit, set "proposal_kind" to "edit", fill "proposal_edit_path", "proposal_edit_operation", and "proposal_edit_new_text", and set "proposal_patch_target".
+- For "insert_before" and "insert_after", fill "proposal_edit_anchor_text" with the exact unique anchor text from the current file snapshot.
+- For "replace_exact", fill "proposal_edit_old_text" and "proposal_edit_new_text".
+- For "replace_range", fill "proposal_edit_start_line", "proposal_edit_end_line", and "proposal_edit_new_text". Line numbers are 1-based and inclusive.
+- Do not also fill proposal_command, proposal_keys, or proposal_patch when using "proposal_kind":"edit".
 - If no proposal is needed, leave proposal fields empty.
 - If the session context says "approval_mode=auto", safe local inspection or verification commands may be auto-executed by Shuttle. In that mode, prefer "proposal_command" for safe local commands and reserve approvals for writes, destructive actions, patches, remote work, network/process-control, or other user-confirmed steps.
 - If the session context says "approval_mode=dangerous", Shuttle may auto-run agent commands and auto-apply agent patches without confirmation. Only rely on that for clearly intended task work in a trusted workspace, and still avoid destructive or unnecessary actions.
 - If an action is destructive, risky, or should be user-confirmed, leave proposal fields empty and fill the approval fields instead.
-- For approvals, set "approval_kind" to "command", "patch", or "plan" and set "approval_risk" to "low", "medium", or "high".
+- For approvals, set "approval_kind" to "command", "patch", or "plan" and set "approval_risk" to "low", "medium", or "high". If "approval_kind" is "patch", also set "approval_patch_target".
 - If the task is a refinement of a pending approval, preserve the original command or patch unless the context clearly requires changing it.
 - If the current turn says an active command is still running, use "message" for a brief status update. Do not emit a plan, proposal, or approval unless the shell is clearly waiting for user intervention.
 - If the current active command state is "awaiting_input", explain what input is likely needed from the shell output or recovery snapshot and tell the user to press F2 to take control. If a small raw keystroke sequence would likely help, you may propose it with "proposal_kind":"keys" and "proposal_keys".
@@ -965,4 +1164,4 @@ Rules:
 - If the latest command was a read-only inspection command and the transcript or command result still shows unresolved work, do not stop at diagnosis. Propose exactly one next action now.
 - Prefer stopping after a satisfied one-shot request. Do not invent extra verification or follow-up work unless the user explicitly asked for verification, the request is part of an active multi-step plan, or the available result is ambiguous.
 - If the recent transcript shows that the user explicitly asked for serial, ordered, or one-command-at-a-time shell work, and the latest command only completed one step of that request, summarize briefly and propose exactly one next command now. Do not lump multiple shell actions together, and do not wait for an extra "go ahead" unless the user explicitly asked to approve each step separately.
-- Leave unused fields as empty strings, and leave unused arrays empty.`
+- Leave unused string fields empty, leave unused arrays empty, and use 0 for unused integer fields.`

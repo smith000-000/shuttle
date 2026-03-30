@@ -4,7 +4,8 @@ Current status:
 - Shuttle now derives a stable workspace ID from the absolute project path
 - Shuttle now defaults to a managed tmux socket under runtime state and a derived internal session name
 - explicit `--socket` / `--session` overrides still exist for development and integration work
-- runtime registry, reconciliation policy, and lifecycle subcommands are still pending
+- runtime registry and startup reconciliation now exist well enough for workspace rediscovery
+- product-level lifecycle subcommands such as `shuttle list`, `resume`, `cleanup`, and `doctor` are still pending
 
 ## Purpose
 Define how Shuttle should manage tmux sockets, sessions, workspace identity, and crash recovery in a release build so users do not have to think about `--socket` and `--session` flags.
@@ -329,15 +330,16 @@ Recommended order:
 
 # 12. Immediate Next Slice
 
-The first implementation slice is now partially complete:
+The first implementation slice is now materially complete:
 
 Implemented:
-1. add a `workspace_id` derivation helper
-2. replace default ad hoc socket/session values with derived managed defaults
+1. derive `workspace_id` from the current project path
+2. replace ad hoc socket/session defaults with managed derived defaults
 3. keep `--socket` and `--session` as explicit overrides
+4. persist enough runtime state to rediscover and reconcile the workspace on startup
 
 Still next:
-4. add a runtime registry record type under local persistence
-5. add startup reconciliation for "session exists" vs "session missing"
+5. add explicit user-facing lifecycle commands
+6. harden stale-runtime cleanup and recovery tooling
 
-That keeps the release architecture moving away from manual tmux naming while leaving lifecycle and recovery work to the next slice.
+That keeps the release architecture moving away from manual tmux naming while leaving productized lifecycle UX to a later slice.

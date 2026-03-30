@@ -14,6 +14,7 @@ type styles struct {
 	modeApproval          lipgloss.Style
 	modeProposal          lipgloss.Style
 	transcript            lipgloss.Style
+	transcriptSelected    lipgloss.Style
 	actionCard            lipgloss.Style
 	actionTitle           lipgloss.Style
 	actionBody            lipgloss.Style
@@ -35,7 +36,11 @@ type styles struct {
 	input                 lipgloss.Style
 	inputGhost            lipgloss.Style
 	status                lipgloss.Style
+	statusMuted           lipgloss.Style
 	statusBusy            lipgloss.Style
+	statusConfirm         lipgloss.Style
+	statusWarn            lipgloss.Style
+	statusDanger          lipgloss.Style
 	statusRoot            lipgloss.Style
 	statusRemote          lipgloss.Style
 	tail                  lipgloss.Style
@@ -102,6 +107,8 @@ func newStyles() styles {
 			Padding(0, 1),
 		transcript: lipgloss.NewStyle().
 			Padding(0),
+		transcriptSelected: lipgloss.NewStyle().
+			Background(lipgloss.Color("236")),
 		actionCard: lipgloss.NewStyle().
 			Border(lipgloss.NormalBorder()).
 			BorderForeground(lipgloss.Color("160")).
@@ -169,21 +176,26 @@ func newStyles() styles {
 		status: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("246")).
 			Padding(0, 1),
+		statusMuted: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("244")),
 		statusBusy: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("230")).
-			Background(lipgloss.Color("160")).
-			Bold(true).
-			Padding(0, 1),
+			Foreground(lipgloss.Color("81")).
+			Bold(true),
+		statusConfirm: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("78")).
+			Bold(true),
+		statusWarn: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("221")).
+			Bold(true),
+		statusDanger: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("203")).
+			Bold(true),
 		statusRoot: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("230")).
-			Background(lipgloss.Color("202")).
-			Bold(true).
-			Padding(0, 1),
+			Foreground(lipgloss.Color("202")).
+			Bold(true),
 		statusRemote: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("230")).
-			Background(lipgloss.Color("62")).
-			Bold(true).
-			Padding(0, 1),
+			Foreground(lipgloss.Color("75")).
+			Bold(true),
 		tail: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("248")).
 			Padding(0, 1),

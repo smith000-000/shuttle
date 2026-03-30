@@ -151,6 +151,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			TrackedShell:         controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
 			WorkingDirectory:     runtimeCfg.StartDir,
 			LocalWorkspaceRoot:   runtimeCfg.StartDir,
+			StateDir:             runtimeCfg.StateDir,
 			UserShellHistoryFile: historyFile,
 			CurrentShell:         initialShellContextPtr(initialShellContext),
 		})
@@ -202,6 +203,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			TrackedShell:         controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
 			WorkingDirectory:     runtimeCfg.StartDir,
 			LocalWorkspaceRoot:   runtimeCfg.StartDir,
+			StateDir:             runtimeCfg.StateDir,
 			UserShellHistoryFile: historyFile,
 			CurrentShell:         initialShellContextPtr(initialShellContext),
 		})
@@ -217,6 +219,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 				TrackedShell:         controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
 				WorkingDirectory:     runtimeCfg.StartDir,
 				LocalWorkspaceRoot:   runtimeCfg.StartDir,
+				StateDir:             runtimeCfg.StateDir,
 				UserShellHistoryFile: historyFile,
 				CurrentShell:         shellContext,
 			}), profile, nil
@@ -239,7 +242,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			})
 		program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 		_, runErr := program.Run()
-		cleanupErr := cleanupTUISession(created, client, workspace.SessionName)
+		cleanupErr := cleanupTUISession(a.cfg, created, client, workspace.SessionName)
 		if runErr != nil {
 			logging.TraceError("app.tui.error", runErr, "session", workspace.SessionName)
 			if cleanupErr != nil {
@@ -341,8 +344,8 @@ func initialShellContextPtr(promptContext shell.PromptContext) *shell.PromptCont
 	return &contextCopy
 }
 
-func cleanupTUISession(created bool, client *tmux.Client, sessionName string) error {
-	if !created {
+func cleanupTUISession(cfg config.Config, created bool, client *tmux.Client, sessionName string) error {
+	if !shouldDestroyManagedSession(cfg, created, sessionName) {
 		return nil
 	}
 
@@ -350,4 +353,36 @@ func cleanupTUISession(created bool, client *tmux.Client, sessionName string) er
 	defer cancel()
 
 	return client.KillSession(ctx, sessionName)
+}
+
+func shouldDestroyManagedSession(cfg config.Config, created bool, sessionName string) bool {
+	if created {
+		return true
+	}
+	sessionName = strings.TrimSpace(sessionName)
+	if sessionName == "" {
+		return false
+	}
+	managedSessionName := managedSessionNameForConfig(cfg)
+	managedSocketPath := managedSocketPathForConfig(cfg)
+	if managedSessionName == "" || managedSocketPath == "" {
+		return false
+	}
+	return sessionName == managedSessionName && tmux.ResolveSocketTarget(cfg.TmuxSocket) == managedSocketPath
+}
+
+func managedSessionNameForConfig(cfg config.Config) string {
+	workspaceID := strings.TrimSpace(cfg.WorkspaceID)
+	if workspaceID == "" {
+		return ""
+	}
+	return "shuttle_" + workspaceID
+}
+
+func managedSocketPathForConfig(cfg config.Config) string {
+	runtimeDir := strings.TrimSpace(cfg.RuntimeDir)
+	if runtimeDir == "" {
+		return ""
+	}
+	return filepath.Join(runtimeDir, "tmux.sock")
 }

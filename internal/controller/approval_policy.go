@@ -91,6 +91,7 @@ func DangerousModeWarning() string {
 type automaticAction struct {
 	command     string
 	patch       string
+	patchTarget PatchTarget
 	commandRisk bool
 	patchRisk   bool
 }
@@ -108,7 +109,7 @@ func automaticActionFromResponse(session SessionContext, response AgentResponse)
 			switch response.Approval.Kind {
 			case ApprovalPatch:
 				if patch != "" {
-					return automaticAction{patch: patch, patchRisk: true}
+					return automaticAction{patch: patch, patchTarget: response.Approval.PatchTarget, patchRisk: true}
 				}
 			case ApprovalCommand:
 				if command != "" {
@@ -128,7 +129,7 @@ func automaticActionFromResponse(session SessionContext, response AgentResponse)
 	switch response.Proposal.Kind {
 	case ProposalPatch:
 		if mode == ApprovalModeDanger && strings.TrimSpace(response.Proposal.Patch) != "" {
-			return automaticAction{patch: strings.TrimSpace(response.Proposal.Patch)}
+			return automaticAction{patch: strings.TrimSpace(response.Proposal.Patch), patchTarget: response.Proposal.PatchTarget}
 		}
 	case ProposalCommand:
 		command := strings.TrimSpace(response.Proposal.Command)

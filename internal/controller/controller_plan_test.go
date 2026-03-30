@@ -165,6 +165,26 @@ func TestLocalControllerContinueAfterCommandRequiresNextActionAfterInspectionFai
 	}
 }
 
+func TestBuildAutoContinuePromptForcesPatchRebaseAfterInspection(t *testing.T) {
+	task := TaskContext{
+		LastCommandResult: &CommandResultSummary{
+			Command: "nl -ba /home/openclaw/foo.txt | sed -n '1,20p'",
+			State:   CommandExecutionCompleted,
+			Summary: "5  alpha\n6  INSERT BELOW HERE\n7  omega",
+		},
+		LastPatchApplyResult: &PatchApplySummary{
+			Applied: false,
+			Target:  PatchTargetRemoteShell,
+			Error:   "apply foo.txt: conflict: fragment line does not match src line",
+		},
+	}
+
+	prompt := buildAutoContinuePrompt(task)
+	if !strings.Contains(prompt, autoContinuePromptPatchRebaseSuffix) {
+		t.Fatalf("expected patch rebase guidance, got %q", prompt)
+	}
+}
+
 func TestLocalControllerContinueAfterCommandAdvancesActivePlan(t *testing.T) {
 	agent := &stubAgent{
 		response: AgentResponse{

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -13,12 +14,251 @@ import (
 
 func (c *LocalController) SubmitProposedShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error) {
 	logging.Trace("controller.submit_proposed_shell_command", "command", command)
+	if handled, events, err := c.handleRemoteLocalPathProposal(ctx, command); handled {
+		return events, err
+	}
+	if handled, events, err := c.handleRemotePatchableProposal(ctx, command); handled {
+		return events, err
+	}
 	return c.submitShellCommand(ctx, command, CommandOriginAgentProposal)
 }
 
 func (c *LocalController) SubmitShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error) {
 	logging.Trace("controller.submit_shell_command", "command", command)
 	return c.submitShellCommand(ctx, command, CommandOriginUserShell)
+}
+
+func (c *LocalController) handleRemotePatchableProposal(ctx context.Context, command string) (bool, []TranscriptEvent, error) {
+	command = strings.TrimSpace(command)
+	if command == "" || !isPatchReplaceableRemoteMutation(command) {
+		return false, nil, nil
+	}
+
+	trackedShell := c.syncTrackedShellTarget(ctx)
+	c.refreshUserShellContextForTarget(ctx, trackedShell, false)
+
+	c.mu.Lock()
+	currentShell := c.session.CurrentShell
+	agentAvailable := c.agent != nil
+	c.mu.Unlock()
+
+	if currentShell == nil || !currentShell.Remote {
+		return false, nil, nil
+	}
+
+	logging.Trace("controller.remote_edit_guard.blocked", "command", command, "prompt", currentShell.PromptLine())
+	if agentAvailable {
+		events, err := c.submitAgentTurn(ctx, "", buildRemotePatchRepairPrompt(command, currentShell), nil, false)
+		if err != nil {
+			return true, events, err
+		}
+		if latest := latestProposalFromEvents(events); latest != nil && latest.Kind == ProposalPatch && strings.TrimSpace(latest.Patch) != "" && latest.PatchTarget == PatchTargetRemoteShell {
+			return true, events, nil
+		}
+	}
+
+	return true, c.enqueueRemoteMutationApproval(command, currentShell), nil
+}
+
+func (c *LocalController) handleRemoteLocalPathProposal(ctx context.Context, command string) (bool, []TranscriptEvent, error) {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return false, nil, nil
+	}
+
+	trackedShell := c.syncTrackedShellTarget(ctx)
+	c.refreshUserShellContextForTarget(ctx, trackedShell, false)
+
+	c.mu.Lock()
+	currentShell := c.session.CurrentShell
+	localWorkspaceRoot := c.session.LocalWorkspaceRoot
+	agentAvailable := c.agent != nil
+	c.mu.Unlock()
+
+	if currentShell == nil || !currentShell.Remote {
+		return false, nil, nil
+	}
+
+	localPaths := localOnlyPathsForRemoteGuard(localWorkspaceRoot)
+	if len(localPaths) == 0 || !referencesAnyLocalOnlyPath(command, localPaths) {
+		return false, nil, nil
+	}
+
+	logging.Trace("controller.remote_local_path_guard.blocked", "command", command, "prompt", currentShell.PromptLine(), "local_paths", strings.Join(localPaths, ","))
+	if agentAvailable {
+		events, err := c.submitAgentTurn(ctx, "", buildRemoteCommandPathRepairPrompt(command, currentShell, localPaths), nil, false)
+		if err != nil {
+			return true, events, err
+		}
+		if latest := latestProposalFromEvents(events); latest != nil && latest.Kind == ProposalCommand && !referencesAnyLocalOnlyPath(latest.Command, localPaths) {
+			return true, events, nil
+		}
+	}
+
+	return true, c.blockRemoteLocalPathProposal(command, currentShell, localPaths), nil
+}
+
+func buildRemotePatchRepairPrompt(command string, prompt *shell.PromptContext) string {
+	location := "the active remote shell target"
+	if prompt != nil && strings.TrimSpace(prompt.PromptLine()) != "" {
+		location += " (" + strings.TrimSpace(prompt.PromptLine()) + ")"
+	}
+	cwd := ""
+	if prompt != nil {
+		cwd = normalizeWorkingDirectory(prompt.Directory)
+	}
+	lines := []string{
+		"The previous proposal was a raw remote shell file-edit command.",
+		"Do not emit another shell mutation command.",
+		"Revise it into exactly one proposal_kind:\"patch\" with proposal_patch_target:\"tracked_remote_shell\".",
+		"The patch must target " + location + ".",
+	}
+	if cwd != "" {
+		lines = append(lines, "Remote patch paths must be relative to this remote cwd: "+cwd)
+	}
+	lines = append(lines, "Original command: "+command)
+	return strings.Join(lines, "\n")
+}
+
+func buildRemoteCommandPathRepairPrompt(command string, prompt *shell.PromptContext, localPaths []string) string {
+	location := "the active remote shell target"
+	if prompt != nil && strings.TrimSpace(prompt.PromptLine()) != "" {
+		location += " (" + strings.TrimSpace(prompt.PromptLine()) + ")"
+	}
+	cwd := ""
+	if prompt != nil {
+		cwd = normalizeWorkingDirectory(prompt.Directory)
+	}
+	lines := []string{
+		"The previous proposal was a remote-shell command that referenced local machine paths.",
+		"Do not emit another command that references local workspace or local home paths.",
+		"Revise it into exactly one safe read-only proposal_kind:\"command\" for the active remote shell target.",
+		"The command must target " + location + ".",
+	}
+	if cwd != "" {
+		lines = append(lines, "Prefer paths relative to this remote cwd or remote home: "+cwd)
+	}
+	if len(localPaths) > 0 {
+		lines = append(lines, "Do not reference these local-only paths: "+strings.Join(localPaths, ", "))
+	}
+	lines = append(lines, "Original command: "+command)
+	return strings.Join(lines, "\n")
+}
+
+func latestProposalFromEvents(events []TranscriptEvent) *ProposalPayload {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Kind != EventProposal {
+			continue
+		}
+		payload, ok := events[i].Payload.(ProposalPayload)
+		if !ok {
+			continue
+		}
+		copyPayload := payload
+		return &copyPayload
+	}
+	return nil
+}
+
+func localOnlyPathsForRemoteGuard(localWorkspaceRoot string) []string {
+	seen := map[string]struct{}{}
+	paths := []string{}
+	appendPath := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || value == "/" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		paths = append(paths, value)
+	}
+	appendPath(localWorkspaceRoot)
+	if home, err := os.UserHomeDir(); err == nil {
+		appendPath(home)
+	}
+	return paths
+}
+
+func referencesAnyLocalOnlyPath(command string, localPaths []string) bool {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return false
+	}
+	for _, candidate := range localPaths {
+		if candidate != "" && strings.Contains(command, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *LocalController) enqueueRemoteMutationApproval(command string, prompt *shell.PromptContext) []TranscriptEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	title := "Approve remote file-edit shell command"
+	summary := "Remote file edits should prefer native patches. Approve this shell mutation command only if patching is not viable."
+	if prompt != nil && strings.TrimSpace(prompt.PromptLine()) != "" {
+		summary = "Remote file edits should prefer native patches on " + strings.TrimSpace(prompt.PromptLine()) + ". Approve this shell mutation command only if patching is not viable."
+	}
+	approval := ApprovalRequest{
+		ID:      fmt.Sprintf("approval-%d", c.counter.Add(1)),
+		Kind:    ApprovalCommand,
+		Title:   title,
+		Summary: summary,
+		Command: command,
+		Risk:    RiskMedium,
+	}
+	c.task.PendingApproval = &approval
+	event := c.newEvent(EventApproval, approval)
+	notice := c.newEvent(EventSystemNotice, TextPayload{Text: "Blocked a patch-replaceable remote edit command and converted it into an approval. Use Ctrl+O to inspect the original command."})
+	c.appendEvents(event, notice)
+	return []TranscriptEvent{event, notice}
+}
+
+func (c *LocalController) blockRemoteLocalPathProposal(command string, prompt *shell.PromptContext, localPaths []string) []TranscriptEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	text := "Blocked a remote-shell proposal that referenced local machine paths. Ask the agent to revise it for the active remote shell."
+	if prompt != nil && strings.TrimSpace(prompt.PromptLine()) != "" {
+		text = "Blocked a remote-shell proposal that referenced local machine paths on " + strings.TrimSpace(prompt.PromptLine()) + ". Ask the agent to revise it for the active remote shell."
+	}
+	if len(localPaths) > 0 {
+		text += " Local-only paths: " + strings.Join(localPaths, ", ")
+	}
+	event := c.newEvent(EventError, TextPayload{Text: text})
+	c.appendEvents(event)
+	return []TranscriptEvent{event}
+}
+
+func isPatchReplaceableRemoteMutation(command string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(command))
+	if normalized == "" {
+		return false
+	}
+	patterns := []string{
+		"sed -i",
+		"sed --in-place",
+		"perl -pi",
+		"perl -0pi",
+		"tee ",
+		"cat >",
+		"cat >>",
+		" ed ",
+		" ex ",
+	}
+	for _, pattern := range patterns {
+		if strings.Contains(normalized, pattern) {
+			return true
+		}
+	}
+	if strings.Contains(normalized, " > ") || strings.Contains(normalized, " >> ") || strings.Contains(normalized, " 1>") {
+		return true
+	}
+	return false
 }
 
 func (c *LocalController) prepareCommandExecutionTarget(ctx context.Context, trackedShell TrackedShellTarget, origin CommandOrigin) (TrackedShellTarget, func(context.Context) error, error) {
@@ -399,6 +639,7 @@ func (c *LocalController) submitLostExecutionRecovery(ctx context.Context, execu
 			Command:     response.Proposal.Command,
 			Keys:        response.Proposal.Keys,
 			Patch:       response.Proposal.Patch,
+			PatchTarget: response.Proposal.PatchTarget,
 			Description: response.Proposal.Description,
 		}))
 	}
@@ -468,7 +709,7 @@ func (c *LocalController) DecideApproval(ctx context.Context, approvalID string,
 				return []TranscriptEvent{event}, nil
 			}
 			c.mu.Unlock()
-			return c.applyPatch(ctx, patch)
+			return c.applyPatch(ctx, patch, pending.PatchTarget)
 		}
 		if strings.TrimSpace(command) == "" {
 			event := c.newEvent(EventError, TextPayload{Text: "approval does not contain an executable command"})

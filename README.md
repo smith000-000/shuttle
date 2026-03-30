@@ -22,8 +22,12 @@ What is working now:
 - bounded agent check-ins for interactive/fullscreen waits, with explicit `Ctrl+G` resume after Shuttle pauses automatic retries
 - partial semantic shell integration for local shells
 - serial agentic command loops with one proposal at a time and auto-continue after results
+- first-class shell-context inspection support so the model can refresh authoritative user@host/cwd state instead of guessing from stale prompt text
 - native unified-diff patch proposals with explicit apply/reject/ask-agent flow
+- controller-synthesized patch proposals for common single-file text edits, so the model can express insert/replace intent without hand-authoring unified hunks
+- target-aware patch application for both the local workspace and the active tracked remote shell
 - local file creation and edits through native patch application
+- remote tracked-shell file edits through the same patch UX, preferring native remote patches over ad hoc shell rewrites and using staged remote payloads with transport selection `git`, then `python3`, then verified shell fallback
 - foreground attach and handoff reconciliation for manually started shell commands
 - real OpenAI Responses API path with API-key auth
 - provider settings UI with:
@@ -48,12 +52,13 @@ What is working now:
 
 What is still in progress:
 - broader semantic shell integration (`OSC 133` / `OSC 7`) consumption and subshell/bootstrap support
+- deeper shell-transition verification for more interactive and nested remote cases beyond the current prompt-plus-probe state machine
 - provider onboarding polish and provider-auth validation
 - provider registry/plugin architecture instead of static first-class wiring
 - any richer shell bootstrap/helper mode beyond those standards
 - transcript/UI cleanup and continued TUI/controller decomposition
 - multi-card or parallel execution UI
-- release packaging
+- package-manager distribution and other post-archive release UX
 
 ## Requirements
 
@@ -282,6 +287,7 @@ Core controls:
 - in `KEYS>` mode, `Enter` sends the current buffer exactly as typed, `Ctrl+Y` sends the current buffer plus `Enter`, and `Ctrl+J` inserts a literal `Enter` into the key sequence
 - `KEYS>` also accepts explicit tmux control-key tokens such as `<Ctrl+C>` or `<Esc>` for key events the TUI cannot capture directly
 - `Ctrl+O`: inspect the selected transcript entry
+- while the `Ctrl+O` detail view is open, typing incrementally filters visible detail lines; `Backspace` edits the filter and `Esc` clears it before closing the view
 - `F10`: open settings
 
 Slash commands in agent mode:
@@ -310,11 +316,19 @@ Transcript result notes:
 - successful silent commands collapse to a compact result line instead of showing `exit=0` and `(no output)`
 - silent directory-changing commands can show the resulting cwd
 - result tags are exit-aware: nonzero exits no longer render as green success entries
+- completed shell commands now collapse into a single result block that shows the command header plus inline output, instead of keeping a separate expandable preview row
+- `Ctrl+O` still opens the full detail view for the selected transcript entry, and clicking a transcript icon does the same
+- the detail view supports incremental typed filtering so large command results and plans can be narrowed without leaving the keyboard
+- very long result-command headers stay single-line by default and can be expanded inline by clicking the command text
+- model-reply metadata is kept in the selected entry's `Ctrl+O` detail view instead of as a separate visible transcript row
+- the initial workspace-ready system notice is retained in trace data but hidden from the default transcript view
+- when the model needs authoritative shell identity or location, Shuttle can satisfy a native context inspection step internally instead of guessing from stale local/remote path context
 
 Status line notes:
-- the lower-right status can show the current approvals mode, especially when `auto` is active
-- the lower-right model label now includes an approximate live context-usage estimate
-- when Shuttle knows the selected model's context window, the estimate is shown against that limit
+- the lower-right status uses compact inline segments separated with `*`, instead of filled badge backgrounds
+- approvals render as lowercase `confirm`, `auto`, or `dangerous`
+- the active model renders as `provider / model`, and context usage shows as a color-coded ASCII fill bar with current usage against the known window when available
+- active work renders as a braille spinner plus a fixed-width elapsed-seconds label until it grows into minute-scale durations
 
 The TUI is intentionally keyboard-first. Current behavior is still evolving, so see [ui-scratchpad.md](ui-scratchpad.md) for active UX backlog notes.
 

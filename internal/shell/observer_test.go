@@ -64,6 +64,29 @@ func TestSanitizeCapturedBodyPreservesTrackedCommandScriptErrors(t *testing.T) {
 	}
 }
 
+func TestSanitizeCapturedBodyPreservesRemotePatchPayloadMarkers(t *testing.T) {
+	body := strings.Join([]string{
+		"__SHUTTLE_B__:cmd-1",
+		"__SHUTTLE_REMOTE_READ__ exists 420",
+		"__SHUTTLE_REMOTE_DATA_BEGIN__",
+		"aGVsbG8K",
+		"__SHUTTLE_REMOTE_DATA_END__",
+		"__SHUTTLE_E__:cmd-1:0",
+	}, "\n")
+
+	got := sanitizeCapturedBody(body)
+	want := strings.Join([]string{
+		"__SHUTTLE_REMOTE_READ__ exists 420",
+		"__SHUTTLE_REMOTE_DATA_BEGIN__",
+		"aGVsbG8K",
+		"__SHUTTLE_REMOTE_DATA_END__",
+	}, "\n")
+
+	if got != want {
+		t.Fatalf("sanitizeCapturedBody() = %q, want %q", got, want)
+	}
+}
+
 func TestStripEchoedSingleLineCommand(t *testing.T) {
 	body := "localuser@devbox % ls\nfile-a\nfile-b"
 
@@ -386,6 +409,70 @@ func TestAttachForegroundCommandQuietProcessDoesNotReturnPaneScrollback(t *testi
 	}
 }
 
+func TestAttachForegroundCommandPromptInferenceFocusesOnLatestPromptWindow(t *testing.T) {
+	client := &fakeSemanticPaneClient{
+		pane: tmux.Pane{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/29"},
+		panes: []tmux.Pane{
+			{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/29"},
+			{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/29"},
+			{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/29"},
+		},
+		captures: []string{
+			"root@web01:/srv/app# cat file.txt\nalpha\nroot@web01:/srv/app# rm file.txt",
+			"root@web01:/srv/app# cat file.txt\nalpha\nroot@web01:/srv/app# rm file.txt",
+			"root@web01:/srv/app# cat file.txt\nalpha\nroot@web01:/srv/app# rm file.txt\nroot@web01:/srv/app#",
+		},
+	}
+	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
+
+	monitor, err := observer.AttachForegroundCommand(context.Background(), "%0")
+	if err != nil {
+		t.Fatalf("AttachForegroundCommand() error = %v", err)
+	}
+	if monitor == nil {
+		t.Fatal("expected active foreground monitor")
+	}
+	result, err := monitor.Wait()
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if result.Captured != "" {
+		t.Fatalf("expected quiet prompt-inference command not to replay prior output, got %q", result.Captured)
+	}
+}
+
+func TestAttachForegroundCommandPromptInferencePreservesCurrentCommandOutputOnly(t *testing.T) {
+	client := &fakeSemanticPaneClient{
+		pane: tmux.Pane{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/30"},
+		panes: []tmux.Pane{
+			{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/30"},
+			{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/30"},
+			{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/30"},
+		},
+		captures: []string{
+			"root@web01:/srv/app# cat old.txt\nold\nroot@web01:/srv/app# cat new.txt",
+			"root@web01:/srv/app# cat old.txt\nold\nroot@web01:/srv/app# cat new.txt\nnew",
+			"root@web01:/srv/app# cat old.txt\nold\nroot@web01:/srv/app# cat new.txt\nnew\nroot@web01:/srv/app#",
+		},
+	}
+	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
+
+	monitor, err := observer.AttachForegroundCommand(context.Background(), "%0")
+	if err != nil {
+		t.Fatalf("AttachForegroundCommand() error = %v", err)
+	}
+	if monitor == nil {
+		t.Fatal("expected active foreground monitor")
+	}
+	result, err := monitor.Wait()
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if result.Captured != "new" {
+		t.Fatalf("expected prompt-inference command to keep only current output, got %q", result.Captured)
+	}
+}
+
 func TestCaptureShellContextIgnoresHistoricalPromptWhileForegroundCommandActive(t *testing.T) {
 	client := &fakeSemanticPaneClient{
 		pane:    tmux.Pane{ID: "%0", CurrentCommand: "sleep", TTY: "/dev/pts/26"},
@@ -682,6 +769,87 @@ func TestParseShellContextProbeOutput(t *testing.T) {
 	if !context.Root {
 		t.Fatalf("expected root prompt context %#v", context)
 	}
+	if got := context.PromptLine(); got != "root@web01 /srv/app #" {
+		t.Fatalf("expected prompt line to be rebuilt from probe context, got %q", got)
+	}
+}
+
+func TestPromptReturnedAfterTransitionIgnoresPureCommandEcho(t *testing.T) {
+	before := "localuser@workstation ~/repo %"
+	baseline := PromptContext{
+		User:         "localuser",
+		Host:         "workstation",
+		Directory:    "~/repo",
+		PromptSymbol: "%",
+		RawLine:      before,
+	}
+	candidate := baseline
+	captured := before + "\nssh openclaw@openclaw"
+
+	if promptReturnedAfterTransition(before, baseline, candidate, captured, "") {
+		t.Fatal("expected pure echoed transition command not to count as prompt return")
+	}
+}
+
+func TestPromptReturnedAfterTransitionAcceptsPromptChange(t *testing.T) {
+	before := "localuser@workstation ~/repo %"
+	baseline := PromptContext{
+		User:         "localuser",
+		Host:         "workstation",
+		Directory:    "~/repo",
+		PromptSymbol: "%",
+		RawLine:      before,
+	}
+	candidate := PromptContext{
+		User:         "openclaw",
+		Host:         "openclaw",
+		Directory:    "~",
+		PromptSymbol: "$",
+		Remote:       true,
+		RawLine:      "openclaw@openclaw ~ $",
+	}
+
+	if !promptReturnedAfterTransition(before, baseline, candidate, before+"\nLast login\nopenclaw@openclaw ~ $", "") {
+		t.Fatal("expected changed prompt to count as settled transition")
+	}
+}
+
+func TestPromptReturnedAfterTransitionIgnoresAwaitingInputTail(t *testing.T) {
+	before := "openclaw@openclaw ~ $"
+	baseline := PromptContext{
+		User:         "openclaw",
+		Host:         "openclaw",
+		Directory:    "~",
+		PromptSymbol: "$",
+		Remote:       true,
+		RawLine:      before,
+	}
+	candidate := baseline
+	captured := before + "\nssh openclaw@openclaw\nopenclaw@openclaw's password:"
+	delta := "openclaw@openclaw's password:"
+
+	if promptReturnedAfterTransition(before, baseline, candidate, captured, delta) {
+		t.Fatal("expected password prompt tail not to count as settled transition")
+	}
+}
+
+func TestPromptReturnedAfterTransitionAcceptsSamePromptWithNonInteractiveOutput(t *testing.T) {
+	before := "openclaw@openclaw ~ $"
+	baseline := PromptContext{
+		User:         "openclaw",
+		Host:         "openclaw",
+		Directory:    "~",
+		PromptSymbol: "$",
+		Remote:       true,
+		RawLine:      before,
+	}
+	candidate := baseline
+	captured := before + "\nLast login: Fri Mar 27 23:33:33 2026 from 192.168.0.80\nopenclaw@openclaw ~ $"
+	delta := "Last login: Fri Mar 27 23:33:33 2026 from 192.168.0.80"
+
+	if !promptReturnedAfterTransition(before, baseline, candidate, captured, delta) {
+		t.Fatal("expected same prompt plus non-interactive login output to count as settled transition")
+	}
 }
 
 func TestTrackedCommandLikelyStarted(t *testing.T) {
@@ -715,5 +883,35 @@ func TestInferTrackedCommandResultFromEndMarker(t *testing.T) {
 	}
 	if result.Body != "alpha\nbeta\nlocaluser@devbox %" {
 		t.Fatalf("unexpected inferred body %q", result.Body)
+	}
+}
+
+func TestInferTrackedCommandResultFromEndMarkerIgnoresWrappedMarkerLookalike(t *testing.T) {
+	markers := protocol.Markers{
+		CommandID: "cmd-1",
+		BeginLine: "__SHUTTLE_B__:cmd-1",
+		EndPrefix: "__SHUTTLE_E__:cmd-1:",
+	}
+
+	before := "openclaw@openclaw ~ $"
+	after := strings.Join([]string{
+		"openclaw@openclaw ~ $ printf '%s%s\\n' '__SHUTTLE_E__:cmd-1:' \"$__shuttle_status\"",
+		"chunk appended",
+		"__SHUTTLE_E__:cmd-1:0",
+		"openclaw@openclaw ~ $",
+	}, "\n")
+
+	result, complete, err := inferTrackedCommandResultFromEndMarker(after, before, "printf '%s' 'abc' >> '/tmp/file'", markers)
+	if err != nil {
+		t.Fatalf("inferTrackedCommandResultFromEndMarker() error = %v", err)
+	}
+	if !complete {
+		t.Fatal("expected inferred result to complete")
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", result.ExitCode)
+	}
+	if !strings.Contains(result.Body, "chunk appended") {
+		t.Fatalf("expected chunk append output in body, got %q", result.Body)
 	}
 }

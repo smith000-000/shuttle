@@ -376,7 +376,7 @@ func (m *Model) maybeExecutionCheckInCmd(now time.Time) tea.Cmd {
 	m.checkInInFlight = true
 	executionID := m.activeExecution.ID
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), agentTurnTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), m.currentAgentTurnTimeout())
 		defer cancel()
 
 		events, err := m.ctrl.CheckActiveExecution(ctx)
@@ -783,7 +783,8 @@ func latestProposal(events []controller.TranscriptEvent) *controller.ProposalPay
 func isActionableProposalPayload(payload controller.ProposalPayload) bool {
 	return strings.TrimSpace(payload.Command) != "" ||
 		payload.Keys != "" ||
-		strings.TrimSpace(payload.Patch) != ""
+		strings.TrimSpace(payload.Patch) != "" ||
+		payload.Kind == controller.ProposalInspectContext
 }
 
 func latestModelInfo(events []controller.TranscriptEvent) *controller.AgentModelInfo {
@@ -1095,6 +1096,108 @@ func (m *Model) consumePendingLocalEcho(entries []Entry) []Entry {
 		return entries[1:]
 	}
 	return entries
+}
+
+func (m *Model) collapseCommandEntries(entries []Entry) []Entry {
+	if len(entries) == 0 {
+		return entries
+	}
+
+	collapsed := make([]Entry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Title == "result" && strings.TrimSpace(entry.Command) != "" {
+			command := strings.TrimSpace(entry.Command)
+			if len(collapsed) > 0 {
+				last := collapsed[len(collapsed)-1]
+				if last.Title == "shell" && strings.TrimSpace(last.Body) == command {
+					collapsed = collapsed[:len(collapsed)-1]
+				}
+			} else if len(m.entries) > 0 {
+				lastIndex := len(m.entries) - 1
+				last := m.entries[lastIndex]
+				if last.Title == "shell" && strings.TrimSpace(last.Body) == command {
+					m.entries = m.entries[:lastIndex]
+				}
+			}
+		}
+		collapsed = append(collapsed, entry)
+	}
+
+	return collapsed
+}
+
+func (m *Model) withCommandResultFallback(entries []Entry) []Entry {
+	if len(entries) == 0 {
+		return entries
+	}
+
+	fallback := strings.TrimSpace(m.liveShellTail)
+	if fallback == "" && m.activeExecution != nil {
+		fallback = strings.TrimSpace(m.activeExecution.LatestOutputTail)
+	}
+	if fallback == "" {
+		return entries
+	}
+
+	enriched := append([]Entry(nil), entries...)
+	for index := range enriched {
+		entry := &enriched[index]
+		if entry.Title != "result" || strings.TrimSpace(entry.Command) == "" || strings.TrimSpace(entry.Body) != "" {
+			continue
+		}
+		entry.Body = fallback
+		break
+	}
+
+	return enriched
+}
+
+func (m *Model) attachLatestModelInfo(events []controller.TranscriptEvent, entries []Entry) []Entry {
+	info := latestModelInfo(events)
+	if info == nil {
+		return entries
+	}
+	detail := formatModelInfoDetail(*info)
+	if attachModelInfoDetail(entries, detail) {
+		return entries
+	}
+	if attachModelInfoDetail(m.entries, detail) {
+		return entries
+	}
+	return append(entries, Entry{
+		Title:  "system",
+		Body:   detail,
+		Detail: detail,
+		Hidden: true,
+	})
+}
+
+func attachModelInfoDetail(entries []Entry, detail string) bool {
+	target := -1
+	for index := len(entries) - 1; index >= 0; index-- {
+		if entries[index].Hidden {
+			continue
+		}
+		if entries[index].Title == "system" || entries[index].Title == "error" {
+			continue
+		}
+		target = index
+		break
+	}
+	if target == -1 {
+		for index := len(entries) - 1; index >= 0; index-- {
+			if entries[index].Hidden {
+				continue
+			}
+			target = index
+			break
+		}
+	}
+	if target == -1 {
+		return false
+	}
+	appendDetailSection(&entries[target], detail)
+	return true
 }
 
 func (m *Model) applySettingsModelFilter() {

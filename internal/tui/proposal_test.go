@@ -354,6 +354,46 @@ func TestPrimaryActionRunsEnterOnlyKeysProposal(t *testing.T) {
 	}
 }
 
+func TestPrimaryActionRunsInspectContextProposal(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.pendingProposal = &controller.ProposalPayload{
+		Kind:        controller.ProposalInspectContext,
+		Description: "Refresh the active shell identity and current working directory.",
+	}
+
+	updated, cmd := model.primaryAction()
+	next := updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected inspect_context proposal primary action to run")
+	}
+	msg := controllerEventsFromCmd(t, cmd)
+	updated, cmd = next.Update(msg)
+	next = updated.(Model)
+
+	if ctrl.inspectContextCalls != 1 {
+		t.Fatalf("expected one inspect_context call, got %d", ctrl.inspectContextCalls)
+	}
+	if next.pendingProposal != nil {
+		t.Fatalf("expected pending proposal to clear after inspect_context, got %#v", next.pendingProposal)
+	}
+	if ctrl.continueCalls != 0 {
+		t.Fatalf("expected auto-continue to not run before processing follow-up cmd, got %d", ctrl.continueCalls)
+	}
+	if cmd == nil {
+		t.Fatal("expected inspect_context result to trigger follow-up continuation")
+	}
+	msg = controllerEventsFromCmd(t, cmd)
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+	if ctrl.continueCalls != 1 {
+		t.Fatalf("expected inspect_context to flow into ContinueAfterCommand, got %d", ctrl.continueCalls)
+	}
+	if next.busy {
+		t.Fatal("expected inspect_context continuation to settle cleanly")
+	}
+}
+
 func TestProposalCanBeRefined(t *testing.T) {
 	ctrl := &fakeController{
 		agentEvents: []controller.TranscriptEvent{
@@ -593,8 +633,16 @@ func TestAgentRunResultStaysCollapsedInTranscript(t *testing.T) {
 		t.Fatalf("expected result entry, got %s", last.Title)
 	}
 
-	if !strings.Contains(last.Body, "Ctrl+O to inspect") {
-		t.Fatalf("expected agent-triggered result to stay collapsed, got %q", last.Body)
+	if last.Command != "ls -lah" {
+		t.Fatalf("expected command metadata on combined result entry, got %#v", last)
+	}
+	if !strings.Contains(last.Body, "line 9") {
+		t.Fatalf("expected inline output on result entry, got %q", last.Body)
+	}
+	for _, entry := range model.entries {
+		if entry.Title == "shell" && entry.Body == "ls -lah" {
+			t.Fatalf("expected shell start row to collapse into the final result entry, got %#v", model.entries)
+		}
 	}
 }
 

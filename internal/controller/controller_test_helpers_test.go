@@ -34,11 +34,15 @@ type stubRunner struct {
 	commands       []string
 	paneIDs        []string
 	resolvedPaneID string
+	run            func(context.Context, string, string, time.Duration) (shell.TrackedExecution, error)
 }
 
-func (s *stubRunner) RunTrackedCommand(_ context.Context, paneID string, command string, _ time.Duration) (shell.TrackedExecution, error) {
+func (s *stubRunner) RunTrackedCommand(ctx context.Context, paneID string, command string, timeout time.Duration) (shell.TrackedExecution, error) {
 	s.commands = append(s.commands, command)
 	s.paneIDs = append(s.paneIDs, paneID)
+	if s.run != nil {
+		return s.run(ctx, paneID, command, timeout)
+	}
 	if s.result.Command == "" {
 		s.result.Command = command
 	}

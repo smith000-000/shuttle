@@ -10,6 +10,21 @@ import (
 	"aiterm/internal/shell"
 )
 
+type sequenceAgent struct {
+	responses  []AgentResponse
+	lastInputs []AgentInput
+}
+
+func (s *sequenceAgent) Respond(_ context.Context, input AgentInput) (AgentResponse, error) {
+	s.lastInputs = append(s.lastInputs, input)
+	if len(s.responses) == 0 {
+		return AgentResponse{}, nil
+	}
+	response := s.responses[0]
+	s.responses = s.responses[1:]
+	return response, nil
+}
+
 func TestLocalControllerSubmitAgentPrompt(t *testing.T) {
 	agent := &stubAgent{
 		response: AgentResponse{
@@ -159,6 +174,133 @@ func TestLocalControllerSubmitAgentPromptIgnoresAnswerProposal(t *testing.T) {
 	}
 }
 
+func TestLocalControllerInspectProposedContextReturnsAuthoritativeShellState(t *testing.T) {
+	controller := New(nil, nil, &stubContextReader{
+		context: shell.PromptContext{
+			User:         "openclaw",
+			Host:         "openclaw",
+			Directory:    "/home/openclaw",
+			System:       "Linux",
+			GitBranch:    "main",
+			PromptSymbol: "$",
+			RawLine:      "openclaw@openclaw ~ $",
+			Remote:       true,
+		},
+	}, SessionContext{
+		TrackedShell:       TrackedShellTarget{PaneID: "%0"},
+		WorkingDirectory:   "/home/openclaw",
+		LocalWorkspaceRoot: "/workspace/project",
+		RemoteCapabilities: &RemoteCapabilitySummary{
+			Identity:                "openclaw@openclaw",
+			LastSuccessfulTransport: PatchTransportPython,
+			Git:                     true,
+			Python3:                 true,
+			Base64:                  true,
+			Mktemp:                  true,
+		},
+	})
+
+	events, err := controller.InspectProposedContext(context.Background())
+	if err != nil {
+		t.Fatalf("InspectProposedContext() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("expected one command result event, got %#v", events)
+	}
+	if events[0].Kind != EventCommandResult {
+		t.Fatalf("expected command result, got %#v", events[0])
+	}
+	result, ok := events[0].Payload.(CommandResultSummary)
+	if !ok {
+		t.Fatalf("expected command result payload, got %#v", events[0].Payload)
+	}
+	if result.Command != inspectContextCommandLabel {
+		t.Fatalf("unexpected inspect command label %q", result.Command)
+	}
+	if !strings.Contains(result.Summary, "user_host=openclaw@openclaw") ||
+		!strings.Contains(result.Summary, "shell_target=openclaw@openclaw") ||
+		!strings.Contains(result.Summary, "cwd=/home/openclaw") ||
+		!strings.Contains(result.Summary, "remote=true") ||
+		!strings.Contains(result.Summary, "system=Linux") ||
+		!strings.Contains(result.Summary, "git_branch=main") ||
+		!strings.Contains(result.Summary, "local_workspace_root=/workspace/project") ||
+		!strings.Contains(result.Summary, "workspace_relation=outside_local_workspace") ||
+		!strings.Contains(result.Summary, "remote_patch_root=/home/openclaw") ||
+		!strings.Contains(result.Summary, "remote_capabilities=git,python3,base64,mktemp") ||
+		!strings.Contains(result.Summary, "remote_last_patch_transport=python3") ||
+		!strings.Contains(result.Summary, "remote_identity=openclaw@openclaw") {
+		t.Fatalf("unexpected shell identity summary %q", result.Summary)
+	}
+	if controller.task.LastCommandResult == nil || controller.task.LastCommandResult.Command != inspectContextCommandLabel {
+		t.Fatalf("expected task last command result to be updated, got %#v", controller.task.LastCommandResult)
+	}
+}
+
+func TestSubmitAgentPromptHandlesInspectContextInternally(t *testing.T) {
+	agent := &sequenceAgent{
+		responses: []AgentResponse{
+			{
+				Message: "I should refresh shell context first.",
+				Proposal: &Proposal{
+					Kind:        ProposalInspectContext,
+					Description: "Refresh the active shell identity and current working directory.",
+				},
+			},
+			{
+				Message: "I can inspect the file now.",
+				Proposal: &Proposal{
+					Kind:        ProposalCommand,
+					Command:     "sed -n '1,40p' foo.txt",
+					Description: "Read the file before editing it.",
+				},
+			},
+		},
+	}
+	controller := New(agent, nil, &stubContextReader{
+		context: shell.PromptContext{
+			User:         "openclaw",
+			Host:         "openclaw",
+			Directory:    "/home/openclaw",
+			PromptSymbol: "$",
+			RawLine:      "openclaw@openclaw ~ $",
+			Remote:       true,
+		},
+	}, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+
+	events, err := controller.SubmitAgentPrompt(context.Background(), "show me foo.txt")
+	if err != nil {
+		t.Fatalf("SubmitAgentPrompt() error = %v", err)
+	}
+	if len(agent.lastInputs) != 2 {
+		t.Fatalf("expected two agent turns, got %d", len(agent.lastInputs))
+	}
+	if got := agent.lastInputs[1].Task.LastCommandResult; got == nil || got.Command != inspectContextCommandLabel || !strings.Contains(got.Summary, "cwd=/home/openclaw") {
+		t.Fatalf("expected inspected shell context in second turn, got %#v", agent.lastInputs[1].Task.LastCommandResult)
+	}
+	for _, event := range events {
+		if event.Kind == EventProposal {
+			payload, _ := event.Payload.(ProposalPayload)
+			if payload.Kind == ProposalInspectContext {
+				t.Fatalf("did not expect visible inspect_context proposal in events: %#v", events)
+			}
+		}
+		if event.Kind == EventCommandResult {
+			payload, _ := event.Payload.(CommandResultSummary)
+			if payload.Command == inspectContextCommandLabel {
+				t.Fatalf("did not expect visible inspect_context command result in events: %#v", events)
+			}
+		}
+	}
+	last := events[len(events)-1]
+	if last.Kind != EventProposal {
+		t.Fatalf("expected final visible proposal, got %#v", events)
+	}
+	payload, _ := last.Payload.(ProposalPayload)
+	if payload.Kind != ProposalCommand || payload.Command != "sed -n '1,40p' foo.txt" {
+		t.Fatalf("unexpected final proposal %#v", payload)
+	}
+}
+
 func TestNormalizeAgentResponseConvertsInlinePatchToolProposalToPatch(t *testing.T) {
 	response := normalizeAgentResponse(AgentResponse{
 		Proposal: &Proposal{
@@ -240,6 +382,127 @@ func TestLocalControllerSubmitProposalRefinementBuildsAgentPrompt(t *testing.T) 
 	}
 	if events[0].Payload.(TextPayload).Text != "Make it one second." {
 		t.Fatalf("expected visible refinement note, got %#v", events[0].Payload)
+	}
+}
+
+func TestSubmitAgentTurnRepairsInvalidRemotePatchProposalBeforeSurfacing(t *testing.T) {
+	agent := &sequenceAgent{
+		responses: []AgentResponse{
+			{
+				Message: "Initial invalid patch.",
+				Proposal: &Proposal{
+					Kind:        ProposalPatch,
+					PatchTarget: PatchTargetRemoteShell,
+					Patch: strings.Join([]string{
+						"Here is the patch:",
+						"diff --git a/foo.txt b/foo.txt",
+						"--- a/foo.txt",
+						"+++ b/foo.txt",
+						"@@ -1 +1 @@",
+						"-hello",
+						"+hello world",
+					}, "\n"),
+				},
+			},
+			{
+				Message: "Corrected patch.",
+				Proposal: &Proposal{
+					Kind:        ProposalPatch,
+					PatchTarget: PatchTargetRemoteShell,
+					Patch: strings.Join([]string{
+						"diff --git a/foo.txt b/foo.txt",
+						"--- a/foo.txt",
+						"+++ b/foo.txt",
+						"@@ -1 +1 @@",
+						"-hello",
+						"+hello world",
+					}, "\n"),
+				},
+			},
+		},
+	}
+	controller := New(agent, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+
+	events, err := controller.SubmitAgentPrompt(context.Background(), "fix foo.txt remotely")
+	if err != nil {
+		t.Fatalf("SubmitAgentPrompt() error = %v", err)
+	}
+	if len(agent.lastInputs) != 2 {
+		t.Fatalf("expected repair turn, got %d inputs", len(agent.lastInputs))
+	}
+	if !strings.Contains(agent.lastInputs[1].Prompt, "invalid and was intercepted before it became actionable") {
+		t.Fatalf("expected invalid patch repair prompt, got %q", agent.lastInputs[1].Prompt)
+	}
+	last := events[len(events)-1]
+	if last.Kind != EventProposal {
+		t.Fatalf("expected repaired proposal event, got %#v", last)
+	}
+	payload := last.Payload.(ProposalPayload)
+	if payload.Kind != ProposalPatch || !strings.HasPrefix(payload.Patch, "diff --git") {
+		t.Fatalf("expected corrected patch proposal, got %#v", payload)
+	}
+}
+
+func TestSubmitAgentTurnDropsPatchProposalAfterFailedRepair(t *testing.T) {
+	agent := &sequenceAgent{
+		responses: []AgentResponse{
+			{
+				Message: "Initial invalid patch.",
+				Proposal: &Proposal{
+					Kind:        ProposalPatch,
+					PatchTarget: PatchTargetRemoteShell,
+					Patch:       "patch:\ndiff --git a/foo.txt b/foo.txt",
+				},
+			},
+			{
+				Message: "Still invalid.",
+				Proposal: &Proposal{
+					Kind:        ProposalPatch,
+					PatchTarget: PatchTargetRemoteShell,
+					Patch:       "still not a real diff",
+				},
+			},
+		},
+	}
+	controller := New(agent, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+
+	events, err := controller.SubmitAgentPrompt(context.Background(), "fix foo.txt remotely")
+	if err != nil {
+		t.Fatalf("SubmitAgentPrompt() error = %v", err)
+	}
+	for _, event := range events {
+		if event.Kind == EventProposal {
+			t.Fatalf("did not expect actionable invalid patch proposal, got %#v", events)
+		}
+	}
+	last := events[len(events)-1]
+	if last.Kind != EventAgentMessage {
+		t.Fatalf("expected final agent message, got %#v", last)
+	}
+	if !strings.Contains(last.Payload.(TextPayload).Text, invalidPatchProposalNotice) {
+		t.Fatalf("expected invalid patch notice, got %#v", last.Payload)
+	}
+}
+
+func TestBuildInvalidPatchRepairPromptIncludesHunkCountGuidance(t *testing.T) {
+	prompt := buildInvalidPatchRepairPrompt(
+		"proposal",
+		PatchTargetRemoteShell,
+		"diff --git a/foo.txt b/foo.txt\n--- a/foo.txt\n+++ b/foo.txt\n@@ -2,2 +2,1 @@\n keep\n+new line\n keep after",
+		errors.New("parse patch: gitdiff: line 4: fragment header miscounts lines: +0 old, +1 new"),
+	)
+
+	if !strings.Contains(prompt, "Return a corrected JSON response") {
+		t.Fatalf("expected repair prompt preamble, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "If the invalid action was a proposal, return only a patch proposal.") {
+		t.Fatalf("expected proposal-only guidance, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "Valid insertion example:") {
+		t.Fatalf("expected insertion example, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "Patch-specific correction guidance: Recompute the @@ -old_start,old_count +new_start,new_count @@ header") {
+		t.Fatalf("expected hunk-count correction guidance, got %q", prompt)
 	}
 }
 

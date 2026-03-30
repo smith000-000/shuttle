@@ -254,11 +254,29 @@ func summarizeUsagePatchResult(result *PatchApplySummary) string {
 	if result == nil {
 		return ""
 	}
-	return strings.TrimSpace(strings.Join([]string{
-		result.WorkspaceRoot,
-		result.Validation,
-		result.Error,
-	}, "\n"))
+	lines := []string{}
+	if strings.TrimSpace(result.WorkspaceRoot) != "" {
+		lines = append(lines, result.WorkspaceRoot)
+	}
+	if strings.TrimSpace(string(result.Target)) != "" {
+		lines = append(lines, string(result.Target))
+	}
+	if strings.TrimSpace(result.TargetLabel) != "" {
+		lines = append(lines, result.TargetLabel)
+	}
+	if strings.TrimSpace(string(result.Transport)) != "" {
+		lines = append(lines, "transport="+string(result.Transport))
+	}
+	if strings.TrimSpace(result.CapabilitySource) != "" {
+		lines = append(lines, "capability_source="+result.CapabilitySource)
+	}
+	if strings.TrimSpace(result.Validation) != "" {
+		lines = append(lines, result.Validation)
+	}
+	if strings.TrimSpace(result.Error) != "" {
+		lines = append(lines, result.Error)
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
 func summarizeUsagePlan(plan *ActivePlan) string {

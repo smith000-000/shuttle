@@ -143,13 +143,14 @@ func refineApprovalResponse(m *MockAgent, note string, approval controller.Appro
 	return controller.AgentResponse{
 		Message: message,
 		Approval: &controller.ApprovalRequest{
-			ID:      m.nextID("approval"),
-			Kind:    approval.Kind,
-			Title:   title,
-			Summary: summary,
-			Command: approval.Command,
-			Patch:   approval.Patch,
-			Risk:    approval.Risk,
+			ID:          m.nextID("approval"),
+			Kind:        approval.Kind,
+			Title:       title,
+			Summary:     summary,
+			Command:     approval.Command,
+			Patch:       approval.Patch,
+			PatchTarget: approval.PatchTarget,
+			Risk:        approval.Risk,
 		},
 	}
 }

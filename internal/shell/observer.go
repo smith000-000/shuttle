@@ -67,6 +67,18 @@ const (
 	DefaultCommandTimeout           = 10 * time.Second
 	ContextTransitionCommandTimeout = 60 * time.Second
 	trackedCaptureLines             = 2000
+	contextTransitionProbeTimeout   = 2 * time.Second
+)
+
+type contextTransitionState string
+
+const (
+	contextTransitionSubmitted             contextTransitionState = "submitted"
+	contextTransitionAwaitingInteractive   contextTransitionState = "awaiting_interactive_input"
+	contextTransitionCandidatePromptSeen   contextTransitionState = "candidate_prompt_seen"
+	contextTransitionProbeVerifying        contextTransitionState = "probe_verifying"
+	contextTransitionSettled               contextTransitionState = "settled"
+	contextTransitionTimedOut              contextTransitionState = "timed_out"
 )
 
 func NewObserver(client *tmux.Client) *Observer {
@@ -643,16 +655,10 @@ func inferTrackedCommandResultFromEndMarker(captured string, beforeCapture strin
 			continue
 		}
 
-		exitValue := strings.TrimPrefix(line, markers.EndPrefix)
-		if exitValue == "" {
-			return protocol.CommandResult{}, false, nil
+		parsedExitCode, ok := parseTrackedEndMarkerExitCode(line, markers.EndPrefix)
+		if !ok {
+			continue
 		}
-
-		parsedExitCode, err := strconv.Atoi(exitValue)
-		if err != nil {
-			return protocol.CommandResult{}, false, fmt.Errorf("parse end marker exit code from %q: %w", line, err)
-		}
-
 		endIndex = index
 		exitCode = parsedExitCode
 		break
@@ -678,6 +684,18 @@ func sawTrackedCommandStart(captured string, markers protocol.Markers) bool {
 	}
 
 	return false
+}
+
+func parseTrackedEndMarkerExitCode(line string, prefix string) (int, bool) {
+	exitValue := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+	if exitValue == "" {
+		return 0, false
+	}
+	parsedExitCode, err := strconv.Atoi(exitValue)
+	if err != nil {
+		return 0, false
+	}
+	return parsedExitCode, true
 }
 
 func CommandTimeout(command string) time.Duration {
@@ -741,6 +759,9 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID strin
 	}
 
 	deadline := time.Now().Add(effectiveTimeout)
+	transitionState := contextTransitionSubmitted
+	candidateSeen := false
+	candidatePrompt := PromptContext{}
 	promptCapture := beforeCapture
 	promptContext := baselineContext
 	for {
@@ -751,24 +772,63 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID strin
 		}
 
 		candidate, ok := ParsePromptContextFromCapture(captured)
-		if ok && promptReturnedAfterTransition(beforeCapture, baselineContext, candidate, captured) {
-			promptCapture = captured
-			promptContext = candidate
-			logging.Trace(
-				"shell.context_transition.prompt_returned",
-				"pane", paneID,
-				"command", command,
-				"prompt", promptContext.PromptLine(),
-				"capture_preview", logging.Preview(captured, 1200),
-			)
-			break
+		delta := capturePaneDelta(beforeCapture, captured)
+		delta = sanitizeCapturedBody(delta)
+		delta = stripEchoedCommand(delta, command)
+		delta = stripTrailingPromptLine(delta, candidate)
+		delta = strings.TrimSpace(delta)
+
+		if TailSuggestsAwaitingInput(delta) {
+			transitionState = contextTransitionAwaitingInteractive
+			candidateSeen = false
+		} else if ok && promptReturnedAfterTransition(beforeCapture, baselineContext, candidate, captured, delta) {
+			transitionState = contextTransitionCandidatePromptSeen
+			if !candidateSeen || !promptContextsEquivalent(candidatePrompt, candidate) {
+				candidateSeen = true
+				candidatePrompt = candidate
+			} else {
+				verifyCapture, verifyErr := o.capturePane(ctx, paneID, -200)
+				if verifyErr != nil {
+					logging.TraceError("shell.context_transition.capture_verify_error", verifyErr, "pane", paneID, "command", command)
+					return TrackedExecution{}, fmt.Errorf("capture pane while verifying context transition: %w", verifyErr)
+				}
+				verifyCandidate, verifyOK := ParsePromptContextFromCapture(verifyCapture)
+				verifyDelta := sanitizeCapturedBody(capturePaneDelta(beforeCapture, verifyCapture))
+				verifyDelta = stripEchoedCommand(verifyDelta, command)
+				verifyDelta = stripTrailingPromptLine(verifyDelta, verifyCandidate)
+				verifyDelta = strings.TrimSpace(verifyDelta)
+
+				switch {
+				case TailSuggestsAwaitingInput(verifyDelta):
+					transitionState = contextTransitionAwaitingInteractive
+					candidateSeen = false
+				case verifyOK && promptContextsEquivalent(candidatePrompt, verifyCandidate):
+					promptCapture = verifyCapture
+					promptContext = verifyCandidate
+					transitionState = contextTransitionProbeVerifying
+					logging.Trace(
+						"shell.context_transition.prompt_returned",
+						"pane", paneID,
+						"command", command,
+						"prompt", promptContext.PromptLine(),
+						"capture_preview", logging.Preview(verifyCapture, 1200),
+					)
+					goto probe
+				case verifyOK && promptReturnedAfterTransition(beforeCapture, baselineContext, verifyCandidate, verifyCapture, verifyDelta):
+					candidatePrompt = verifyCandidate
+				default:
+					candidateSeen = false
+				}
+			}
 		}
 
 		if time.Now().After(deadline) {
+			transitionState = contextTransitionTimedOut
 			logging.Trace(
 				"shell.context_transition.timeout",
 				"pane", paneID,
 				"command", command,
+				"state", transitionState,
 				"capture_preview", logging.Preview(captured, 1200),
 			)
 			return TrackedExecution{}, fmt.Errorf("timed out waiting for context transition command to settle")
@@ -782,11 +842,13 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID strin
 		}
 	}
 
-	probeResult, err := o.runProbeCommand(ctx, paneID, 10*time.Second)
+probe:
+	probeResult, err := o.runProbeCommand(ctx, paneID, contextTransitionProbeTimeout)
 	delta := sanitizeCapturedBody(capturePaneDelta(beforeCapture, promptCapture))
 	delta = stripEchoedCommand(delta, command)
 	delta = stripTrailingPromptLine(delta, promptContext)
 	delta = strings.TrimSpace(delta)
+	usedDefaultDelta := false
 	if delta == "" {
 		line := strings.TrimSpace(promptContext.PromptLine())
 		if line != "" {
@@ -794,6 +856,7 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID strin
 		} else {
 			delta = "shell context updated"
 		}
+		usedDefaultDelta = true
 	}
 
 	exitCode := 0
@@ -805,6 +868,14 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID strin
 			promptContext = parsedContext
 		}
 		exitCode = parsedExitCode
+		if usedDefaultDelta {
+			line := strings.TrimSpace(promptContext.PromptLine())
+			if line != "" {
+				delta = "shell context updated: " + line
+			} else {
+				delta = "shell context updated"
+			}
+		}
 		if probeOutput != "" {
 			delta = strings.TrimSpace(delta + "\n" + probeOutput)
 		}
@@ -822,6 +893,7 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID strin
 		"shell.context_transition.complete",
 		"pane", paneID,
 		"command", command,
+		"state", contextTransitionSettled,
 		"command_id", commandID,
 		"exit_code", exitCode,
 		"delta_preview", logging.Preview(delta, 1200),
@@ -905,7 +977,7 @@ func (o *Observer) runProbeCommand(ctx context.Context, paneID string, timeout t
 				CommandID:    result.CommandID,
 				Command:      shellContextProbeCommand,
 				ExitCode:     result.ExitCode,
-				Captured:     cleanBody,
+				Captured:     result.Body,
 				ShellContext: shellContext,
 			}, nil
 		}
@@ -1299,6 +1371,9 @@ func stripShuttlePlumbingLines(lines []string) []string {
 }
 
 func isShuttlePlumbingLine(line string) bool {
+	if isRemotePayloadMarker(line) {
+		return false
+	}
 	if looksLikeShuttleCommandError(line) {
 		return false
 	}
@@ -1322,6 +1397,9 @@ func looksLikeShuttleCommandError(line string) bool {
 }
 
 func isShuttleContinuationLine(line string) bool {
+	if isRemotePayloadMarker(line) {
+		return false
+	}
 	return strings.Contains(line, "__SHUTTLE_") ||
 		strings.Contains(line, "__shuttle_status") ||
 		strings.Contains(line, "eval \"$(printf") ||
@@ -1334,6 +1412,15 @@ func isShuttleContinuationLine(line string) bool {
 		strings.HasPrefix(line, ">/dev/null") ||
 		strings.HasSuffix(line, "2>&1") ||
 		strings.HasSuffix(line, "2>&1;")
+}
+
+func isRemotePayloadMarker(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	switch trimmed {
+	case "__SHUTTLE_REMOTE_DATA_BEGIN__", "__SHUTTLE_REMOTE_DATA_END__":
+		return true
+	}
+	return strings.HasPrefix(trimmed, "__SHUTTLE_REMOTE_READ__")
 }
 
 func lineLooksLikeSourcedDotPrompt(line string) bool {
@@ -1443,16 +1530,39 @@ func hasAnyArg(args []string, candidates ...string) bool {
 	return false
 }
 
-func promptReturnedAfterTransition(beforeCapture string, baseline PromptContext, candidate PromptContext, captured string) bool {
+func promptReturnedAfterTransition(beforeCapture string, baseline PromptContext, candidate PromptContext, captured string, delta string) bool {
 	if candidate.PromptLine() == "" {
 		return false
 	}
 
-	if baseline.RawLine != "" && candidate.RawLine != baseline.RawLine {
+	if promptContextsMateriallyDiffer(baseline, candidate) {
 		return true
 	}
 
+	if strings.TrimSpace(delta) != "" {
+		if TailSuggestsAwaitingInput(delta) {
+			return false
+		}
+		return true
+	}
+
+	if baseline.RawLine != "" && candidate.RawLine == baseline.RawLine {
+		return false
+	}
+
 	return strings.TrimSpace(captured) != strings.TrimSpace(beforeCapture)
+}
+
+func promptContextsMateriallyDiffer(left PromptContext, right PromptContext) bool {
+	return strings.TrimSpace(left.User) != strings.TrimSpace(right.User) ||
+		strings.TrimSpace(left.Host) != strings.TrimSpace(right.Host) ||
+		strings.TrimSpace(left.Directory) != strings.TrimSpace(right.Directory) ||
+		strings.TrimSpace(left.PromptSymbol) != strings.TrimSpace(right.PromptSymbol) ||
+		left.Remote != right.Remote
+}
+
+func promptContextsEquivalent(left PromptContext, right PromptContext) bool {
+	return !promptContextsMateriallyDiffer(left, right)
 }
 
 func capturePaneDelta(before string, after string) string {
@@ -1489,6 +1599,8 @@ func TrimTrailingPromptLine(body string, promptContext PromptContext) string {
 func parseShellContextProbeOutput(body string, baseline PromptContext) (string, PromptContext, int) {
 	context := baseline
 	exitCode := 0
+	context.GitBranch = ""
+	context.RawLine = ""
 
 	for _, rawLine := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
 		line := strings.TrimSpace(rawLine)
@@ -1518,6 +1630,7 @@ func parseShellContextProbeOutput(body string, baseline PromptContext) (string, 
 	if context.PromptSymbol == "" {
 		context.PromptSymbol = "$"
 	}
+	context.RawLine = context.PromptLine()
 
 	return "", context, exitCode
 }

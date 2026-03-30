@@ -9,7 +9,7 @@ Use this document as the primary brief for the secondary Codex session. It is a 
 - [implementation-plan.md](implementation-plan.md)
 - [requirements-mvp.md](requirements-mvp.md)
 
-Do not broaden this branch into execution-monitor, tmux, handoff, fullscreen, or shell-tracking work. That work is already active on `command-execution-redesign`.
+Do not broaden this branch into execution-monitor, tmux, handoff, fullscreen, or shell-tracking work. That work has already landed separately and should stay out of onboarding-focused follow-up slices.
 
 ## Branch Scope
 This branch should own:
@@ -37,20 +37,22 @@ Keep these rules intact:
 - make onboarding detection-driven, not endpoint-first
 
 ## Current State
-Already implemented on this worktree baseline:
+Already implemented on the current baseline:
 - provider/backend/auth decomposition
 - provider factory
 - OpenAI-compatible `responses_http` adapter
 - OpenAI API-key path
 - core config normalization for provider selection
+- OpenRouter support through the shared adapter path
+- Codex CLI login-based provider path
+- provider profile persistence and switching UI
+- settings-driven provider health/auth tests
 
 Not yet implemented:
-- OpenRouter preset verification and manual flow hardening
 - onboarding candidate detection and ranking
-- provider health-check command/path
-- persisted named provider profiles
-- profile switching UI/command flow
-- Codex CLI adapter
+- richer first-run onboarding flow and ranking explanation
+- broader preset-specific verification and manual hardening
+- generalized CLI-provider support beyond Codex if needed
 
 ## Requirements To Satisfy
 These come directly from [requirements-mvp.md](requirements-mvp.md):

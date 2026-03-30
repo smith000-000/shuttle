@@ -28,9 +28,11 @@ const (
 
 type Entry struct {
 	Title   string
+	Command string
 	Body    string
 	Detail  string
 	TagKind entryTagKind
+	Hidden  bool
 }
 
 type entryTagKind string
@@ -86,10 +88,16 @@ type activeExecutionMsg struct {
 }
 
 type transcriptRenderLine struct {
-	text       string
-	entryIndex int
-	tagStart   int
-	tagEnd     int
+	text             string
+	entryIndex       int
+	tagStart         int
+	tagEnd           int
+	commandStart     int
+	commandEnd       int
+	commandClickable bool
+	detailStart      int
+	detailEnd        int
+	detailClickable  bool
 }
 
 type actionCardAction string
@@ -271,11 +279,14 @@ type settingsProviderTestedMsg struct {
 }
 
 const (
-	agentTurnTimeout     = 60 * time.Second
-	shellTailPollLines   = 40
-	shellTailPollTimeout = 750 * time.Millisecond
-	firstCheckInDelay    = 10 * time.Second
-	repeatCheckInDelay   = 30 * time.Second
+	agentTurnTimeout       = 60 * time.Second
+	patchTurnTimeout       = 120 * time.Second
+	ollamaAgentTurnTimeout = 180 * time.Second
+	ollamaPatchTurnTimeout = 240 * time.Second
+	shellTailPollLines     = 40
+	shellTailPollTimeout   = 750 * time.Millisecond
+	firstCheckInDelay      = 10 * time.Second
+	repeatCheckInDelay     = 30 * time.Second
 	maxInteractiveCheckIns = 3
 )
 
@@ -299,11 +310,12 @@ type Model struct {
 	busyStartedAt               time.Time
 	transcriptScroll            int
 	transcriptFollow            bool
-	inlineDetailEntry           int
+	expandedCommandEntry        int
 	helpOpen                    bool
 	helpScroll                  int
 	detailOpen                  bool
 	detailScroll                int
+	detailFilter                string
 	shellHistory                composerHistory
 	agentHistory                composerHistory
 	activePlan                  *controller.ActivePlan
@@ -376,24 +388,39 @@ type Model struct {
 	styles                      styles
 }
 
+func (m Model) currentAgentTurnTimeout() time.Duration {
+	if m.activeProvider.BackendFamily == provider.BackendOllama {
+		return ollamaAgentTurnTimeout
+	}
+	return agentTurnTimeout
+}
+
+func (m Model) currentPatchTurnTimeout() time.Duration {
+	if m.activeProvider.BackendFamily == provider.BackendOllama {
+		return ollamaPatchTurnTimeout
+	}
+	return patchTurnTimeout
+}
+
 func NewModel(workspace tmux.Workspace, ctrl controller.Controller) Model {
 	return Model{
-		workspace:         workspace,
-		ctrl:              ctrl,
-		mode:              ShellMode,
-		transcriptFollow:  true,
-		entries:           initialEntries(workspace),
-		selectedEntry:     0,
-		inlineDetailEntry: -1,
-		styles:            newStyles(),
+		workspace:            workspace,
+		ctrl:                 ctrl,
+		mode:                 ShellMode,
+		transcriptFollow:     true,
+		entries:              initialEntries(workspace),
+		selectedEntry:        0,
+		expandedCommandEntry: -1,
+		styles:               newStyles(),
 	}
 }
 
 func initialEntries(workspace tmux.Workspace) []Entry {
 	return []Entry{
 		{
-			Title: "system",
-			Body:  fmt.Sprintf("Workspace ready. Top pane: %s. Bottom pane TUI is active.", workspace.TopPane.ID),
+			Title:  "system",
+			Body:   fmt.Sprintf("Workspace ready. Top pane: %s. Bottom pane TUI is active.", workspace.TopPane.ID),
+			Hidden: true,
 		},
 	}
 }
@@ -467,7 +494,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 		pinned := m.isTranscriptPinned()
 		autoContinue := m.shouldAutoContinue(msg.events)
-		eventEntries := m.consumePendingLocalEcho(eventsToEntries(msg.events, !m.directShellPending))
+		eventEntries := m.withCommandResultFallback(m.collapseCommandEntries(m.consumePendingLocalEcho(eventsToEntries(msg.events, !m.directShellPending))))
+		eventEntries = m.attachLatestModelInfo(msg.events, eventEntries)
 		m.busy = false
 		m.busyStartedAt = time.Time{}
 		m.inFlightCancel = nil
@@ -523,9 +551,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.busyStartedAt = time.Now()
 			m.showShellTail = false
 			m.liveShellTail = ""
-			ctx, cancel := context.WithTimeout(context.Background(), agentTurnTimeout)
-			m.inFlightCancel = cancel
 			continueAfterPatch := containsEventKind(msg.events, controller.EventPatchApplyResult) && !containsEventKind(msg.events, controller.EventCommandResult)
+			timeout := m.currentAgentTurnTimeout()
+			if continueAfterPatch {
+				timeout = m.currentPatchTurnTimeout()
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			m.inFlightCancel = cancel
 			return m, tea.Batch(func() tea.Msg {
 				defer cancel()
 
@@ -589,7 +621,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.handoffReturnGraceUntil = time.Now().Add(2 * time.Second)
 			m.showShellTail = false
 			m.liveShellTail = ""
-			ctx, cancel := context.WithTimeout(context.Background(), agentTurnTimeout)
+			ctx, cancel := context.WithTimeout(context.Background(), m.currentAgentTurnTimeout())
 			m.inFlightCancel = cancel
 			return m, tea.Batch(func() tea.Msg {
 				defer cancel()
@@ -626,7 +658,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if len(msg.events) > 0 {
 			pinned := m.isTranscriptPinned()
-			m.entries = append(m.entries, eventsToEntries(msg.events, !m.directShellPending)...)
+			eventEntries := m.withCommandResultFallback(m.collapseCommandEntries(eventsToEntries(msg.events, !m.directShellPending)))
+			eventEntries = m.attachLatestModelInfo(msg.events, eventEntries)
+			m.entries = append(m.entries, eventEntries...)
 			m.syncActionState(msg.events)
 			if pinned {
 				m.scrollTranscriptToBottom()
@@ -693,7 +727,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		pinned := m.isTranscriptPinned()
-		m.entries = append(m.entries, eventsToEntries(msg.events, true)...)
+		eventEntries := m.withCommandResultFallback(m.collapseCommandEntries(eventsToEntries(msg.events, true)))
+		eventEntries = m.attachLatestModelInfo(msg.events, eventEntries)
+		m.entries = append(m.entries, eventEntries...)
 		if pinned {
 			m.scrollTranscriptToBottom()
 		} else {
@@ -1005,8 +1041,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.setInput("")
 				return m, nil
 			}
-			if m.inlineDetailEntry >= 0 {
-				m.inlineDetailEntry = -1
+			if m.expandedCommandEntry >= 0 {
+				m.expandedCommandEntry = -1
 				return m, nil
 			}
 			if m.clearCompletion() {
@@ -1456,7 +1492,7 @@ func (m Model) submitWithOptions(appendEnterToFullscreenKeys bool) (tea.Model, t
 		refiningProposal := m.refiningProposal
 		m.refiningApproval = nil
 		m.refiningProposal = nil
-		ctx, cancel := context.WithTimeout(context.Background(), agentTurnTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), m.currentAgentTurnTimeout())
 		m.inFlightCancel = cancel
 		return m, tea.Batch(func() tea.Msg {
 			defer cancel()
@@ -1569,12 +1605,16 @@ func (m Model) handleComposerCommand(text string) (bool, tea.Model, tea.Cmd) {
 			m.currentHistory().reset()
 			m.appendTranscriptEntry(Entry{
 				Title: "system",
-				Body:  fmt.Sprintf("Unknown slash command: %s. Try /help, /approvals, /new, /compact, /onboard, /provider, /model, or /quit.", trimmed),
+				Body:  fmt.Sprintf("Unknown slash command: %s. Try %s.", trimmed, strings.Join(primarySlashCommands(), ", ")),
 			})
 			return true, m, nil
 		}
 		return false, m, nil
 	}
+}
+
+func primarySlashCommands() []string {
+	return []string{"/help", "/approvals", "/new", "/compact", "/onboard", "/provider", "/model", "/quit"}
 }
 
 func (m Model) handleApprovalsCommand(text string) (bool, tea.Model, tea.Cmd) {
@@ -1630,7 +1670,7 @@ func (m *Model) applySuccessfulContextAction(action contextActionKind) {
 		m.selectedEntry = len(m.entries) - 1
 		m.transcriptScroll = 0
 		m.transcriptFollow = true
-		m.inlineDetailEntry = -1
+		m.expandedCommandEntry = -1
 		m.detailOpen = false
 		m.detailScroll = 0
 		m.pendingApproval = nil
@@ -1696,6 +1736,9 @@ func (m Model) primaryAction() (tea.Model, tea.Cmd) {
 	case m.pendingProposal != nil && m.pendingProposal.Patch != "":
 		logging.Trace("tui.primary_action", "action", "apply_proposal_patch")
 		return m.runProposalPatch()
+	case m.pendingProposal != nil && m.pendingProposal.Kind == controller.ProposalInspectContext:
+		logging.Trace("tui.primary_action", "action", "inspect_proposal_context")
+		return m.runProposalInspectContext()
 	case m.pendingProposal != nil && m.pendingProposal.Command != "":
 		logging.Trace("tui.primary_action", "action", "run_proposal", "command", m.pendingProposal.Command)
 		return m.runProposalCommand()
@@ -1806,7 +1849,7 @@ func (m Model) continueActivePlan() (tea.Model, tea.Cmd) {
 	m.showShellTail = false
 	m.liveShellTail = ""
 	m.activeExecution = nil
-	ctx, cancel := context.WithTimeout(context.Background(), agentTurnTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), m.currentAgentTurnTimeout())
 	m.inFlightCancel = cancel
 	return m, tea.Batch(func() tea.Msg {
 		defer cancel()
@@ -2026,13 +2069,30 @@ func (m Model) runProposalPatch() (tea.Model, tea.Cmd) {
 
 	logging.Trace("tui.proposal.apply_patch")
 	patch := m.pendingProposal.Patch
+	target := m.pendingProposal.PatchTarget
 	m.pendingProposal = nil
 	m.refiningProposal = nil
 	m.editingProposal = nil
 	return m.startControllerRequest(func(next *Model) {
 		next.proposalRunPending = true
 	}, func(ctx context.Context) ([]controller.TranscriptEvent, error) {
-		return m.ctrl.ApplyProposedPatch(ctx, patch)
+		return m.ctrl.ApplyProposedPatch(ctx, patch, target)
+	}, false)
+}
+
+func (m Model) runProposalInspectContext() (tea.Model, tea.Cmd) {
+	if m.busy || m.ctrl == nil || m.pendingProposal == nil || m.pendingProposal.Kind != controller.ProposalInspectContext {
+		return m, nil
+	}
+
+	logging.Trace("tui.proposal.inspect_context")
+	m.pendingProposal = nil
+	m.refiningProposal = nil
+	m.editingProposal = nil
+	return m.startControllerRequest(func(next *Model) {
+		next.proposalRunPending = true
+	}, func(ctx context.Context) ([]controller.TranscriptEvent, error) {
+		return m.ctrl.InspectProposedContext(ctx)
 	}, false)
 }
 

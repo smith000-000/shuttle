@@ -67,8 +67,8 @@ That diagnosis still holds after the recent hardening work:
 - the serial tracking model is now stable enough that the next slice should not be more shell-tracking churn
 - the remaining risk is mostly transcript/UI complexity and monolithic controller/TUI code, not core command truth
 
-## Current Branch Status
-On `semantic-shell-bootstrap`, Shuttle now has a usable first pass of the redesigned execution stack:
+## Current Status
+Shuttle now has a usable first pass of the redesigned execution stack on `main`:
 - first-class monitored executions for tracked shell commands
 - local managed transport using sourced temp scripts instead of giant inline wrappers where possible
 - active execution states including `awaiting_input`, `interactive_fullscreen`, `background_monitoring`, `canceled`, and `lost`
@@ -92,7 +92,7 @@ What is still not done:
   - controller: execution lifecycle/state machine, agent-turn normalization, plan management, and tracked-shell ownership helpers
   - TUI: composer/input routing, transcript rendering, proposal/approval state, and handoff/fullscreen control
 
-Recent direction change on `semantic-shell-bootstrap`:
+Recent direction change that is now the baseline on `main`:
 - keep one persistent user shell pane as the continuity surface for cwd, `$>`, and recent manual shell history
 - let `F2` normally target that persistent shell, but temporarily follow an owned interactive execution pane when that pane is what needs direct user control
 - run approved agent shell commands in owned tmux execution panes by default

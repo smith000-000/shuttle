@@ -64,6 +64,7 @@ func (c *LocalController) applyPromptContextLocked(promptContext *shell.PromptCo
 	if workingDirectory := normalizeWorkingDirectory(contextCopy.Directory); workingDirectory != "" {
 		c.session.WorkingDirectory = workingDirectory
 	}
+	c.refreshRemoteCapabilityHintLocked()
 }
 
 func normalizeWorkingDirectory(directory string) string {

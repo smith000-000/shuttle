@@ -1578,6 +1578,44 @@ func TestCommandResultClearsLiveShellTailPreview(t *testing.T) {
 	}
 }
 
+func TestCommandResultFallsBackToLiveShellTailWhenSummaryEmpty(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.showShellTail = true
+	model.liveShellTail = "file-a\nfile-b\nfile-c"
+	model.activeExecution = &controller.CommandExecution{
+		ID:               "cmd-1",
+		Command:          "ls",
+		Origin:           controller.CommandOriginUserShell,
+		State:            controller.CommandExecutionRunning,
+		StartedAt:        time.Now(),
+		LatestOutputTail: "file-a\nfile-b\nfile-c",
+	}
+
+	updated, _ := model.Update(controllerEventsMsg{
+		events: []controller.TranscriptEvent{
+			{
+				Kind: controller.EventCommandResult,
+				Payload: controller.CommandResultSummary{
+					ExecutionID: "cmd-1",
+					Command:     "ls",
+					Origin:      controller.CommandOriginUserShell,
+					ExitCode:    0,
+					Summary:     "",
+				},
+			},
+		},
+	})
+	next := updated.(Model)
+
+	last := next.entries[len(next.entries)-1]
+	if last.Title != "result" {
+		t.Fatalf("expected result entry, got %#v", last)
+	}
+	if !strings.Contains(last.Body, "file-c") {
+		t.Fatalf("expected fallback output in result body, got %q", last.Body)
+	}
+}
+
 func TestShellSubmitUsesCurrentInputEachTime(t *testing.T) {
 	ctrl := &fakeController{
 		shellEvents: []controller.TranscriptEvent{

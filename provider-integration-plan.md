@@ -6,27 +6,29 @@ Turn the provider integration design into a staged execution plan that keeps onb
 Design reference: [provider-integration-design.md](provider-integration-design.md)
 
 ## Current Status
-As of March 11, 2026:
-- Phase 1 is complete enough for a first real provider path.
-- Phase 2 is partially complete.
-- Phase 3 onward has not been implemented yet.
+As of March 30, 2026:
+- Phase 1 is complete.
+- Phase 2 is materially complete.
+- Parts of Phases 3 through 5 are now implemented.
 
 Currently implemented:
 - provider profile type and backend/auth decomposition
 - config normalization for provider preset, auth mode, base URL, and API-key sourcing
 - provider factory
 - OpenAI-compatible `responses_http` adapter
-- app wiring that instantiates either the mock agent or the resolved real provider
-- unit tests and `httptest` coverage for the resolver and HTTP adapter
+- OpenRouter preset support through the shared OpenAI-compatible path
+- Codex CLI login-based provider path
+- app wiring that instantiates the resolved real provider
+- persisted provider profiles and active-provider reloading
+- provider switching and model switching UI
+- provider detail editing, save-and-activate, and health/auth tests from settings
+- unit tests and `httptest` coverage for resolver and HTTP adapter paths
 
 Not yet implemented:
-- OpenRouter-specific verification
-- custom-endpoint verification beyond resolver support
-- onboarding candidate detection and ranking
-- health-check command
-- Codex CLI adapter
-- persisted named provider profiles
-- provider switching UI
+- detection-based first-run onboarding and candidate ranking
+- broader provider registry/plugin loading beyond the built-in paths
+- richer provider capability surfacing
+- a generalized CLI-agent bridge beyond the current Codex path
 
 ---
 
@@ -99,17 +101,17 @@ Support direct OpenAI and OpenRouter usage over a shared Responses-compatible ad
 - profile selection changes base URL, auth header, and default model as expected
 
 ## Status
-Partially completed.
+Materially completed.
 
 Completed:
 - OpenAI-compatible Responses adapter with API-key auth
 - structured JSON normalization into Shuttle agent responses
+- OpenRouter support through the same shared adapter path
+- custom base URL support
 - `httptest` coverage for success, approval/plan mapping, and error handling
 
 Remaining:
-- OpenRouter-specific request and header verification
-- custom endpoint smoke coverage
-- live manual validation against a real OpenAI API key on a developer machine
+- broader preset-specific verification and manual smoke coverage
 
 ---
 
@@ -139,7 +141,14 @@ Make first run choose the best likely provider path automatically.
 - health check failures are actionable
 
 ## Status
-Not started.
+Partially completed.
+
+Completed:
+- provider health/auth test path from settings
+
+Remaining:
+- automatic candidate detection and ranking for first-run onboarding
+- clearer explanation of why a candidate was chosen by default
 
 ---
 
@@ -166,7 +175,7 @@ Support "use my existing Codex login" without implementing a new login flow insi
 - failure modes are clear when Codex is installed but not authenticated
 
 ## Status
-Not started.
+Implemented in a first pass through the Codex CLI login-based provider path.
 
 ---
 
@@ -185,17 +194,26 @@ Make provider selection visible and manageable from Shuttle itself.
 - a user can switch between at least two configured profiles without editing env vars between runs
 
 ## Status
-Not started.
+Implemented in a first pass.
+
+Completed:
+- current profile indicator in the status line
+- profile switching through settings
+- model switching through settings
+- provider detail editing, health/auth tests, and save-and-activate flow
+
+Remaining:
+- richer capability and health surfacing beyond the current settings actions
 
 ---
 
 # 7. Deferred Work
 
-Do not treat these as part of the first provider milestone:
+Do not treat these as part of the current provider milestone:
 - native Shuttle-managed Codex login flow
 - generalized "any CLI coding agent" support
 - ACP-backed tool/runtime integration
-- direct profile editing UI with secret storage
+- richer onboarding automation and ranking UX
 
 They are valuable, but each adds a distinct failure class.
 
@@ -251,13 +269,12 @@ This keeps profile modeling, detection, and runtime adapters grouped without lea
 
 The next code slice should be:
 
-1. add OpenRouter preset verification and tests on the existing HTTP adapter
-2. add a provider health-check path
-3. add detection and candidate ranking for first-run onboarding
-4. persist the selected provider profile under `.shuttle/`
-5. only then start the Codex CLI bridge
+1. add detection and candidate ranking for first-run onboarding
+2. improve preset-specific verification and manual smoke coverage
+3. surface provider capabilities and health more clearly in the UI
+4. only then broaden CLI-provider support beyond the current Codex path if there is a concrete need
 
-That keeps the next work on the now-existing provider path instead of reopening the abstraction layer again.
+That keeps the next work on onboarding and operator clarity instead of reopening the provider abstraction again.
 
 ## Resume Commands
 

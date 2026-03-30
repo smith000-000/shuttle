@@ -1,7 +1,7 @@
 # Shuttle Shell Tracking Architecture
 
 ## Purpose
-Describe the current shell tracking architecture on `semantic-shell-bootstrap` so contributors can reason about command monitoring, semantic shell signals, pane ownership, handoff, and recovery without reverse-engineering the implementation from `internal/shell`, `internal/controller`, and `internal/tui`.
+Describe the current shell tracking architecture on `main` so contributors can reason about command monitoring, semantic shell signals, pane ownership, handoff, and recovery without reverse-engineering the implementation from `internal/shell`, `internal/controller`, and `internal/tui`.
 
 This note is intentionally implementation-facing. It describes how the current system works, where the authoritative state lives, and what tradeoffs still exist.
 
@@ -71,6 +71,11 @@ Responsibilities:
 - manage semantic shell source precedence
 
 The observer knows about shell and tmux mechanics. It should not own transcript policy or TUI rendering decisions.
+
+Current transition rule:
+- shell-transition commands like `ssh`, `exit`, and `sudo -i` do not settle from a single apparent prompt return
+- Shuttle now requires a candidate prompt to be re-observed and then verified by a context probe before the transition is treated as settled
+- if the tail still looks like `password:` or other awaiting-input text, Shuttle keeps the transition unresolved and does not inject the probe
 
 ## 2.3 Semantic Collectors
 

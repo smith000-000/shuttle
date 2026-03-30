@@ -4,17 +4,19 @@
 Translate the product docs into an execution plan that is practical for a small team, explicit about debugging strategy, and sequenced to prove the risky parts before building polish.
 
 ## Current Status
-As of March 25, 2026, the implementation state is:
+As of March 30, 2026, the implementation state is:
 - Milestone 0: complete
 - Milestone 1: complete
 - Milestone 2: complete
-- Milestone 3: materially complete for `P0`, including transcript drill-down, scrolling, composer history, approvals, refine flow, and the compact two-pane TUI shell
-- Milestone 4: complete for the mock-runtime path
-- Milestone 5: in progress
+- Milestone 3: materially complete for `P0`, including transcript drill-down, scrolling, detail filtering, composer history/completion, approvals, refine flow, and the compact two-pane TUI shell
+- Milestone 4: complete
+- Milestone 5: materially complete for the current built-in provider paths, with onboarding automation and broader provider extensibility still in progress
 
 Recently landed on `main`:
-- native unified-diff patch proposals and approvals, with first-class apply-result events and local workspace mutation through `internal/patchapply`
+- native unified-diff patch proposals and approvals, with first-class apply-result events and target-aware mutation through `internal/patchapply`
+- controller-synthesized unified diffs for common single-file `proposal_kind:"edit"` requests, so ordinary insert/replace work no longer depends on model-authored raw hunks
 - local file creation and edits through the native patch path
+- remote tracked-shell file edits through the same patch flow, with controller-managed staged payload transport, capability re-probe, and apply verification including mode checks
 - prompt/controller guardrails that prevent the agent from claiming patch-created files exist before apply succeeds
 - controller decomposition across agent, execution, monitor, patch, plan, shell, and state modules
 - TUI decomposition across input, forms, render, transcript, and state modules
@@ -23,25 +25,26 @@ Recently landed on `main`:
 - repo-level agent instructions that require doc review, including `README.md`, before PR creation
 - task-context controls for `/new` and `/compact`, including controller-owned task reset/compaction paths
 - session-local approval-mode control via `/approvals`, with bounded auto-run for safe local inspection and test commands
+- first-class `proposal_kind:"inspect_context"` so the model can refresh authoritative tracked-shell user@host/cwd state instead of relying on mixed local/remote prompt context
 - lower-right model status showing approximate live context-window usage
 - initial manual release-packaging support with ldflag-driven build metadata, `--version`, and versioned archive generation under `dist/` for Linux, macOS, and Windows
 - tag-driven GitHub Actions release packaging built on the local archive script, with workflow artifacts and release-asset upload for both `.tar.gz` and `.zip` assets
 - a release installer script that downloads the correct archive for the current platform, verifies `SHA256SUMS`, and installs `shuttle` on Linux/macOS; Windows currently uses the published zip assets directly
 - derived release defaults for tmux identity: workspace ID from project path, a managed socket path under runtime state, and an internal session name unless explicitly overridden
 
-Execution-monitor redesign / semantic shell hardening status on `semantic-shell-bootstrap`:
-- implemented: first-class command monitor, local managed shell transport, `awaiting_input` detection, `interactive_fullscreen` detection, `lost` execution state, `F2` handoff/reconciliation, raw `KEYS>` terminal input, remote prompt-return reconciliation, and agent-driven `keys` proposals
+Execution-monitor redesign / semantic shell hardening status now on `main`:
+- implemented: first-class command monitor, local managed shell transport, `awaiting_input` detection, `interactive_fullscreen` detection, `lost` execution state, `F2` handoff/reconciliation, raw `KEYS>` terminal input, remote prompt-return reconciliation with prompt re-observation before probe injection, and agent-driven `keys` proposals
 - implemented: state-aware agent recovery guidance using active execution state plus a larger recovery snapshot
 - implemented: first-pass local semantic shell integration using `OSC 133` / `OSC 7` shims plus semantic metadata in monitor/provider context, with best-effort raw-marker parsing from tmux capture
-- implemented on `semantic-shell-bootstrap`: collector abstraction for semantic sources, spec-correct `ST`-terminated local marker emission, `osc_stream` via `tmux pipe-pane -O`, generation-scoped semantic stream files, conservative stale-generation pruning, and source precedence `osc_stream > osc_capture > state_file > heuristics`
-- implemented on `semantic-shell-bootstrap`: subshell transition detection, local nested-shell semantic bootstrap, manual foreground attach, tracked-pane/session recovery, explicit `TrackedShellTarget`, and shell-only destructive tmux recovery
-- implemented on `semantic-shell-bootstrap`: serial execution registry scaffolding, single-owner submission enforcement, serial auto-continue prompt hardening, hidden `proposal_kind:"answer"` state fix, and informational-only plan cards that no longer overwrite or outlive real completion state
-- implemented on `semantic-shell-bootstrap`: hybrid shell execution model with a persistent user shell context, structured recent manual-shell commands/actions from shell history, owned tmux execution panes for agent-approved commands, owned-pane cleanup, TUI interrupt/key routing that targets the active execution pane instead of always targeting the persistent user shell, `F2` handoff into temporary owned interactive panes, and bounded interactive check-ins that pause until explicit user resume
-- implemented on `semantic-shell-bootstrap`: prompt-validation hardening so stale scrollback cannot reconcile running commands as completed after `F2`, plus compact exit-aware transcript result rendering
+- implemented on `main`: collector abstraction for semantic sources, spec-correct `ST`-terminated local marker emission, `osc_stream` via `tmux pipe-pane -O`, generation-scoped semantic stream files, conservative stale-generation pruning, and source precedence `osc_stream > osc_capture > state_file > heuristics`
+- implemented on `main`: subshell transition detection, local nested-shell semantic bootstrap, manual foreground attach, tracked-pane/session recovery, explicit `TrackedShellTarget`, and shell-only destructive tmux recovery
+- implemented on `main`: serial execution registry scaffolding, single-owner submission enforcement, serial auto-continue prompt hardening, hidden `proposal_kind:"answer"` state fix, and informational-only plan cards that no longer overwrite or outlive real completion state
+- implemented on `main`: hybrid shell execution model with a persistent user shell context, structured recent manual-shell commands/actions from shell history, owned tmux execution panes for agent-approved commands, owned-pane cleanup, TUI interrupt/key routing that targets the active execution pane instead of always targeting the persistent user shell, `F2` handoff into temporary owned interactive panes, and bounded interactive check-ins that pause until explicit user resume
+- implemented on `main`: prompt-validation hardening so stale scrollback cannot reconcile running commands as completed after `F2`, compact exit-aware transcript result rendering, and foreground-attach transcript cleanup for quiet remote-shell commands
 - the shell-tracking redesign is now in a stable-enough state on `main` that the next branch can focus on task-context controls and longer-session usability
 - next: keep the serial tracking model stable, add more integration-style regression coverage opportunistically, and defer any parallel-command UI work to a later branch
 
-Security hardening branch scope on `security-hardening-runtime`:
+Security hardening work now landed on `main`:
 - audit runtime artifact placement, permissions, and retention now that `main` includes both execution-monitor and provider-onboarding work
 - tighten trace/privacy policy boundaries, especially around sensitive traces and recovery snapshots
 - review semantic shell integration trust boundaries for local vs remote/subshell sessions
