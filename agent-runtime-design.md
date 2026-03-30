@@ -102,11 +102,16 @@ type AgentInput struct {
 }
 
 type SessionContext struct {
-    SessionName        string
-    TopPaneID          string
-    BottomPaneID       string
-    WorkingDirectory   string
-    RecentShellOutput  string
+    SessionName          string
+    BottomPaneID         string
+    TrackedShell         TrackedShellTarget
+    WorkingDirectory     string
+    UserShellHistoryFile string
+    RecentShellOutput    string
+    RecentManualCommands []string
+    RecentManualActions  []string
+    ApprovalMode         ApprovalMode
+    CurrentShell         *shell.PromptContext
 }
 
 type TaskContext struct {
@@ -114,6 +119,9 @@ type TaskContext struct {
     PriorTranscript    []TranscriptEvent
     PendingApproval    *ApprovalRequest
     LastCommandResult  *CommandResultSummary
+    ActivePlan         *ActivePlan
+    PrimaryExecutionID string
+    ExecutionRegistry  []CommandExecution
 }
 ```
 
@@ -121,6 +129,9 @@ Notes:
 - `RecentShellOutput` should come from Shuttle's observed shell buffer, not from the runtime.
 - `PriorTranscript` should be a compact structured history, not a raw terminal dump.
 - `PendingApproval` allows the runtime to continue a refine or approval flow coherently.
+- `RecentManualCommands` and `RecentManualActions` let the runtime resolve prompts like "see the file I just renamed".
+- `ApprovalMode` is Shuttle-owned session policy; it informs the runtime, but the controller remains authoritative about whether a command can auto-run or must stay gated.
+- `TrackedShell` and `CurrentShell` describe the persistent user shell context; approved agent commands may still run in owned execution panes tracked separately in `ExecutionRegistry`.
 
 ## 3.3 Agent Response
 
@@ -196,6 +207,14 @@ const (
     RiskMedium RiskLevel = "medium"
     RiskHigh   RiskLevel = "high"
 )
+
+type ApprovalMode string
+
+const (
+    ApprovalModeConfirm ApprovalMode = "confirm"
+    ApprovalModeAuto    ApprovalMode = "auto"
+    ApprovalModeDanger  ApprovalMode = "dangerous"
+)
 ```
 
 ## 4.2 Approval Actions
@@ -216,6 +235,8 @@ The runtime may be informed of those decisions in later turns, but Shuttle owns:
 - when the card appears
 - whether approval is required
 - what execution path approval unlocks
+- whether a low-risk local command may auto-run under the active session policy
+- whether a session has explicitly entered a dangerous auto-run mode; the runtime may see that policy in context, but the controller is still the enforcement point
 
 ---
 

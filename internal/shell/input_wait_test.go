@@ -3,7 +3,7 @@ package shell
 import "testing"
 
 func TestTailSuggestsAwaitingInputDetectsPasswordPrompt(t *testing.T) {
-	tail := "sudo ls\n[sudo] password for jsmith:"
+	tail := "sudo ls\n[sudo] password for localuser:"
 	if !TailSuggestsAwaitingInput(tail) {
 		t.Fatal("expected password prompt to be detected")
 	}

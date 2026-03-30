@@ -23,23 +23,31 @@ type TrackedShellTarget struct {
 }
 
 type SessionContext struct {
-	SessionName       string
-	TopPaneID         string
-	BottomPaneID      string
-	TrackedShell      TrackedShellTarget
-	WorkingDirectory  string
-	RecentShellOutput string
-	CurrentShell      *shell.PromptContext
+	SessionName          string
+	BottomPaneID         string
+	TrackedShell         TrackedShellTarget
+	WorkingDirectory     string
+	LocalWorkspaceRoot   string
+	UserShellHistoryFile string
+	RecentShellOutput    string
+	RecentManualCommands []string
+	RecentManualActions  []string
+	ApprovalMode         ApprovalMode
+	CurrentShell         *shell.PromptContext
 }
 
 type TaskContext struct {
-	TaskID            string
-	PriorTranscript   []TranscriptEvent
-	PendingApproval   *ApprovalRequest
-	LastCommandResult *CommandResultSummary
-	ActivePlan        *ActivePlan
-	CurrentExecution  *CommandExecution
-	RecoverySnapshot  string
+	TaskID               string
+	CompactedSummary     string
+	PriorTranscript      []TranscriptEvent
+	PendingApproval      *ApprovalRequest
+	LastCommandResult    *CommandResultSummary
+	LastPatchApplyResult *PatchApplySummary
+	ActivePlan           *ActivePlan
+	PrimaryExecutionID   string
+	ExecutionRegistry    []CommandExecution
+	CurrentExecution     *CommandExecution
+	RecoverySnapshot     string
 }
 
 type AgentResponse struct {
@@ -131,6 +139,14 @@ const (
 	DecisionRefine  ApprovalDecision = "refine"
 )
 
+type ApprovalMode string
+
+const (
+	ApprovalModeConfirm ApprovalMode = "confirm"
+	ApprovalModeAuto    ApprovalMode = "auto"
+	ApprovalModeDanger  ApprovalMode = "dangerous"
+)
+
 type TranscriptEvent struct {
 	ID        string
 	Kind      TranscriptEventKind
@@ -141,17 +157,36 @@ type TranscriptEvent struct {
 type TranscriptEventKind string
 
 const (
-	EventUserMessage   TranscriptEventKind = "user_message"
-	EventAgentMessage  TranscriptEventKind = "agent_message"
-	EventPlan          TranscriptEventKind = "plan"
-	EventProposal      TranscriptEventKind = "proposal"
-	EventApproval      TranscriptEventKind = "approval"
-	EventCommandStart  TranscriptEventKind = "command_start"
-	EventCommandResult TranscriptEventKind = "command_result"
-	EventModelInfo     TranscriptEventKind = "model_info"
-	EventSystemNotice  TranscriptEventKind = "system_notice"
-	EventError         TranscriptEventKind = "error"
+	EventUserMessage      TranscriptEventKind = "user_message"
+	EventAgentMessage     TranscriptEventKind = "agent_message"
+	EventPlan             TranscriptEventKind = "plan"
+	EventProposal         TranscriptEventKind = "proposal"
+	EventApproval         TranscriptEventKind = "approval"
+	EventCommandStart     TranscriptEventKind = "command_start"
+	EventCommandResult    TranscriptEventKind = "command_result"
+	EventPatchApplyResult TranscriptEventKind = "patch_apply_result"
+	EventModelInfo        TranscriptEventKind = "model_info"
+	EventSystemNotice     TranscriptEventKind = "system_notice"
+	EventError            TranscriptEventKind = "error"
 )
+
+type PatchApplyFile struct {
+	Operation string
+	OldPath   string
+	NewPath   string
+}
+
+type PatchApplySummary struct {
+	WorkspaceRoot string
+	Validation    string
+	Applied       bool
+	Created       int
+	Updated       int
+	Deleted       int
+	Renamed       int
+	Files         []PatchApplyFile
+	Error         string
+}
 
 type CommandOrigin string
 
@@ -159,6 +194,7 @@ const (
 	CommandOriginUserShell     CommandOrigin = "user_shell"
 	CommandOriginAgentProposal CommandOrigin = "agent_proposal"
 	CommandOriginAgentApproval CommandOrigin = "agent_approval"
+	CommandOriginAgentAuto     CommandOrigin = "agent_auto"
 	CommandOriginAgentPlan     CommandOrigin = "agent_plan"
 )
 
@@ -177,10 +213,20 @@ const (
 	CommandExecutionLost                  CommandExecutionState = "lost"
 )
 
+type CommandOwnershipMode string
+
+const (
+	CommandOwnershipExclusive      CommandOwnershipMode = "exclusive"
+	CommandOwnershipSharedObserver CommandOwnershipMode = "shared_observer"
+	CommandOwnershipHandoff        CommandOwnershipMode = "handoff"
+)
+
 type CommandExecution struct {
 	ID                 string
 	Command            string
 	Origin             CommandOrigin
+	TrackedShell       TrackedShellTarget
+	OwnershipMode      CommandOwnershipMode
 	State              CommandExecutionState
 	StartedAt          time.Time
 	CompletedAt        *time.Time
@@ -209,21 +255,33 @@ type CommandResultSummary struct {
 	ShellContext   *shell.PromptContext
 }
 
+type ContextWindowUsage struct {
+	ApproxPromptTokens int
+}
+
 type Controller interface {
 	SubmitAgentPrompt(ctx context.Context, prompt string) ([]TranscriptEvent, error)
 	SubmitRefinement(ctx context.Context, approval ApprovalRequest, note string) ([]TranscriptEvent, error)
 	SubmitProposalRefinement(ctx context.Context, proposal ProposalPayload, note string) ([]TranscriptEvent, error)
 	ContinueActivePlan(ctx context.Context) ([]TranscriptEvent, error)
 	ContinueAfterCommand(ctx context.Context) ([]TranscriptEvent, error)
+	ContinueAfterPatchApply(ctx context.Context) ([]TranscriptEvent, error)
 	CheckActiveExecution(ctx context.Context) ([]TranscriptEvent, error)
 	ResumeAfterTakeControl(ctx context.Context) ([]TranscriptEvent, error)
+	RefreshActiveExecution(ctx context.Context) ([]TranscriptEvent, *CommandExecution, error)
 	SubmitShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error)
 	SubmitProposedShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error)
+	ApplyProposedPatch(ctx context.Context, patch string) ([]TranscriptEvent, error)
 	DecideApproval(ctx context.Context, approvalID string, decision ApprovalDecision, refineText string) ([]TranscriptEvent, error)
+	SetApprovalMode(ctx context.Context, mode ApprovalMode) ([]TranscriptEvent, error)
+	StartNewTask(ctx context.Context) ([]TranscriptEvent, error)
+	CompactTask(ctx context.Context) ([]TranscriptEvent, error)
 	RefreshShellContext(ctx context.Context) (*shell.PromptContext, error)
 	PeekShellTail(ctx context.Context, lines int) (string, error)
+	EstimateContextUsage(prompt string) ContextWindowUsage
+	ApprovalMode() ApprovalMode
 	ActiveExecution() *CommandExecution
 	AbandonActiveExecution(reason string) *CommandExecution
-	TopPaneID() string
+	TakeControlTarget() TrackedShellTarget
 	TrackedShellTarget() TrackedShellTarget
 }

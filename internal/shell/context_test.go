@@ -3,20 +3,17 @@ package shell
 import "testing"
 
 func TestParsePromptContextFromCaptureZshPrompt(t *testing.T) {
-	captured := "output line\njsmith@linuxdesktop ~/source/repos/aiterm git:(main) %"
+	captured := "output line\n" + shellTestProjectBranchPrompt(t)
 
 	context, ok := ParsePromptContextFromCapture(captured)
 	if !ok {
 		t.Fatal("expected prompt context")
 	}
 
-	if context.User != "jsmith" || context.Host != "linuxdesktop" {
-		t.Fatalf("unexpected user/host: %#v", context)
-	}
-	if context.Directory != "~/source/repos/aiterm" {
+	if context.Directory != "~/workspace/project" {
 		t.Fatalf("unexpected directory: %#v", context)
 	}
-	if context.GitBranch != "main" {
+	if context.GitBranch != shellTestBranch {
 		t.Fatalf("unexpected branch: %#v", context)
 	}
 	if context.PromptSymbol != "%" {
@@ -43,16 +40,38 @@ func TestParsePromptContextFromCaptureRemoteSSHStylePrompt(t *testing.T) {
 	}
 }
 
+func TestParsePromptContextFromCaptureRemotePromptWithoutDirectory(t *testing.T) {
+	captured := "line\nroot@web01#"
+
+	context, ok := ParsePromptContextFromCapture(captured)
+	if !ok {
+		t.Fatal("expected prompt context")
+	}
+
+	if context.User != "root" || context.Host != "web01" {
+		t.Fatalf("unexpected user/host: %#v", context)
+	}
+	if context.Directory != "" {
+		t.Fatalf("expected empty directory: %#v", context)
+	}
+	if context.PromptSymbol != "#" {
+		t.Fatalf("unexpected prompt symbol: %#v", context)
+	}
+	if !context.Root {
+		t.Fatalf("expected root context: %#v", context)
+	}
+}
+
 func TestPromptLineFormatsBranch(t *testing.T) {
 	context := PromptContext{
-		User:         "jsmith",
-		Host:         "linuxdesktop",
-		Directory:    "~/source/repos/aiterm",
-		GitBranch:    "main",
+		User:         shellTestUser,
+		Host:         shellTestHost,
+		Directory:    "~/workspace/project",
+		GitBranch:    shellTestBranch,
 		PromptSymbol: "%",
 	}
 
-	if got := context.PromptLine(); got != "jsmith@linuxdesktop ~/source/repos/aiterm git:(main) %" {
+	if got := context.PromptLine(); got != "localuser@workstation ~/workspace/project git:(main) %" {
 		t.Fatalf("unexpected prompt line %q", got)
 	}
 }

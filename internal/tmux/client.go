@@ -100,6 +100,25 @@ func (c *Client) NewDetachedSession(ctx context.Context, sessionName string, sta
 	return err
 }
 
+func (c *Client) NewDetachedWindow(ctx context.Context, sessionName string, startDir string, env map[string]string) (Pane, error) {
+	args := []string{"new-window", "-d", "-t", sessionName, "-c", startDir, "-P", "-F", paneFormat}
+	args = append(args, environmentArgs(env)...)
+	output, err := c.run(ctx, args...)
+	if err != nil {
+		return Pane{}, err
+	}
+
+	panes, err := parsePanesOutput(output)
+	if err != nil {
+		return Pane{}, err
+	}
+	if len(panes) != 1 {
+		return Pane{}, fmt.Errorf("expected 1 pane after new window, found %d", len(panes))
+	}
+
+	return panes[0], nil
+}
+
 func (c *Client) SplitBottom(ctx context.Context, target string, percent int, startDir string) error {
 	size := strconv.Itoa(percent) + "%"
 	_, err := c.run(ctx, "split-window", "-v", "-l", size, "-t", target, "-c", startDir)
@@ -139,6 +158,21 @@ func (c *Client) SendKeys(ctx context.Context, target string, text string, enter
 func (c *Client) SendLiteralKeys(ctx context.Context, target string, text string) error {
 	args := []string{"send-keys", "-l", "-t", target, text}
 	_, err := c.run(ctx, args...)
+	return err
+}
+
+func (c *Client) SetPaneTitle(ctx context.Context, target string, title string) error {
+	_, err := c.run(ctx, "select-pane", "-t", target, "-T", title)
+	return err
+}
+
+func (c *Client) RenameWindow(ctx context.Context, target string, name string) error {
+	_, err := c.run(ctx, "rename-window", "-t", target, name)
+	return err
+}
+
+func (c *Client) SetWindowOption(ctx context.Context, target string, name string, value string) error {
+	_, err := c.run(ctx, "set-window-option", "-t", target, name, value)
 	return err
 }
 
@@ -201,6 +235,11 @@ func (c *Client) capturePane(ctx context.Context, target string, startLine int, 
 
 func (c *Client) KillSession(ctx context.Context, sessionName string) error {
 	_, err := c.run(ctx, "kill-session", "-t", sessionName)
+	return err
+}
+
+func (c *Client) KillWindow(ctx context.Context, target string) error {
+	_, err := c.run(ctx, "kill-window", "-t", target)
 	return err
 }
 

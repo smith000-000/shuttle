@@ -23,7 +23,12 @@ func NewFromConfig(cfg config.Config, options FactoryOptions) (controller.Agent,
 		return nil, Profile{}, err
 	}
 
-	agent, err := NewFromProfile(profile, options)
+	baseAgent, err := NewFromProfile(profile, options)
+	if err != nil {
+		return nil, Profile{}, err
+	}
+
+	agent, err := maybeWrapRuntimeAgent(baseAgent, profile, cfg.RuntimeType, cfg.RuntimeCommand)
 	if err != nil {
 		return nil, Profile{}, err
 	}
@@ -52,4 +57,16 @@ func NewFromProfile(profile Profile, options FactoryOptions) (controller.Agent, 
 	default:
 		return nil, fmt.Errorf("unsupported backend family %q", profile.BackendFamily)
 	}
+}
+
+func CheckHealth(ctx context.Context, profile Profile, options FactoryOptions) error {
+	agent, err := NewFromProfile(profile, options)
+	if err != nil {
+		return err
+	}
+	checker, ok := agent.(healthCheckAgent)
+	if !ok {
+		return fmt.Errorf("provider %q does not support health checks", profile.Preset)
+	}
+	return checker.CheckHealth(ctx)
 }

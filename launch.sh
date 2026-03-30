@@ -18,9 +18,7 @@ fi
 cd "$ROOT_DIR"
 
 if [[ $# -eq 0 ]]; then
-  DEFAULT_SESSION="${SHUTTLE_SESSION:-shuttle-dev}"
-  DEFAULT_SOCKET="${SHUTTLE_TMUX_SOCKET:-$DEFAULT_SESSION}"
-  set -- --socket "$DEFAULT_SOCKET" --session "$DEFAULT_SESSION" --tui
+  set -- --tui
 fi
 
 exec go run ./cmd/shuttle "$@"

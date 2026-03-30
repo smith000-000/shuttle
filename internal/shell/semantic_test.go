@@ -33,10 +33,11 @@ func TestParseSemanticShellStatePrompt(t *testing.T) {
 func TestReadSemanticShellState(t *testing.T) {
 	dir := t.TempDir()
 	path := semanticStatePath(dir, "/dev/pts/7")
+	projectDir := filepath.Join(dir, "workspace", "project")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.WriteFile(path, []byte("{\"event\":\"command\",\"exit\":null,\"cwd\":\"/home/jsmith\",\"shell\":\"bash\"}\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("{\"event\":\"command\",\"exit\":null,\"cwd\":\""+projectDir+"\",\"shell\":\"bash\"}\n"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
 
@@ -50,7 +51,7 @@ func TestReadSemanticShellState(t *testing.T) {
 	if state.ExitCode != nil {
 		t.Fatalf("expected nil exit code, got %#v", state.ExitCode)
 	}
-	if state.Directory != "/home/jsmith" {
+	if state.Directory != projectDir {
 		t.Fatalf("unexpected directory %#v", state)
 	}
 	if state.UpdatedAt.IsZero() || time.Since(state.UpdatedAt) > time.Minute {
@@ -59,11 +60,12 @@ func TestReadSemanticShellState(t *testing.T) {
 }
 
 func TestSynthesizePromptContextUsesSemanticDirectory(t *testing.T) {
-	base := PromptContext{User: "jsmith", Host: "linuxdesktop", PromptSymbol: "%"}
-	state := semanticShellState{Directory: "/home/jsmith/source/repos/aiterm"}
+	projectDir := shellTestProjectDir(t)
+	base := PromptContext{User: shellTestUser, Host: shellTestHost, PromptSymbol: "%"}
+	state := semanticShellState{Directory: projectDir}
 
 	context := synthesizePromptContext(base, state)
-	if context.Directory != "~/source/repos/aiterm" {
+	if context.Directory != "~/workspace/project" {
 		t.Fatalf("expected shortened semantic cwd, got %#v", context)
 	}
 }
@@ -71,7 +73,7 @@ func TestSynthesizePromptContextUsesSemanticDirectory(t *testing.T) {
 func TestEnsureLocalShellIntegrationSendsSourceCommand(t *testing.T) {
 	client := &fakeSemanticPaneClient{
 		pane:    tmux.Pane{ID: "%0", CurrentCommand: "bash", TTY: "/dev/pts/7"},
-		capture: "jsmith@linuxdesktop ~/source/repos/aiterm %",
+		capture: shellTestProjectPrompt(t),
 	}
 	dir := t.TempDir()
 	observer := (&Observer{client: client}).WithStateDir(dir)
@@ -120,12 +122,12 @@ func TestSemanticShellScriptsUseSTTerminators(t *testing.T) {
 func TestFinalizeTransitionStateBootstrapsLocalNestedShellAndClearsSuppression(t *testing.T) {
 	client := &fakeSemanticPaneClient{
 		pane:    tmux.Pane{ID: "%0", CurrentCommand: "bash", TTY: "/dev/pts/10"},
-		capture: "jsmith@linuxdesktop ~/source/repos/aiterm %",
+		capture: shellTestProjectPrompt(t),
 	}
 	dir := t.TempDir()
 	observer := (&Observer{client: client}).WithStateDir(dir)
 
-	observer.finalizeTransitionState(context.Background(), "%0", "bash", "bash", GuessLocalContext("/home/jsmith/source/repos/aiterm"))
+	observer.finalizeTransitionState(context.Background(), "%0", "bash", "bash", GuessLocalContext(shellTestProjectDir(t)))
 
 	if got := observer.rememberedTransition("%0"); got != shellTransitionNone {
 		t.Fatalf("expected local bootstrap to clear remembered transition, got %q", got)
@@ -138,12 +140,12 @@ func TestFinalizeTransitionStateBootstrapsLocalNestedShellAndClearsSuppression(t
 func TestFinalizeTransitionStateKeepsSuppressionWhenLocalShellIsUnsupported(t *testing.T) {
 	client := &fakeSemanticPaneClient{
 		pane:    tmux.Pane{ID: "%0", CurrentCommand: "fish", TTY: "/dev/pts/11"},
-		capture: "jsmith@linuxdesktop ~/source/repos/aiterm >",
+		capture: "~/workspace/project >",
 	}
 	dir := t.TempDir()
 	observer := (&Observer{client: client}).WithStateDir(dir)
 
-	observer.finalizeTransitionState(context.Background(), "%0", "fish", "fish", GuessLocalContext("/home/jsmith/source/repos/aiterm"))
+	observer.finalizeTransitionState(context.Background(), "%0", "fish", "fish", GuessLocalContext(shellTestProjectDir(t)))
 
 	if got := observer.rememberedTransition("%0"); got != shellTransitionLocal {
 		t.Fatalf("expected unsupported local shell to keep remembered local transition, got %q", got)
@@ -155,11 +157,12 @@ func TestFinalizeTransitionStateKeepsSuppressionWhenLocalShellIsUnsupported(t *t
 
 func TestRunTrackedMonitorCompletesFromSemanticPromptState(t *testing.T) {
 	dir := t.TempDir()
+	projectDir := shellTestProjectDir(t)
 	client := &fakeSemanticPaneClient{
 		pane:    tmux.Pane{ID: "%0", CurrentCommand: "bash", TTY: "/dev/pts/9"},
-		capture: "jsmith@linuxdesktop ~/source/repos/aiterm %",
+		capture: shellTestProjectPrompt(t),
 	}
-	observer := (&Observer{client: client}).WithStateDir(dir).WithPromptHint(GuessLocalContext("/home/jsmith/source/repos/aiterm"))
+	observer := (&Observer{client: client}).WithStateDir(dir).WithPromptHint(GuessLocalContext(projectDir))
 	monitor := newTrackedCommandMonitor("cmd-1", "sleep 1")
 	markers := protocol.Markers{
 		CommandID: "cmd-1",
@@ -174,9 +177,9 @@ func TestRunTrackedMonitorCompletesFromSemanticPromptState(t *testing.T) {
 
 	go func() {
 		time.Sleep(80 * time.Millisecond)
-		_ = os.WriteFile(statePath, []byte("{\"event\":\"command\",\"exit\":null,\"cwd\":\"/home/jsmith/source/repos/aiterm\",\"shell\":\"bash\"}\n"), 0o644)
+		_ = os.WriteFile(statePath, []byte("{\"event\":\"command\",\"exit\":null,\"cwd\":\""+projectDir+"\",\"shell\":\"bash\"}\n"), 0o644)
 		time.Sleep(80 * time.Millisecond)
-		_ = os.WriteFile(statePath, []byte("{\"event\":\"prompt\",\"exit\":0,\"cwd\":\"/home/jsmith/source/repos/aiterm\",\"shell\":\"bash\"}\n"), 0o644)
+		_ = os.WriteFile(statePath, []byte("{\"event\":\"prompt\",\"exit\":0,\"cwd\":\""+projectDir+"\",\"shell\":\"bash\"}\n"), 0o644)
 	}()
 
 	observer.runTrackedMonitor(context.Background(), monitor, "%0", "sleep 1", "sleep 1", 250*time.Millisecond, client.capture, markers, func() {})
@@ -242,7 +245,7 @@ func (f *fakeSemanticPaneClient) SendKeys(ctx context.Context, target string, co
 	if beginLine, endPrefix, ok := wrappedMarkerLines(command); ok && len(f.captures) == 0 {
 		prompt := strings.TrimSpace(f.capture)
 		if prompt == "" {
-			prompt = "jsmith@linuxdesktop ~/source/repos/aiterm %"
+			prompt = "/workspace/project %"
 		}
 		f.captures = []string{
 			prompt,

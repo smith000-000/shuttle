@@ -4,7 +4,7 @@
 Translate the product docs into an execution plan that is practical for a small team, explicit about debugging strategy, and sequenced to prove the risky parts before building polish.
 
 ## Current Status
-As of March 11, 2026, the implementation state is:
+As of March 25, 2026, the implementation state is:
 - Milestone 0: complete
 - Milestone 1: complete
 - Milestone 2: complete
@@ -12,14 +12,34 @@ As of March 11, 2026, the implementation state is:
 - Milestone 4: complete for the mock-runtime path
 - Milestone 5: in progress
 
-Execution-monitor redesign status on `command-execution-redesign`:
+Recently landed on `main`:
+- native unified-diff patch proposals and approvals, with first-class apply-result events and local workspace mutation through `internal/patchapply`
+- local file creation and edits through the native patch path
+- prompt/controller guardrails that prevent the agent from claiming patch-created files exist before apply succeeds
+- controller decomposition across agent, execution, monitor, patch, plan, shell, and state modules
+- TUI decomposition across input, forms, render, transcript, and state modules
+- behavior-oriented controller and TUI test splits
+- interactive tmux harness coverage for patch apply, patch retry, command auto-continue, and multi-step plan loops
+- repo-level agent instructions that require doc review, including `README.md`, before PR creation
+- task-context controls for `/new` and `/compact`, including controller-owned task reset/compaction paths
+- session-local approval-mode control via `/approvals`, with bounded auto-run for safe local inspection and test commands
+- lower-right model status showing approximate live context-window usage
+- initial manual release-packaging support with ldflag-driven build metadata, `--version`, and versioned archive generation under `dist/` for Linux, macOS, and Windows
+- tag-driven GitHub Actions release packaging built on the local archive script, with workflow artifacts and release-asset upload for both `.tar.gz` and `.zip` assets
+- a release installer script that downloads the correct archive for the current platform, verifies `SHA256SUMS`, and installs `shuttle` on Linux/macOS; Windows currently uses the published zip assets directly
+- derived release defaults for tmux identity: workspace ID from project path, a managed socket path under runtime state, and an internal session name unless explicitly overridden
+
+Execution-monitor redesign / semantic shell hardening status on `semantic-shell-bootstrap`:
 - implemented: first-class command monitor, local managed shell transport, `awaiting_input` detection, `interactive_fullscreen` detection, `lost` execution state, `F2` handoff/reconciliation, raw `KEYS>` terminal input, remote prompt-return reconciliation, and agent-driven `keys` proposals
 - implemented: state-aware agent recovery guidance using active execution state plus a larger recovery snapshot
 - implemented: first-pass local semantic shell integration using `OSC 133` / `OSC 7` shims plus semantic metadata in monitor/provider context, with best-effort raw-marker parsing from tmux capture
-- implemented on `semantic-shell-bootstrap`: collector abstraction for semantic sources and spec-correct `ST`-terminated local marker emission; a tmux spike now proves `pipe-pane -O` preserves raw `OSC 133` / `OSC 7` bytes well enough to support a real stream source
-- in progress: reducing ambiguity between `running`, `awaiting_input`, and `lost` in edge cases where the shell is quiet or terminal ownership changes unexpectedly
-- in progress: security hardening for execution monitoring, tracing, and semantic shell state
-- next: promote semantic consumption from opportunistic snapshot parsing to a real stream reducer, then keep local semantic-shell behavior stable while preventing bleed-through into remote/subshell flows, then add conservative subshell bootstrap
+- implemented on `semantic-shell-bootstrap`: collector abstraction for semantic sources, spec-correct `ST`-terminated local marker emission, `osc_stream` via `tmux pipe-pane -O`, generation-scoped semantic stream files, conservative stale-generation pruning, and source precedence `osc_stream > osc_capture > state_file > heuristics`
+- implemented on `semantic-shell-bootstrap`: subshell transition detection, local nested-shell semantic bootstrap, manual foreground attach, tracked-pane/session recovery, explicit `TrackedShellTarget`, and shell-only destructive tmux recovery
+- implemented on `semantic-shell-bootstrap`: serial execution registry scaffolding, single-owner submission enforcement, serial auto-continue prompt hardening, hidden `proposal_kind:"answer"` state fix, and informational-only plan cards that no longer overwrite or outlive real completion state
+- implemented on `semantic-shell-bootstrap`: hybrid shell execution model with a persistent user shell context, structured recent manual-shell commands/actions from shell history, owned tmux execution panes for agent-approved commands, owned-pane cleanup, TUI interrupt/key routing that targets the active execution pane instead of always targeting the persistent user shell, `F2` handoff into temporary owned interactive panes, and bounded interactive check-ins that pause until explicit user resume
+- implemented on `semantic-shell-bootstrap`: prompt-validation hardening so stale scrollback cannot reconcile running commands as completed after `F2`, plus compact exit-aware transcript result rendering
+- the shell-tracking redesign is now in a stable-enough state on `main` that the next branch can focus on task-context controls and longer-session usability
+- next: keep the serial tracking model stable, add more integration-style regression coverage opportunistically, and defer any parallel-command UI work to a later branch
 
 Security hardening branch scope on `security-hardening-runtime`:
 - audit runtime artifact placement, permissions, and retention now that `main` includes both execution-monitor and provider-onboarding work
@@ -62,21 +82,24 @@ Milestone 5 currently includes:
 - execution monitor redesign for long-running and interactive shell commands
 - raw terminal input flow for active prompts and fullscreen apps
 - first-class agent `keys` proposals for interactive recovery
+- native unified-diff patch apply with proposal/approval/apply-result flow
+- local workspace root separation from shell cwd so local patch apply still works when the active shell is remote
+- interactive tmux harness coverage for patch apply and unattended multi-step plan loops
 
 Milestone 5 still needs:
 - OpenRouter verification and preset-specific tests
 - onboarding and health checks
-- saved provider profiles
-- Codex CLI delegation path
-- provider switching UI
+- Codex CLI delegation path beyond the current login-based provider support and model suggestions
 - release-grade runtime management for socket/session lifecycle and crash recovery
-- a real patch-application path so proposed diffs can become actual workspace changes
-- guardrails that prevent the agent from claiming proposed files exist before the patch is applied
-- stronger monitor-side confidence so active-command classification such as `awaiting_input`, `interactive_fullscreen`, and `lost` is driven by better evidence and fewer fallback heuristics
+- stronger monitor-side confidence for ambiguous remote/container takeovers beyond the now-stable local serial model
+- integration-style tests for tracked-command recovery flows, not just per-layer unit tests
 - pane-stream/fullscreen detection beyond tmux alternate-screen heuristics so aliases, wrappers, and remote fullscreen apps can be recognized from terminal behavior instead of command-name lists alone
 - richer state-aware agent recovery actions for ambiguous shell takeovers, including deciding when to propose raw terminal input versus simple recovery guidance
 - broader semantic shell integration and subshell/bootstrap support using signals such as `OSC 133` and `OSC 7`
 - any richer bootstrap or injected helper mode should come later, after the standards-based marker path exists
+- release pipeline polish beyond the first manual archive script:
+- package-manager integration
+  - lifecycle commands and registry-based reconciliation on top of the new managed tmux defaults
 - before touching richer subshell/bootstrap behavior for `ssh`, `docker exec -it`, or nested shells, run the manual regression checklist in [shell-execution-strategy.md](shell-execution-strategy.md) to avoid regressing the current moderately functional context-transition path
 - move runtime state, staged shell scripts, semantic state files, shell history, and logs out of the repo-local `.shuttle/` directory into a user-private runtime directory such as XDG state/runtime space, with `0700` directory permissions and no-follow/exclusive writes for staged files
 - do not add filesystem encryption to the runtime state directory in the first pass; prefer private location, strict permissions, and minimal retention over ad hoc app-level encryption
@@ -91,6 +114,67 @@ Milestone 5 still needs:
   - extract composer/input-mode routing from command-execution control
   - move fullscreen/raw-key submission logic behind a narrower interface
   - reduce duplicated busy/lock/handoff gating in the TUI state machine
+  - keep plan cards passive/informational unless the product explicitly introduces a dedicated interactive checklist workflow
+- second-pass decomposition remains optional:
+  - `internal/tui/model.go` is substantially smaller, but more cleanup is still possible if future execution-control work starts growing it again
+  - prefer narrow types/modules and integration tests over letting orchestration logic reconverge into new monoliths
+  - see [refactor-checklist.md](refactor-checklist.md) for the decomposition history and any remaining cleanup ideas
+
+### Context Management Branch Plan
+
+Goal:
+- add explicit context-management controls so long-running Shuttle sessions can either start a fresh task or compress old task history without losing shell continuity
+
+Status:
+- implemented on `main`:
+  - `/new` resets task state while preserving Shuttle session continuity, tracked shell state, and provider selection
+  - `/compact` stores a model-generated task summary and trims live transcript context to a recent tail
+  - `/help` opens the in-app help view directly from agent mode slash commands
+  - `/approvals` switches the current session between `confirm`, bounded `auto`, and explicit-confirmation `dangerous` command-execution policy
+  - `F10` settings now expose a session-local approval-mode selector plus clearer provider/model menu entry points
+  - provider detail editing now supports `F7` health/auth tests and `F8` save-and-activate
+  - multiline composer navigation now uses `Up/Down`, `Home/End`, and `Insert`, while transcript bounds move to `Ctrl+Home/Ctrl+End`
+  - multiline composer rendering is capped to a 15-line viewport that scrolls older lines off the top
+  - agent-owned execution stays in the tracked shell when the current user shell context is remote, instead of launching a local owned pane
+  - the lower-right model status now shows an approximate live context-usage estimate, and shows the selected model limit when available
+  - `KEYS>` mode now keeps plain `Enter` as exact raw-send, uses `Ctrl+Y` for send-plus-Enter, and documents the distinction in the footer/help so sudo and menu prompts are both practical
+
+Implemented scope:
+- `/help`: open the in-app help view from the composer
+- `/approvals`: change how aggressively Shuttle auto-runs safe agent commands in the current session
+- `/new`: start a fresh task in the current Shuttle session
+- `/compact`: summarize and compress the current task context while preserving enough state for the next turn
+- `F10` settings: expose session approval mode, provider configuration/testing, active provider switching, and model selection explicitly
+- composer navigation: make multiline editing behave like a real text field without losing transcript scrolling
+
+Design rules:
+- `/help` should be a pure UI command that mirrors `F1`
+- `/approvals` is session-preserving, not task-preserving; `/new` and `/compact` must not reset it
+- `/approvals auto` only applies to controller-classified safe local shell commands; patches, remote shells, and risky actions remain explicit
+- `/approvals dangerous` must require an explicit confirmation warning before activation
+- remote tracked shells must stay authoritative for remote agent command execution; local owned execution panes are only for local work
+- `/new` resets task state, not session state
+- `/new` must preserve the active Shuttle workspace, tracked shell target, working-directory context, provider selection, and remote-shell continuity
+- `/compact` is task-preserving, not task-resetting
+- `/compact` should prefer a model-generated compact summary plus a recent transcript tail over keeping the full raw transcript forever
+- neither command should silently discard an active approval, running execution, or other high-risk state without an explicit guardrail
+
+Delivered implementation slices:
+1. Added slash-command plumbing for `/approvals`, `/new`, and `/compact` in the TUI composer flow.
+2. Added session-local approval-mode state plus a controller-owned classifier for bounded auto-run of safe local inspection and test commands, and a separate explicit-confirmation `dangerous` mode.
+3. Added a controller-owned `StartNewTask` path that replaces `TaskContext` with a fresh task ID while preserving `SessionContext`.
+4. Added compacted task state as a durable summary field on `TaskContext`, and taught provider prompt construction to render compacted context plus a recent tail.
+5. Added a controller-owned `CompactTask` path that asks the model for a structured summary, stores it, and trims transcript state safely.
+6. Added guardrails that block `/new` and `/compact` while a live execution or pending approval is still active.
+7. Added `F10` session/provider/model settings refinements, provider test/save+activate flows, and multiline composer navigation improvements.
+8. Added `/help`, terminal selection/copy guidance, and a capped multiline composer viewport.
+9. Added remote-shell execution routing hardening so agent commands stay remote when the tracked shell is remote.
+10. Added controller, provider-context, and TUI tests for approval mode, task reset, compaction, status-line rendering, provider settings actions, remote-shell execution routing, and multiline composer behavior.
+
+Exit criteria:
+- a user can start a fresh task without restarting Shuttle or losing shell continuity
+- a long-running task can be compacted without confusing the next model turn
+- transcript/state pruning is explicit and reviewable rather than implicit or lossy
 
 ### Semantic Shell And Subshell Bootstrap Plan
 
@@ -402,12 +486,16 @@ Implemented now:
 - one real OpenAI-compatible Responses adapter using API-key auth
 - normalized mapping from structured provider output into Shuttle `AgentResponse`
 - agent/runtime support for `proposal_kind = "keys"` so the model can request raw terminal input for active prompts and fullscreen apps
+- native unified-diff patch proposals and approvals with local apply, apply-result events, and prompt/runtime guardrails
+- local workspace root tracking so patch apply stays local even when the active shell is remote
+- controller/TUI decomposition plus behavior-oriented test reorganization
+- interactive tmux harness coverage for patch apply, retry, command auto-continue, and multi-step unattended plan loops
 
 Next:
 - validate and harden the OpenRouter preset
 - add provider detection and health checks
-- add profile persistence
-- add the Codex CLI bridge
+- extend Codex CLI support beyond the current login-based provider path and model suggestions
+- add task-context controls for `/new` and `/compact`
 - add runtime-management work so release builds do not expose raw tmux socket/session details
 
 ### Exit Criteria
@@ -415,21 +503,20 @@ Next:
 - provider failures are surfaced as structured errors rather than crashing the app
 
 ### Backlog Note
-- Patch proposals currently stop at proposal generation. Shuttle still needs an explicit apply/approve/apply-result flow for diffs and file creation.
-- Until that exists, the controller and provider prompts should treat proposed patches as inert and should not let the agent narrate them as already-created files.
 - The next execution-monitor slice should classify `awaiting_input` conservatively from shell-tail evidence and reserve `lost` for genuinely low-confidence tracking failures rather than silent long-running jobs.
 - After the current `awaiting_input` work, the next execution-monitor slice should add pane-stream/fullscreen detection in the same redesign track rather than as a separate feature branch.
 - That slice should prefer terminal behavior over command names so aliases, functions, and wrapped fullscreen apps do not regress back into weak prompt-return heuristics.
 - After fullscreen detection, add an explicit recovery-snapshot path so ambiguous shell takeovers can be fed back into the agent using a larger terminal page dump plus execution confidence metadata instead of only a tiny shell tail.
 - Recovery snapshots and state-aware agent check-ins are now implemented in a first pass; the next step is to improve monitor-side confidence so more ambiguous states are classified correctly before they reach the agent.
 - Agent-driven raw terminal input is now implemented in a first pass; the next step is to harden when the agent should use `keys` proposals versus plain recovery guidance, and to keep dangerous key sequences reviewable.
+- Patch apply is now implemented for unified text diffs; next follow-up work should focus on UX polish for diff inspection and any future policy modes, not on reintroducing shell patch hacks.
 - Security remediation follow-up:
   - stop using repo-local `.shuttle/` as the default state root
   - add no-follow/exclusive writes for staged scripts and semantic state artifacts
   - add safe vs sensitive trace modes plus explicit sensitive-trace consent on launch
   - migrate semantic shell sidecar serialization to a robust encoded format
   - keep recovery snapshots, but make their upload policy configurable later
-  - refactor `internal/tui/model.go` before adding more execution-control behaviors
+  - keep `internal/tui/model.go` from regrowing into a monolith as future context-management or execution-control work lands
 
 Framework and ACP guidance: [agent-runtime-design.md](agent-runtime-design.md)
 Detailed provider decomposition: [provider-integration-design.md](provider-integration-design.md)
@@ -437,6 +524,7 @@ Execution plan: [provider-integration-plan.md](provider-integration-plan.md)
 Runtime lifecycle design: [runtime-management-design.md](runtime-management-design.md)
 Shell and agent execution strategy: [shell-execution-strategy.md](shell-execution-strategy.md)
 Deferred patch/apply research: [patch-apply-research.md](patch-apply-research.md)
+Patch/apply implementation plan: [patch-apply-implementation-plan.md](patch-apply-implementation-plan.md)
 
 ### Execution Regression Note
 - After meaningful execution-monitor changes, run the manual regression checklist in [shell-execution-strategy.md](shell-execution-strategy.md) before treating the branch as stable.
@@ -456,47 +544,57 @@ internal/
     config.go
   controller/
     controller.go
-    state.go
-    events.go
-    approvals.go
+    controller_agent.go
+    controller_execution.go
+    controller_monitor.go
+    controller_patch.go
+    controller_plan.go
+    controller_shell.go
+    controller_state.go
+    types.go
+    user_shell_context.go
+  patchapply/
+    patchapply.go
   tmux/
     client.go
     workspace.go
-    panes.go
-    inject.go
-    capture.go
   shell/
     observer.go
-    buffer.go
-  protocol/
-    sentinel.go
-    parser.go
+    foreground_attach.go
+    prompt_return.go
+    semantic_collect.go
+    semantic_stream.go
+    transition.go
   tui/
     model.go
-    update.go
-    view.go
-    transcript.go
-    composer.go
+    model_forms.go
+    model_input.go
+    model_render.go
+    model_state.go
+    model_transcript.go
+    handoff.go
   provider/
-    provider.go
     mock.go
-    openai.go
+    responses.go
   logging/
     logging.go
-  persistence/
-    store.go
 integration/
-  tmux_workspace_test.go
+  harness/
+    harness_test.go
+    run_patch_tests.sh
+  provider_agent_test.go
   tmux_observer_test.go
+  tmux_workspace_test.go
 ```
 
 ## Layout Rationale
 - `tmux` owns tmux command execution and pane operations only.
-- `shell` owns raw observation buffers and pane-content capture.
-- `protocol` owns sentinel formatting and parsing.
+- `shell` owns prompt/context detection, semantic-shell collection, and foreground/fullscreen inference.
 - `controller` owns orchestration and state transitions.
+- `patchapply` owns unified-diff parsing, validation, staging, and apply.
 - `tui` stays presentation-focused.
 - `provider` stays behind a narrow interface so it can be mocked early.
+- `integration/harness` owns tmux-driven interactive regression coverage that exercises the real TUI and controller loop together.
 
 ---
 

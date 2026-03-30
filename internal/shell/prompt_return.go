@@ -24,6 +24,13 @@ func TailSuggestsPromptReturn(tail string, current PromptContext) bool {
 	return promptLooksLikeCurrentShell(line, current)
 }
 
+func captureHasCurrentPromptContext(captured string, current PromptContext) bool {
+	if current.PromptLine() == "" {
+		return false
+	}
+	return TailSuggestsPromptReturn(captured, current)
+}
+
 func lastNonEmptyLines(tail string, limit int) []string {
 	if limit <= 0 {
 		return nil
@@ -88,4 +95,45 @@ func promptLooksLikeCurrentShell(line string, current PromptContext) bool {
 	}
 
 	return false
+}
+
+func inferPromptReturnResult(promptContext PromptContext, tail string, semanticExitCode *int) (int, MonitorState, SignalConfidence, bool) {
+	inferred := false
+	confidence := ConfidenceStrong
+	exitCode := 0
+
+	switch {
+	case promptContext.LastExitCode != nil:
+		exitCode = *promptContext.LastExitCode
+	case semanticExitCode != nil:
+		exitCode = *semanticExitCode
+	case strings.Contains(tail, "^C"):
+		exitCode = InterruptedExitCode
+		confidence = ConfidenceMedium
+		inferred = true
+	case strings.Contains(tail, "command not found") || strings.Contains(tail, "No such file or directory"):
+		exitCode = 127
+		confidence = ConfidenceMedium
+		inferred = true
+	case strings.Contains(tail, "Permission denied"):
+		exitCode = 126
+		confidence = ConfidenceMedium
+		inferred = true
+	default:
+		exitCode = 0
+		confidence = ConfidenceLow
+		inferred = true
+	}
+
+	state := MonitorStateCompleted
+	switch exitCode {
+	case InterruptedExitCode:
+		state = MonitorStateCanceled
+	case 0:
+		state = MonitorStateCompleted
+	default:
+		state = MonitorStateFailed
+	}
+
+	return exitCode, state, confidence, inferred
 }

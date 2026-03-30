@@ -1,5 +1,11 @@
 # Shuttle Runtime Management Design
 
+Current status:
+- Shuttle now derives a stable workspace ID from the absolute project path
+- Shuttle now defaults to a managed tmux socket under runtime state and a derived internal session name
+- explicit `--socket` / `--session` overrides still exist for development and integration work
+- runtime registry, reconciliation policy, and lifecycle subcommands are still pending
+
 ## Purpose
 Define how Shuttle should manage tmux sockets, sessions, workspace identity, and crash recovery in a release build so users do not have to think about `--socket` and `--session` flags.
 
@@ -9,13 +15,13 @@ This document covers the operational layer between "launch Shuttle" and "attach 
 
 # 1. Problem
 
-The current dev workflow uses explicit tmux identifiers such as:
+Historically the dev workflow used explicit tmux identifiers such as:
 
 ```bash
 go run ./cmd/shuttle --socket shuttle-dev --session shuttle-dev --tui
 ```
 
-That is acceptable for local development, but it is not a good release UX because:
+The default launch path is now derived automatically, but that older explicit model still illustrates the remaining release-UX problems:
 - users should not need to understand tmux server sockets
 - users should not need to invent stable session names
 - crashes and stale tmux state need structured cleanup and recovery
@@ -84,7 +90,7 @@ Session names should be derived from the workspace ID.
 Recommended format:
 
 ```text
-session_name = shuttle:<short-workspace-id>
+session_name = shuttle_<short-workspace-id>
 ```
 
 Human-readable optional metadata may be stored in the registry, but the session name itself should stay compact and safe for tmux.
@@ -323,12 +329,15 @@ Recommended order:
 
 # 12. Immediate Next Slice
 
-When this work starts, the first implementation slice should be:
+The first implementation slice is now partially complete:
 
+Implemented:
 1. add a `workspace_id` derivation helper
-2. add a runtime registry record type under local persistence
-3. replace default ad hoc socket/session values with derived managed defaults
-4. add startup reconciliation for "session exists" vs "session missing"
-5. keep `--socket` and `--session` as explicit overrides
+2. replace default ad hoc socket/session values with derived managed defaults
+3. keep `--socket` and `--session` as explicit overrides
 
-That is enough to move release architecture away from manual tmux naming without trying to solve every lifecycle command in one pass.
+Still next:
+4. add a runtime registry record type under local persistence
+5. add startup reconciliation for "session exists" vs "session missing"
+
+That keeps the release architecture moving away from manual tmux naming while leaving lifecycle and recovery work to the next slice.

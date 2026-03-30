@@ -13,6 +13,7 @@ import (
 	"aiterm/internal/config"
 	"aiterm/internal/controller"
 	"aiterm/internal/logging"
+	"aiterm/internal/version"
 )
 
 func main() {
@@ -20,6 +21,11 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
 		os.Exit(2)
+	}
+
+	if cfg.Version {
+		fmt.Println(version.String())
+		return
 	}
 
 	if cfg.TraceMode == config.TraceModeSensitive && !cfg.TraceConsent {
@@ -47,6 +53,8 @@ func main() {
 
 	logging.Trace(
 		"app.start",
+		"build", version.String(),
+		"workspace_id", cfg.WorkspaceID,
 		"session", cfg.SessionName,
 		"socket", cfg.TmuxSocket,
 		"start_dir", cfg.StartDir,
@@ -159,6 +167,27 @@ func formatAgentEvent(event controller.TranscriptEvent) string {
 			lines = append(lines, "base_url: "+payload.ResponseBaseURL)
 		}
 		return fmt.Sprintf("[MODEL_INFO]\n%s", strings.Join(lines, "\n"))
+	case controller.EventPatchApplyResult:
+		payload, _ := event.Payload.(controller.PatchApplySummary)
+		lines := []string{
+			fmt.Sprintf("applied: %t", payload.Applied),
+		}
+		if payload.WorkspaceRoot != "" {
+			lines = append(lines, "workspace_root: "+payload.WorkspaceRoot)
+		}
+		if payload.Validation != "" {
+			lines = append(lines, "validation: "+payload.Validation)
+		}
+		lines = append(lines,
+			fmt.Sprintf("created: %d", payload.Created),
+			fmt.Sprintf("updated: %d", payload.Updated),
+			fmt.Sprintf("deleted: %d", payload.Deleted),
+			fmt.Sprintf("renamed: %d", payload.Renamed),
+		)
+		if payload.Error != "" {
+			lines = append(lines, "error: "+payload.Error)
+		}
+		return fmt.Sprintf("[PATCH_APPLY_RESULT]\n%s", strings.Join(lines, "\n"))
 	default:
 		return fmt.Sprintf("[%s]", strings.ToUpper(string(event.Kind)))
 	}

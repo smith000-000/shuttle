@@ -498,6 +498,7 @@ func buildTurnContext(input controller.AgentInput) string {
 	sections := make([]string, 0, 5)
 	sections = append(sections, "User prompt:\n"+strings.TrimSpace(input.Prompt))
 	seenSnippets := make(map[string]struct{})
+	options := turnContextOptionsForTask(input.Task)
 
 	sessionLines := []string{}
 	if input.Session.CurrentShell != nil && strings.TrimSpace(input.Session.CurrentShell.PromptLine()) != "" {
@@ -515,8 +516,11 @@ func buildTurnContext(input controller.AgentInput) string {
 	if input.Session.WorkingDirectory != "" {
 		sessionLines = append(sessionLines, "cwd="+input.Session.WorkingDirectory)
 	}
-	if input.Session.TopPaneID != "" {
-		sessionLines = append(sessionLines, "top_pane="+input.Session.TopPaneID)
+	if input.Session.LocalWorkspaceRoot != "" {
+		sessionLines = append(sessionLines, "workspace_root="+input.Session.LocalWorkspaceRoot)
+	}
+	if input.Session.ApprovalMode != "" {
+		sessionLines = append(sessionLines, "approval_mode="+string(input.Session.ApprovalMode))
 	}
 	if input.Session.TrackedShell.PaneID != "" {
 		sessionLines = append(sessionLines, "tracked_pane="+input.Session.TrackedShell.PaneID)
@@ -528,9 +532,17 @@ func buildTurnContext(input controller.AgentInput) string {
 		sections = append(sections, "Session:\n"+strings.Join(sessionLines, "\n"))
 	}
 
-	recentOutput := compactShellOutput(input.Session.RecentShellOutput, 8, 4, 1200)
+	recentOutput := compactShellOutput(input.Session.RecentShellOutput, options.recentShellHeadLines, options.recentShellTailLines, options.recentShellMaxChars)
 	if shouldIncludeContextSnippet(seenSnippets, recentOutput) {
 		sections = append(sections, "Recent shell output:\n"+recentOutput)
+	}
+	if len(input.Session.RecentManualCommands) > 0 {
+		lines := append([]string(nil), input.Session.RecentManualCommands...)
+		sections = append(sections, "Recent manual shell commands:\n"+strings.Join(lines, "\n"))
+	}
+	if len(input.Session.RecentManualActions) > 0 {
+		lines := append([]string(nil), input.Session.RecentManualActions...)
+		sections = append(sections, "Recent manual shell actions:\n"+strings.Join(lines, "\n"))
 	}
 
 	if input.Task.LastCommandResult != nil {
@@ -552,10 +564,53 @@ func buildTurnContext(input controller.AgentInput) string {
 		if strings.TrimSpace(last.SemanticSource) != "" {
 			lines = append(lines, "semantic_source="+last.SemanticSource)
 		}
-		if summary := compactShellOutput(last.Summary, 8, 4, 800); shouldIncludeContextSnippet(seenSnippets, summary) {
+		if summary := compactShellOutput(last.Summary, options.commandSummaryHeadLines, options.commandSummaryTailLines, options.commandSummaryMaxChars); shouldIncludeContextSnippet(seenSnippets, summary) {
 			lines = append(lines, "summary="+summary)
 		}
 		sections = append(sections, "Last command result:\n"+strings.Join(lines, "\n"))
+	}
+
+	if input.Task.LastPatchApplyResult != nil {
+		last := input.Task.LastPatchApplyResult
+		lines := []string{
+			fmt.Sprintf("applied=%t", last.Applied),
+			fmt.Sprintf("created=%d", last.Created),
+			fmt.Sprintf("updated=%d", last.Updated),
+			fmt.Sprintf("deleted=%d", last.Deleted),
+			fmt.Sprintf("renamed=%d", last.Renamed),
+		}
+		if strings.TrimSpace(last.WorkspaceRoot) != "" {
+			lines = append(lines, "workspace_root="+last.WorkspaceRoot)
+		}
+		if strings.TrimSpace(last.Validation) != "" {
+			lines = append(lines, "validation="+last.Validation)
+		}
+		if strings.TrimSpace(last.Error) != "" {
+			lines = append(lines, "error="+clipText(last.Error, 240))
+		}
+		if len(last.Files) > 0 {
+			fileLines := make([]string, 0, len(last.Files))
+			for _, file := range last.Files {
+				path := strings.TrimSpace(file.NewPath)
+				if path == "" {
+					path = strings.TrimSpace(file.OldPath)
+				}
+				fileLines = append(fileLines, fmt.Sprintf("%s %s", file.Operation, path))
+			}
+			lines = append(lines, "files="+clipText(strings.Join(fileLines, "; "), 400))
+		}
+		sections = append(sections, "Last patch apply result:\n"+strings.Join(lines, "\n"))
+	}
+
+	if input.Task.PrimaryExecutionID != "" || len(input.Task.ExecutionRegistry) > 0 {
+		lines := make([]string, 0, 2)
+		if input.Task.PrimaryExecutionID != "" {
+			lines = append(lines, "primary_execution="+input.Task.PrimaryExecutionID)
+		}
+		if len(input.Task.ExecutionRegistry) > 0 {
+			lines = append(lines, fmt.Sprintf("active_execution_count=%d", len(input.Task.ExecutionRegistry)))
+		}
+		sections = append(sections, "Execution registry:\n"+strings.Join(lines, "\n"))
 	}
 
 	if input.Task.CurrentExecution != nil {
@@ -565,6 +620,12 @@ func buildTurnContext(input controller.AgentInput) string {
 			"command=" + current.Command,
 			"origin=" + string(current.Origin),
 			"state=" + string(current.State),
+		}
+		if current.TrackedShell.SessionName != "" {
+			lines = append(lines, "execution_session="+current.TrackedShell.SessionName)
+		}
+		if current.TrackedShell.PaneID != "" {
+			lines = append(lines, "execution_pane="+current.TrackedShell.PaneID)
 		}
 		if strings.TrimSpace(current.ForegroundCommand) != "" {
 			lines = append(lines, "foreground_command="+current.ForegroundCommand)
@@ -584,13 +645,13 @@ func buildTurnContext(input controller.AgentInput) string {
 		if current.ShellContextAfter != nil && strings.TrimSpace(current.ShellContextAfter.PromptLine()) != "" {
 			lines = append(lines, "prompt_after="+current.ShellContextAfter.PromptLine())
 		}
-		if tail := compactShellOutput(current.LatestOutputTail, 6, 3, 600); shouldIncludeContextSnippet(seenSnippets, tail) {
+		if tail := compactShellOutput(current.LatestOutputTail, options.activeTailHeadLines, options.activeTailTailLines, options.activeTailMaxChars); shouldIncludeContextSnippet(seenSnippets, tail) {
 			lines = append(lines, "latest_output="+tail)
 		}
 		sections = append(sections, "Current active command:\n"+strings.Join(lines, "\n"))
 	}
 
-	if snapshot := compactShellOutput(input.Task.RecoverySnapshot, 20, 20, 4000); shouldIncludeContextSnippet(seenSnippets, snapshot) {
+	if snapshot := compactShellOutput(input.Task.RecoverySnapshot, options.snapshotHeadLines, options.snapshotTailLines, options.snapshotMaxChars); shouldIncludeContextSnippet(seenSnippets, snapshot) {
 		sections = append(sections, "Recovery terminal snapshot:\n"+snapshot)
 	}
 
@@ -615,11 +676,67 @@ func buildTurnContext(input controller.AgentInput) string {
 		sections = append(sections, "Pending approval under refinement:\n"+strings.Join(approvalLines, "\n"))
 	}
 
-	if transcript := summarizeTranscript(input.Task.PriorTranscript, 8); transcript != "" {
+	if summary := strings.TrimSpace(input.Task.CompactedSummary); summary != "" {
+		sections = append(sections, "Compacted task summary:\n"+summary)
+	}
+
+	if transcript := summarizeTranscript(input.Task.PriorTranscript, options.transcriptMaxEvents); transcript != "" {
 		sections = append(sections, "Recent transcript:\n"+transcript)
 	}
 
 	return strings.Join(sections, "\n\n")
+}
+
+type turnContextOptions struct {
+	recentShellHeadLines    int
+	recentShellTailLines    int
+	recentShellMaxChars     int
+	commandSummaryHeadLines int
+	commandSummaryTailLines int
+	commandSummaryMaxChars  int
+	activeTailHeadLines     int
+	activeTailTailLines     int
+	activeTailMaxChars      int
+	snapshotHeadLines       int
+	snapshotTailLines       int
+	snapshotMaxChars        int
+	transcriptMaxEvents     int
+}
+
+func turnContextOptionsForTask(task controller.TaskContext) turnContextOptions {
+	if strings.TrimSpace(task.CompactedSummary) != "" {
+		return turnContextOptions{
+			recentShellHeadLines:    4,
+			recentShellTailLines:    2,
+			recentShellMaxChars:     600,
+			commandSummaryHeadLines: 4,
+			commandSummaryTailLines: 2,
+			commandSummaryMaxChars:  400,
+			activeTailHeadLines:     4,
+			activeTailTailLines:     2,
+			activeTailMaxChars:      300,
+			snapshotHeadLines:       8,
+			snapshotTailLines:       8,
+			snapshotMaxChars:        1200,
+			transcriptMaxEvents:     6,
+		}
+	}
+
+	return turnContextOptions{
+		recentShellHeadLines:    8,
+		recentShellTailLines:    4,
+		recentShellMaxChars:     1200,
+		commandSummaryHeadLines: 8,
+		commandSummaryTailLines: 4,
+		commandSummaryMaxChars:  800,
+		activeTailHeadLines:     6,
+		activeTailTailLines:     3,
+		activeTailMaxChars:      600,
+		snapshotHeadLines:       20,
+		snapshotTailLines:       20,
+		snapshotMaxChars:        4000,
+		transcriptMaxEvents:     16,
+	}
 }
 
 func summarizeTranscript(events []controller.TranscriptEvent, maxEvents int) string {
@@ -687,6 +804,12 @@ func summarizeTranscriptEvent(event controller.TranscriptEvent) string {
 			return fmt.Sprintf("%s: canceled %s", event.Kind, clipText(payload.Command, 180))
 		}
 		return fmt.Sprintf("%s: exit=%d %s", event.Kind, payload.ExitCode, clipText(payload.Command, 180))
+	case controller.EventPatchApplyResult:
+		payload, _ := event.Payload.(controller.PatchApplySummary)
+		if payload.Applied {
+			return fmt.Sprintf("%s: created=%d updated=%d deleted=%d renamed=%d", event.Kind, payload.Created, payload.Updated, payload.Deleted, payload.Renamed)
+		}
+		return fmt.Sprintf("%s: failed %s", event.Kind, clipText(payload.Error, 180))
 	case controller.EventModelInfo:
 		payload, _ := event.Payload.(controller.AgentModelInfo)
 		model := payload.ResponseModel
@@ -809,6 +932,7 @@ Return only the JSON object required by the schema.
 Rules:
 - Keep "message" concise and useful.
 - Only use "plan_summary" and "plan_steps" when the user is asking for a plan, next steps, strategy, troubleshooting, or how to fix/approach something, or when a multi-step plan is genuinely necessary to answer well.
+- If the user asks for an ordered multi-step workflow, reversible edit-and-restore flow, or checklist-like execution, emit a concise plan/checklist that matches that requested sequence and keep the next action aligned to it.
 - Do not emit a plan for simple descriptive, factual, or status-summary requests.
 - If an active plan is present in context, prefer continuing it from the current in-progress or pending step instead of inventing a new unrelated plan.
 - For requests to inspect the current directory, repository, files, environment, or system state, prefer a "proposal_command" over answering from stale context.
@@ -816,10 +940,17 @@ Rules:
 - Never imply that you executed a shell command unless Shuttle has actual command/result context for it.
 - Never imply that a proposed patch or diff has already been applied.
 - Do not claim that files created by a proposed patch already exist, are executable, or can be referenced by later commands until Shuttle explicitly confirms the patch was applied.
+- Patch proposals and approvals must use git-style unified diff text in "proposal_patch" or "approval_patch", relative to the local workspace root shown in context.
+- Do not emit the non-standard "*** Begin Patch" format.
+- When you emit a patch, output only the raw unified diff text with exact hunk headers and counts. Do not wrap the diff in prose, bullets, or code fences.
+- Patch application mutates the local workspace root, not the active remote shell host. If the shell prompt is remote, keep local patch effects and remote shell effects clearly separate.
+- Never propose a shell command that invokes apply_patch, git apply, patch, or any heredoc-based patch application tool for local workspace edits. Use "proposal_kind":"patch" or patch approval fields instead.
 - If you propose a shell action, set "proposal_kind" to "command" and fill "proposal_command".
-- If you propose sending a small raw key sequence to an already-active prompt or fullscreen app, set "proposal_kind" to "keys" and fill "proposal_keys". Use a literal newline in "proposal_keys" when Enter should be sent.
+- If you propose sending a small raw key sequence to an already-active prompt or fullscreen app, set "proposal_kind" to "keys" and fill "proposal_keys". Use a literal newline in "proposal_keys" when Enter should be sent. For non-printing tmux key events such as Ctrl+C or Escape, use tokens like "<Ctrl+C>" or "<Esc>" inside "proposal_keys".
 - If you propose a patch, set "proposal_kind" to "patch" and fill "proposal_patch".
 - If no proposal is needed, leave proposal fields empty.
+- If the session context says "approval_mode=auto", safe local inspection or verification commands may be auto-executed by Shuttle. In that mode, prefer "proposal_command" for safe local commands and reserve approvals for writes, destructive actions, patches, remote work, network/process-control, or other user-confirmed steps.
+- If the session context says "approval_mode=dangerous", Shuttle may auto-run agent commands and auto-apply agent patches without confirmation. Only rely on that for clearly intended task work in a trusted workspace, and still avoid destructive or unnecessary actions.
 - If an action is destructive, risky, or should be user-confirmed, leave proposal fields empty and fill the approval fields instead.
 - For approvals, set "approval_kind" to "command", "patch", or "plan" and set "approval_risk" to "low", "medium", or "high".
 - If the task is a refinement of a pending approval, preserve the original command or patch unless the context clearly requires changing it.
@@ -830,5 +961,8 @@ Rules:
 - If a recovery terminal snapshot is present, use it to reason about the current terminal state. Prefer actionable recovery guidance over abstract commentary.
 - If a current active command is in "awaiting_input", "interactive_fullscreen", or "lost" and the user asks a general question such as what to do next, what happened, help, or how to continue, prioritize recovery guidance over new proposals or plans.
 - If a current active command is in "awaiting_input" or "interactive_fullscreen" and the user explicitly asks you to send the needed input on their behalf, prefer a "keys" proposal over prose.
-- After a proposed or approved command completes, if there is no active plan, default to summarizing the result and waiting for the user. Only chain into another command when the user's request clearly requires more shell work.
+- After a proposed or approved command completes, if there is no active plan, stop only when the user's request is already satisfied. If the user's request clearly still requires more shell work, propose the next action.
+- If the latest command was a read-only inspection command and the transcript or command result still shows unresolved work, do not stop at diagnosis. Propose exactly one next action now.
+- Prefer stopping after a satisfied one-shot request. Do not invent extra verification or follow-up work unless the user explicitly asked for verification, the request is part of an active multi-step plan, or the available result is ambiguous.
+- If the recent transcript shows that the user explicitly asked for serial, ordered, or one-command-at-a-time shell work, and the latest command only completed one step of that request, summarize briefly and propose exactly one next command now. Do not lump multiple shell actions together, and do not wait for an extra "go ahead" unless the user explicitly asked to approve each step separately.
 - Leave unused fields as empty strings, and leave unused arrays empty.`

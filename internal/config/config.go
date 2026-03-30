@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,9 +13,10 @@ import (
 )
 
 const (
-	defaultSessionName = "shuttle"
-	defaultLogName     = "shuttle.log"
-	defaultTraceName   = "trace.log"
+	defaultLogName    = "shuttle.log"
+	defaultTraceName  = "trace.log"
+	managedSocketName = "tmux.sock"
+	workspaceIDLength = 12
 )
 
 type TraceMode string
@@ -25,6 +28,8 @@ const (
 )
 
 type Config struct {
+	Version                       bool
+	WorkspaceID                   string
 	SessionName                   string
 	StartDir                      string
 	TmuxSocket                    string
@@ -47,6 +52,8 @@ type Config struct {
 	ProviderAPIKey                string
 	ProviderAPIKeyEnvVar          string
 	ProviderCLICommand            string
+	RuntimeType                   string
+	RuntimeCommand                string
 	AllowPlaintextProviderSecrets bool
 	ProviderFlagsSet              bool
 }
@@ -71,12 +78,14 @@ func Parse(args []string) (Config, error) {
 	if override := os.Getenv("SHUTTLE_RUNTIME_DIR"); override != "" {
 		runtimeDir = override
 	}
-	sessionName := envOrDefault("SHUTTLE_SESSION", defaultSessionName)
-	socketName := os.Getenv("SHUTTLE_TMUX_SOCKET")
+	sessionName := strings.TrimSpace(os.Getenv("SHUTTLE_SESSION"))
+	socketName := strings.TrimSpace(os.Getenv("SHUTTLE_TMUX_SOCKET"))
 	providerType := envOrDefault("SHUTTLE_PROVIDER", "mock")
 	providerAuthMethod := envOrDefault("SHUTTLE_AUTH", "auto")
 	providerModel := os.Getenv("SHUTTLE_MODEL")
 	providerBaseURL := os.Getenv("SHUTTLE_BASE_URL")
+	runtimeType := envOrDefault("SHUTTLE_RUNTIME", "builtin")
+	runtimeCommand := os.Getenv("SHUTTLE_RUNTIME_COMMAND")
 	traceMode, err := resolveTraceMode(os.Getenv("SHUTTLE_TRACE"), os.Getenv("SHUTTLE_TRACE_MODE"))
 	if err != nil {
 		return Config{}, err
@@ -89,6 +98,7 @@ func Parse(args []string) (Config, error) {
 	fs := flag.NewFlagSet("shuttle", flag.ContinueOnError)
 
 	cfg := Config{}
+	fs.BoolVar(&cfg.Version, "version", false, "print Shuttle version information and exit")
 	fs.StringVar(&cfg.SessionName, "session", sessionName, "tmux session name")
 	fs.StringVar(&cfg.StartDir, "dir", workingDir, "working directory for new panes")
 	fs.StringVar(&cfg.TmuxSocket, "socket", socketName, "tmux socket name for an isolated server")
@@ -103,11 +113,13 @@ func Parse(args []string) (Config, error) {
 	fs.StringVar(&cfg.Track, "track", "", "inject a tracked shell command into the top pane and wait for its result")
 	fs.BoolVar(&cfg.TUI, "tui", false, "run the minimal interactive TUI shell")
 	fs.BoolVar(&cfg.InjectEnter, "enter", true, "append Enter when injecting a command")
-	fs.StringVar(&cfg.ProviderType, "provider", providerType, "agent provider to use: mock, openai, openrouter, openwebui, anthropic, ollama, codex_cli, or custom")
-	fs.StringVar(&cfg.ProviderAuthMethod, "auth", providerAuthMethod, "auth method for the selected provider: auto, api_key, codex_login, or none")
+	fs.StringVar(&cfg.ProviderType, "provider", providerType, "inference provider to use: mock, openai, openrouter, openwebui, anthropic, ollama, codex_cli, or custom")
+	fs.StringVar(&cfg.ProviderAuthMethod, "auth", providerAuthMethod, "auth method for the selected provider: auto, api_key, codex_login, inherited_env, or none")
 	fs.StringVar(&cfg.ProviderModel, "model", providerModel, "model name for the selected provider")
 	fs.StringVar(&cfg.ProviderBaseURL, "base-url", providerBaseURL, "base URL for the selected provider API")
 	fs.StringVar(&cfg.ProviderCLICommand, "cli-command", providerCLICommand, "CLI command path for CLI-backed providers")
+	fs.StringVar(&cfg.RuntimeType, "runtime", runtimeType, "coding runtime to use: builtin, pi, codex_sdk, or auto")
+	fs.StringVar(&cfg.RuntimeCommand, "runtime-command", runtimeCommand, "command path for selected coding runtime")
 	fs.BoolVar(&cfg.AllowPlaintextProviderSecrets, "allow-plaintext-provider-secrets", allowPlaintextProviderSecrets, "allow less-secure local plaintext fallback for provider secrets when OS keyring is unavailable")
 
 	if err := fs.Parse(args); err != nil {
@@ -115,14 +127,10 @@ func Parse(args []string) (Config, error) {
 	}
 	fs.Visit(func(flag *flag.Flag) {
 		switch flag.Name {
-		case "provider", "auth", "model", "base-url", "cli-command":
+		case "provider", "auth", "model", "base-url", "cli-command", "runtime", "runtime-command":
 			cfg.ProviderFlagsSet = true
 		}
 	})
-
-	if cfg.SessionName == "" {
-		return Config{}, errors.New("session name must not be empty")
-	}
 
 	startDir, err := filepath.Abs(cfg.StartDir)
 	if err != nil {
@@ -140,6 +148,14 @@ func Parse(args []string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.RuntimeDir = runtimeDirAbs
+	cfg.WorkspaceID = workspaceIDForPath(cfg.StartDir)
+	if strings.TrimSpace(cfg.SessionName) == "" {
+		cfg.SessionName = managedSessionName(cfg.WorkspaceID)
+	}
+	cfg.SessionName = normalizeSessionName(cfg.SessionName)
+	if strings.TrimSpace(cfg.TmuxSocket) == "" {
+		cfg.TmuxSocket = managedSocketPath(cfg.RuntimeDir)
+	}
 	cfg.LogPath = filepath.Join(cfg.StateDir, defaultLogName)
 	if strings.TrimSpace(cfg.TracePath) == "" {
 		cfg.TracePath = filepath.Join(cfg.StateDir, defaultTraceName)
@@ -164,6 +180,7 @@ func Parse(args []string) (Config, error) {
 		return Config{}, errors.New("trace mode must be one of: off, safe, sensitive")
 	}
 	cfg.ProviderType = normalizeProviderType(cfg.ProviderType)
+	cfg.RuntimeType = normalizeRuntimeType(cfg.RuntimeType)
 	authMethod, err := normalizeProviderAuthMethod(cfg.ProviderAuthMethod)
 	if err != nil {
 		return Config{}, err
@@ -172,6 +189,35 @@ func Parse(args []string) (Config, error) {
 	cfg.ProviderAPIKey, cfg.ProviderAPIKeyEnvVar = resolveProviderAPIKey(cfg.ProviderType, cfg.ProviderAuthMethod)
 
 	return cfg, nil
+}
+
+func workspaceIDForPath(path string) string {
+	sum := sha256.Sum256([]byte(filepath.Clean(path)))
+	encoded := hex.EncodeToString(sum[:])
+	if len(encoded) > workspaceIDLength {
+		return encoded[:workspaceIDLength]
+	}
+	return encoded
+}
+
+func managedSessionName(workspaceID string) string {
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return "shuttle"
+	}
+	return "shuttle_" + workspaceID
+}
+
+func normalizeSessionName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	return strings.ReplaceAll(name, ":", "_")
+}
+
+func managedSocketPath(runtimeDir string) string {
+	return filepath.Join(runtimeDir, managedSocketName)
 }
 
 func envOrDefault(key string, fallback string) string {
@@ -278,6 +324,21 @@ func normalizeProviderType(value string) string {
 	}
 }
 
+func normalizeRuntimeType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "builtin":
+		return "builtin"
+	case "auto":
+		return "auto"
+	case "codex-sdk":
+		return "codex_sdk"
+	case "pi-runtime":
+		return "pi"
+	default:
+		return strings.ToLower(strings.TrimSpace(value))
+	}
+}
+
 func normalizeProviderAuthMethod(value string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "", "auto":
@@ -286,10 +347,12 @@ func normalizeProviderAuthMethod(value string) (string, error) {
 		return "api_key", nil
 	case "codex_login":
 		return "codex_login", nil
+	case "inherited_env":
+		return "inherited_env", nil
 	case "none":
 		return "none", nil
 	default:
-		return "", errors.New("auth method must be one of: auto, api_key, codex_login, none")
+		return "", errors.New("auth method must be one of: auto, api_key, codex_login, inherited_env, none")
 	}
 }
 

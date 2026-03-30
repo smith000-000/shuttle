@@ -33,8 +33,10 @@ type styles struct {
 	composerPromptAgent   lipgloss.Style
 	composerPromptRefine  lipgloss.Style
 	input                 lipgloss.Style
+	inputGhost            lipgloss.Style
 	status                lipgloss.Style
 	statusBusy            lipgloss.Style
+	statusRoot            lipgloss.Style
 	statusRemote          lipgloss.Style
 	tail                  lipgloss.Style
 	tailLabel             lipgloss.Style
@@ -51,6 +53,11 @@ type styles struct {
 	bodyResult            lipgloss.Style
 	bodyAgent             lipgloss.Style
 	bodyError             lipgloss.Style
+	glyphSystem           lipgloss.Style
+	glyphShell            lipgloss.Style
+	glyphResult           lipgloss.Style
+	glyphAgent            lipgloss.Style
+	glyphError            lipgloss.Style
 }
 
 func newStyles() styles {
@@ -157,12 +164,19 @@ func newStyles() styles {
 			Padding(0, 1),
 		input: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("255")),
+		inputGhost: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("245")),
 		status: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("246")).
 			Padding(0, 1),
 		statusBusy: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("230")).
 			Background(lipgloss.Color("160")).
+			Bold(true).
+			Padding(0, 1),
+		statusRoot: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("230")).
+			Background(lipgloss.Color("202")).
 			Bold(true).
 			Padding(0, 1),
 		statusRemote: lipgloss.NewStyle().
@@ -219,5 +233,20 @@ func newStyles() styles {
 			Foreground(lipgloss.Color("230")),
 		bodyError: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("252")),
+		glyphSystem: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("81")).
+			Bold(true),
+		glyphShell: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("111")).
+			Bold(true),
+		glyphResult: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("114")).
+			Bold(true),
+		glyphAgent: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("221")).
+			Bold(true),
+		glyphError: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("203")).
+			Bold(true),
 	}
 }

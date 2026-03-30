@@ -61,26 +61,57 @@ The real problem is not just timeout values.
 
 The real problem is that Shuttle currently models shell execution as a blocking function call, when it should model it as a job with state transitions.
 
+That diagnosis still holds after the recent hardening work:
+- the shell substrate is much stronger now
+- serial agentic looping is workable
+- the serial tracking model is now stable enough that the next slice should not be more shell-tracking churn
+- the remaining risk is mostly transcript/UI complexity and monolithic controller/TUI code, not core command truth
+
 ## Current Branch Status
-On `command-execution-redesign`, Shuttle now has a usable first pass of the redesigned execution stack:
+On `semantic-shell-bootstrap`, Shuttle now has a usable first pass of the redesigned execution stack:
 - first-class monitored executions for tracked shell commands
 - local managed transport using sourced temp scripts instead of giant inline wrappers where possible
 - active execution states including `awaiting_input`, `interactive_fullscreen`, `background_monitoring`, `canceled`, and `lost`
 - `F2` take-control handoff and reconciliation back into Shuttle
-- raw `KEYS>` input for active prompts and fullscreen apps
+- raw `KEYS>` input for active prompts and fullscreen apps, including explicit control-key tokens such as `<Ctrl+C>`
 - agent-side recovery guidance informed by a larger recovery snapshot
 - first-class agent `keys` proposals so the model can ask Shuttle to send small raw key sequences instead of only narrating them
+- bounded interactive/fullscreen check-ins that eventually pause automatic model retries and require an explicit `Ctrl+G` resume
+- serial execution ownership enforcement plus an internal execution registry so future multi-card work has a stable base without allowing overlap yet
+- serial auto-continue hardening so ordered one-command-at-a-time workflows can keep progressing without an extra user "go"
+- plan cards demoted to informational state instead of approval-like control flow, with continuation turns now suppressing stale replacement plans and emitting explicit plan-complete state when needed
+- quiet commands like `sleep 20` no longer reconcile as completed from stale prompt scrollback after `F2`
+- transcript result entries now reflect exit status instead of always presenting a green success result
 
 What is still not done:
-- monitor-side confidence is still too heuristic in some quiet or ambiguous takeovers
 - fullscreen/interactive detection still needs stronger terminal-behavior signals beyond current tmux metadata heuristics
-- noisy transport/script echoes still need occasional cleanup in tails and recovery snapshots
+- transcript and UI polish still need cleanup now that the shell/runtime model has changed substantially
 - the agent still needs tighter guardrails around when it should propose raw keys versus when it should simply tell the user to take control
 - semantic shell integration is only partially implemented; local shells now have a first-pass semantic shim, but Shuttle still needs broader raw-marker consumption and subshell/bootstrap support
+- `internal/controller/controller.go` and `internal/tui/model.go` are now large enough that further point fixes should come with a decomposition backlog:
+  - controller: execution lifecycle/state machine, agent-turn normalization, plan management, and tracked-shell ownership helpers
+  - TUI: composer/input routing, transcript rendering, proposal/approval state, and handoff/fullscreen control
+
+Recent direction change on `semantic-shell-bootstrap`:
+- keep one persistent user shell pane as the continuity surface for cwd, `$>`, and recent manual shell history
+- let `F2` normally target that persistent shell, but temporarily follow an owned interactive execution pane when that pane is what needs direct user control
+- run approved agent shell commands in owned tmux execution panes by default
+- exception: when the tracked user shell is remote, keep agent shell execution in that tracked remote shell instead of opening a local owned pane
+- feed the agent structured recent manual commands/actions plus full command results, instead of forcing both concerns through one shared pane
+
+That hybrid model is now the intended baseline. The remaining work is to simplify controller execution state around it, not to go back to “everything happens in the tracked shell pane.”
 
 ## Recommended Direction
 
-Before adding any tiny local classifier, the next major architecture upgrade should be standards-based semantic shell integration:
+The next major product slice should not be another command-tracking redesign.
+
+For this branch, the better direction is:
+- keep the current hybrid shell model stable
+- clean up transcript/UI noise around results, plans, and handoff
+- split the large controller/TUI files before layering more behavior onto them
+- defer multi-card / parallel execution work to a later branch
+
+Semantic-shell expansion remains valuable, but it is no longer the immediate blocker for normal serial use. When that work resumes, it should still stay standards-based:
 - `OSC 133` for prompt/command lifecycle
 - `OSC 7` for cwd tracking
 
@@ -231,9 +262,9 @@ Examples:
 
 #### Mode C. Interactive Handoff Command
 For commands that need terminal ownership:
-- submit command to the same top pane
+- submit command to the pane chosen by controller policy for that execution
 - expose live tail immediately
-- allow explicit `F2` handoff into the exact same tmux pane
+- allow explicit `F2` handoff into the exact tracked execution pane
 - on detach, reconcile shell state and resume Shuttle
 
 Examples:
@@ -273,6 +304,7 @@ Recommended behavior:
 - if the command completes quickly, continue automatically as it does today
 - if the command runs longer than a soft threshold, move into monitored mode
 - for agent-owned monitored commands, schedule periodic check-ins
+- for `awaiting_input` and `interactive_fullscreen`, stop automatic check-ins after a bounded retry count and hand control back to the user until they explicitly resume with `Ctrl+G` or send the agent a new note
 
 Check-in prompt shape:
 - command is still running
@@ -291,13 +323,14 @@ This is the closest Shuttle analogue to the Warp behavior you described:
 Important constraint:
 - do not spam the model every second
 - rate-limit check-ins aggressively, for example after 10s, 30s, 60s, then every few minutes
+- interactive waits should have a breakpoint rather than retry forever; once the pause threshold is hit, Shuttle should stop polling the model until the user explicitly resumes
 
 ### 6. Treat Interactive Handoff as a Normal State Transition
 When the user presses `F2`:
 - cancel only the local wait operation
 - do not treat that cancellation as a user-facing error
 - transition the execution into `handoff_active`
-- attach to the same tmux session and same top pane
+- attach to the controller-selected take-control pane, which may be the persistent shell pane or a temporary owned execution pane
 - suspend automated waiting logic
 
 When the user detaches back:
