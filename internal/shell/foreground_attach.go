@@ -254,7 +254,13 @@ func focusAttachedForegroundCapture(captured string, currentPaneCommand string) 
 	captured = sanitizeCapturedBody(captured)
 	currentPaneCommand = strings.TrimSpace(currentPaneCommand)
 	if captured == "" || currentPaneCommand == "" || paneCommandIsShell(currentPaneCommand) {
+		if paneCommandAllowsPromptInference(currentPaneCommand) {
+			return focusPromptInferenceCapture(captured)
+		}
 		return captured
+	}
+	if paneCommandAllowsPromptInference(currentPaneCommand) {
+		return focusPromptInferenceCapture(captured)
 	}
 
 	lines := strings.Split(strings.ReplaceAll(captured, "\r\n", "\n"), "\n")
@@ -274,6 +280,9 @@ func stripEchoedForegroundCommand(body string, currentPaneCommand string) string
 	if body == "" || currentPaneCommand == "" {
 		return body
 	}
+	if paneCommandAllowsPromptInference(currentPaneCommand) {
+		return stripPromptPrefixedForegroundCommand(body)
+	}
 
 	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
 	if len(lines) == 0 {
@@ -289,6 +298,63 @@ func stripEchoedForegroundCommand(body string, currentPaneCommand string) string
 	}
 
 	return strings.TrimSpace(strings.Join(lines[startIndex+1:], "\n"))
+}
+
+func focusPromptInferenceCapture(captured string) string {
+	lines := strings.Split(strings.ReplaceAll(captured, "\r\n", "\n"), "\n")
+	for index := len(lines) - 1; index >= 0; index-- {
+		if !lineStartsWithPromptPrefix(lines[index]) {
+			continue
+		}
+		if index == len(lines)-1 {
+			return strings.TrimSpace(lines[index])
+		}
+		return strings.TrimSpace(strings.Join(lines[index:], "\n"))
+	}
+	return captured
+}
+
+func stripPromptPrefixedForegroundCommand(body string) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return body
+	}
+
+	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
+	if !lineStartsWithPromptPrefix(lines[0]) {
+		return body
+	}
+	if len(lines) < 2 {
+		return ""
+	}
+	if lineLooksLikePrompt(lines[1]) {
+		return strings.TrimSpace(strings.Join(lines[1:], "\n"))
+	}
+	return strings.TrimSpace(strings.Join(lines[1:], "\n"))
+}
+
+func lineStartsWithPromptPrefix(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return false
+	}
+	if lineLooksLikePrompt(trimmed) {
+		return true
+	}
+	for _, suffix := range []string{"# ", "$ ", "% ", "> "} {
+		index := strings.Index(trimmed, suffix)
+		if index < 0 {
+			continue
+		}
+		candidate := strings.TrimSpace(trimmed[:index+1])
+		if candidate == "" {
+			continue
+		}
+		if context, ok := ParsePromptContextFromCapture(candidate); ok && strings.TrimSpace(context.RawLine) == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func lineStartsForegroundCommand(line string, currentPaneCommand string) bool {

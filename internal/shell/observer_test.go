@@ -409,6 +409,70 @@ func TestAttachForegroundCommandQuietProcessDoesNotReturnPaneScrollback(t *testi
 	}
 }
 
+func TestAttachForegroundCommandPromptInferenceFocusesOnLatestPromptWindow(t *testing.T) {
+	client := &fakeSemanticPaneClient{
+		pane: tmux.Pane{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/29"},
+		panes: []tmux.Pane{
+			{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/29"},
+			{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/29"},
+			{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/29"},
+		},
+		captures: []string{
+			"root@web01:/srv/app# cat file.txt\nalpha\nroot@web01:/srv/app# rm file.txt",
+			"root@web01:/srv/app# cat file.txt\nalpha\nroot@web01:/srv/app# rm file.txt",
+			"root@web01:/srv/app# cat file.txt\nalpha\nroot@web01:/srv/app# rm file.txt\nroot@web01:/srv/app#",
+		},
+	}
+	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
+
+	monitor, err := observer.AttachForegroundCommand(context.Background(), "%0")
+	if err != nil {
+		t.Fatalf("AttachForegroundCommand() error = %v", err)
+	}
+	if monitor == nil {
+		t.Fatal("expected active foreground monitor")
+	}
+	result, err := monitor.Wait()
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if result.Captured != "" {
+		t.Fatalf("expected quiet prompt-inference command not to replay prior output, got %q", result.Captured)
+	}
+}
+
+func TestAttachForegroundCommandPromptInferencePreservesCurrentCommandOutputOnly(t *testing.T) {
+	client := &fakeSemanticPaneClient{
+		pane: tmux.Pane{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/30"},
+		panes: []tmux.Pane{
+			{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/30"},
+			{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/30"},
+			{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/30"},
+		},
+		captures: []string{
+			"root@web01:/srv/app# cat old.txt\nold\nroot@web01:/srv/app# cat new.txt",
+			"root@web01:/srv/app# cat old.txt\nold\nroot@web01:/srv/app# cat new.txt\nnew",
+			"root@web01:/srv/app# cat old.txt\nold\nroot@web01:/srv/app# cat new.txt\nnew\nroot@web01:/srv/app#",
+		},
+	}
+	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
+
+	monitor, err := observer.AttachForegroundCommand(context.Background(), "%0")
+	if err != nil {
+		t.Fatalf("AttachForegroundCommand() error = %v", err)
+	}
+	if monitor == nil {
+		t.Fatal("expected active foreground monitor")
+	}
+	result, err := monitor.Wait()
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if result.Captured != "new" {
+		t.Fatalf("expected prompt-inference command to keep only current output, got %q", result.Captured)
+	}
+}
+
 func TestCaptureShellContextIgnoresHistoricalPromptWhileForegroundCommandActive(t *testing.T) {
 	client := &fakeSemanticPaneClient{
 		pane:    tmux.Pane{ID: "%0", CurrentCommand: "sleep", TTY: "/dev/pts/26"},
