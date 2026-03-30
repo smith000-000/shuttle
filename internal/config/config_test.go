@@ -171,6 +171,20 @@ func TestParseCodexCLIDoesNotResolveAPIKey(t *testing.T) {
 	}
 }
 
+func TestParseRuntimeFlags(t *testing.T) {
+	cfg, err := Parse([]string{"--runtime", "pi", "--runtime-command", "/usr/local/bin/pi"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	if cfg.RuntimeType != "pi" {
+		t.Fatalf("expected pi runtime, got %q", cfg.RuntimeType)
+	}
+	if cfg.RuntimeCommand != "/usr/local/bin/pi" {
+		t.Fatalf("expected runtime command parse, got %q", cfg.RuntimeCommand)
+	}
+}
+
 func TestParseOllamaDoesNotResolveAPIKey(t *testing.T) {
 	t.Setenv("SHUTTLE_API_KEY", "shuttle-key")
 
