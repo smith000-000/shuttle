@@ -72,6 +72,11 @@ Responsibilities:
 
 The observer knows about shell and tmux mechanics. It should not own transcript policy or TUI rendering decisions.
 
+Current transition rule:
+- shell-transition commands like `ssh`, `exit`, and `sudo -i` do not settle from a single apparent prompt return
+- Shuttle now requires a candidate prompt to be re-observed and then verified by a context probe before the transition is treated as settled
+- if the tail still looks like `password:` or other awaiting-input text, Shuttle keeps the transition unresolved and does not inject the probe
+
 ## 2.3 Semantic Collectors
 
 Relevant files:

@@ -13,8 +13,10 @@ As of March 25, 2026, the implementation state is:
 - Milestone 5: in progress
 
 Recently landed on `main`:
-- native unified-diff patch proposals and approvals, with first-class apply-result events and local workspace mutation through `internal/patchapply`
+- native unified-diff patch proposals and approvals, with first-class apply-result events and target-aware mutation through `internal/patchapply`
+- controller-synthesized unified diffs for common single-file `proposal_kind:"edit"` requests, so ordinary insert/replace work no longer depends on model-authored raw hunks
 - local file creation and edits through the native patch path
+- remote tracked-shell file edits through the same patch flow, with controller-managed staged payload transport, capability re-probe, and apply verification including mode checks
 - prompt/controller guardrails that prevent the agent from claiming patch-created files exist before apply succeeds
 - controller decomposition across agent, execution, monitor, patch, plan, shell, and state modules
 - TUI decomposition across input, forms, render, transcript, and state modules
@@ -23,6 +25,7 @@ Recently landed on `main`:
 - repo-level agent instructions that require doc review, including `README.md`, before PR creation
 - task-context controls for `/new` and `/compact`, including controller-owned task reset/compaction paths
 - session-local approval-mode control via `/approvals`, with bounded auto-run for safe local inspection and test commands
+- first-class `proposal_kind:"inspect_context"` so the model can refresh authoritative tracked-shell user@host/cwd state instead of relying on mixed local/remote prompt context
 - lower-right model status showing approximate live context-window usage
 - initial manual release-packaging support with ldflag-driven build metadata, `--version`, and versioned archive generation under `dist/` for Linux, macOS, and Windows
 - tag-driven GitHub Actions release packaging built on the local archive script, with workflow artifacts and release-asset upload for both `.tar.gz` and `.zip` assets
@@ -30,7 +33,7 @@ Recently landed on `main`:
 - derived release defaults for tmux identity: workspace ID from project path, a managed socket path under runtime state, and an internal session name unless explicitly overridden
 
 Execution-monitor redesign / semantic shell hardening status on `semantic-shell-bootstrap`:
-- implemented: first-class command monitor, local managed shell transport, `awaiting_input` detection, `interactive_fullscreen` detection, `lost` execution state, `F2` handoff/reconciliation, raw `KEYS>` terminal input, remote prompt-return reconciliation, and agent-driven `keys` proposals
+- implemented: first-class command monitor, local managed shell transport, `awaiting_input` detection, `interactive_fullscreen` detection, `lost` execution state, `F2` handoff/reconciliation, raw `KEYS>` terminal input, remote prompt-return reconciliation with prompt re-observation before probe injection, and agent-driven `keys` proposals
 - implemented: state-aware agent recovery guidance using active execution state plus a larger recovery snapshot
 - implemented: first-pass local semantic shell integration using `OSC 133` / `OSC 7` shims plus semantic metadata in monitor/provider context, with best-effort raw-marker parsing from tmux capture
 - implemented on `semantic-shell-bootstrap`: collector abstraction for semantic sources, spec-correct `ST`-terminated local marker emission, `osc_stream` via `tmux pipe-pane -O`, generation-scoped semantic stream files, conservative stale-generation pruning, and source precedence `osc_stream > osc_capture > state_file > heuristics`

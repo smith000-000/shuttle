@@ -1,7 +1,6 @@
 package protocol
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 )
@@ -32,16 +31,13 @@ func ParseCommandResult(captured string, markers Markers) (CommandResult, bool, 
 	for index := beginIndex + 1; index < len(lines); index++ {
 		line := strings.TrimSpace(lines[index])
 		if strings.HasPrefix(line, markers.EndPrefix) {
-			exitValue := strings.TrimPrefix(line, markers.EndPrefix)
-			if exitValue == "" {
-				return CommandResult{}, false, nil
-			}
-
-			parsedExitCode, err := strconv.Atoi(exitValue)
+			parsedExitCode, ok, err := parseEndMarkerExitCode(line, markers.EndPrefix)
 			if err != nil {
-				return CommandResult{}, false, fmt.Errorf("parse end marker exit code from %q: %w", line, err)
+				return CommandResult{}, false, err
 			}
-
+			if !ok {
+				continue
+			}
 			endIndex = index
 			exitCode = parsedExitCode
 			break
@@ -64,4 +60,16 @@ func splitLines(captured string) []string {
 	normalized := strings.ReplaceAll(captured, "\r\n", "\n")
 	normalized = strings.ReplaceAll(normalized, "\r", "\n")
 	return strings.Split(normalized, "\n")
+}
+
+func parseEndMarkerExitCode(line string, prefix string) (int, bool, error) {
+	exitValue := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+	if exitValue == "" {
+		return 0, false, nil
+	}
+	parsedExitCode, err := strconv.Atoi(exitValue)
+	if err != nil {
+		return 0, false, nil
+	}
+	return parsedExitCode, true, nil
 }

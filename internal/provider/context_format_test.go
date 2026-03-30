@@ -190,14 +190,33 @@ func TestBuildTurnContextIncludesWorkspaceRootAndPatchResult(t *testing.T) {
 			WorkingDirectory:   "/tmp/remote",
 			LocalWorkspaceRoot: "/workspace/project",
 			ApprovalMode:       controller.ApprovalModeAuto,
+			CurrentShell: &shell.PromptContext{
+				User:         "openclaw",
+				Host:         "openclaw",
+				Directory:    "/tmp/remote",
+				PromptSymbol: "$",
+				RawLine:      "openclaw@openclaw /tmp/remote $",
+				Remote:       true,
+			},
+			RemoteCapabilities: &controller.RemoteCapabilitySummary{
+				Identity:                "openclaw@openclaw",
+				Source:                  "cached",
+				LastSuccessfulTransport: controller.PatchTransportPython,
+				Git:                     true,
+				Python3:                 true,
+				Base64:                  true,
+				Mktemp:                  true,
+			},
 		},
 		Task: controller.TaskContext{
 			LastPatchApplyResult: &controller.PatchApplySummary{
-				WorkspaceRoot: "/workspace/project",
-				Validation:    "native+git_apply_check",
-				Applied:       true,
-				Created:       1,
-				Updated:       2,
+				WorkspaceRoot:    "/workspace/project",
+				Validation:       "native+git_apply_check",
+				Applied:          true,
+				Transport:        controller.PatchTransportGit,
+				CapabilitySource: "cached",
+				Created:          1,
+				Updated:          2,
 				Files: []controller.PatchApplyFile{
 					{Operation: "create", NewPath: "new.txt"},
 					{Operation: "update", NewPath: "README.md"},
@@ -206,16 +225,37 @@ func TestBuildTurnContextIncludesWorkspaceRootAndPatchResult(t *testing.T) {
 		},
 	})
 
-	if !strings.Contains(context, "workspace_root=/workspace/project") {
-		t.Fatalf("expected workspace root, got %q", context)
+	if !strings.Contains(context, "local_workspace_root=/workspace/project") {
+		t.Fatalf("expected local workspace root label, got %q", context)
 	}
 	if !strings.Contains(context, "approval_mode=auto") {
 		t.Fatalf("expected approval mode, got %q", context)
+	}
+	if !strings.Contains(context, "remote_patch_root=/tmp/remote") {
+		t.Fatalf("expected remote patch root, got %q", context)
+	}
+	if !strings.Contains(context, "remote_cwd=/tmp/remote") {
+		t.Fatalf("expected remote cwd, got %q", context)
+	}
+	if strings.Contains(context, "\ncwd=/tmp/remote") {
+		t.Fatalf("did not expect ambiguous cwd label for remote shell, got %q", context)
+	}
+	if !strings.Contains(context, "local_workspace_note=local workspace paths are not remote shell paths") {
+		t.Fatalf("expected explicit local workspace note, got %q", context)
+	}
+	if !strings.Contains(context, "remote_capabilities=git,python3,base64,mktemp") {
+		t.Fatalf("expected remote capability summary, got %q", context)
+	}
+	if !strings.Contains(context, "remote_last_patch_transport=python3") {
+		t.Fatalf("expected last successful transport, got %q", context)
 	}
 	if !strings.Contains(context, "Last patch apply result:\n") {
 		t.Fatalf("expected last patch apply section, got %q", context)
 	}
 	if !strings.Contains(context, "validation=native+git_apply_check") {
 		t.Fatalf("expected patch validation, got %q", context)
+	}
+	if !strings.Contains(context, "transport=git") || !strings.Contains(context, "capability_source=cached") {
+		t.Fatalf("expected patch transport metadata, got %q", context)
 	}
 }

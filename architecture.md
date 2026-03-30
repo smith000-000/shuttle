@@ -39,8 +39,10 @@ The local controller is the orchestration layer.
 Responsibilities:
 - tmux integration
 - shell observation
+- authoritative shell-context inspection for model/runtime coordination
 - sentinel parsing
 - command lifecycle tracking
+- target-aware patch application for local and tracked-remote filesystems
 - agent loop orchestration
 - persistence
 - provider communication
@@ -76,6 +78,7 @@ Expected responsibilities:
 - task state
 - transcript history
 - command results
+- cached remote capability inventory, including shorter-lived negative capability results so remote patch transport can re-probe stale host assumptions
 - provider profile references
 - runtime registry data for workspace recovery and reconciliation
 
@@ -102,11 +105,13 @@ Release-oriented socket/session lifecycle guidance lives in [runtime-management-
 
 ## 3.2 Agent Loop
 1. Gather recent shell context and task state.
-2. Send normalized context to the selected provider.
-3. Render the response as a message, plan, diff, or approval request.
-4. If approved, inject commands into the persistent shell or launch an owned execution pane, depending on controller policy.
-5. Observe output and parse command lifecycle events.
-6. Persist results and update the transcript.
+2. When shell identity/location certainty matters, the controller can satisfy an explicit inspect-context action from live tracked shell state before the next model turn continues.
+3. Send normalized context to the selected provider.
+4. If the provider emits a structured single-file edit intent, synthesize a normal unified diff from a fresh target snapshot before surfacing the action.
+5. Render the response as a message, plan, diff, or approval request.
+5. If approved, inject commands into the persistent shell or launch an owned execution pane, depending on controller policy.
+6. Observe output and parse command lifecycle events.
+7. Persist results and update the transcript.
 
 ## 3.3 Shell Mode
 1. The user enters a shell command from the bottom pane.

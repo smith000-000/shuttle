@@ -103,3 +103,31 @@ func TestParseCommandResultIncompletePartialEndMarker(t *testing.T) {
 		t.Fatal("expected incomplete result for partial end marker")
 	}
 }
+
+func TestParseCommandResultIgnoresWrappedEchoedEndMarkerLookalike(t *testing.T) {
+	markers := Markers{
+		CommandID: "cmd-123",
+		BeginLine: "__SHUTTLE_B__:cmd-123",
+		EndPrefix: "__SHUTTLE_E__:cmd-123:",
+	}
+
+	captured := strings.Join([]string{
+		"__SHUTTLE_B__:cmd-123",
+		"printf '%s%s\\n' '__SHUTTLE_E__:cmd-123:' \"$__shuttle_status\"",
+		"real output",
+		"__SHUTTLE_E__:cmd-123:0",
+	}, "\n")
+	result, complete, err := ParseCommandResult(captured, markers)
+	if err != nil {
+		t.Fatalf("ParseCommandResult() error = %v", err)
+	}
+	if !complete {
+		t.Fatal("expected complete result")
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", result.ExitCode)
+	}
+	if result.Body != "printf '%s%s\\n' '__SHUTTLE_E__:cmd-123:' \"$__shuttle_status\"\nreal output" {
+		t.Fatalf("unexpected body %q", result.Body)
+	}
+}

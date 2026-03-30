@@ -95,10 +95,13 @@ type fakeController struct {
 	checkInEvents            []controller.TranscriptEvent
 	shellEvents              []controller.TranscriptEvent
 	patchEvents              []controller.TranscriptEvent
+	inspectContextEvents     []controller.TranscriptEvent
 	newTaskEvents            []controller.TranscriptEvent
 	compactTaskEvents        []controller.TranscriptEvent
 	shellCommands            []string
 	appliedPatches           []string
+	appliedPatchTargets      []controller.PatchTarget
+	inspectContextCalls      int
 	decisionEvents           []controller.TranscriptEvent
 	decisions                []approvalDecisionCall
 	refinements              []refinementCall
@@ -241,14 +244,16 @@ func (f *fakeController) SubmitProposedShellCommand(_ context.Context, command s
 	return f.SubmitShellCommand(context.Background(), command)
 }
 
-func (f *fakeController) ApplyProposedPatch(_ context.Context, patch string) ([]controller.TranscriptEvent, error) {
+func (f *fakeController) ApplyProposedPatch(_ context.Context, patch string, target controller.PatchTarget) ([]controller.TranscriptEvent, error) {
 	f.appliedPatches = append(f.appliedPatches, patch)
+	f.appliedPatchTargets = append(f.appliedPatchTargets, target)
 	if len(f.patchEvents) == 0 {
 		return []controller.TranscriptEvent{
 			{
 				Kind: controller.EventPatchApplyResult,
 				Payload: controller.PatchApplySummary{
 					Applied: true,
+					Target:  target,
 					Updated: 1,
 					Files: []controller.PatchApplyFile{
 						{Operation: "update", NewPath: "README.md"},
@@ -301,6 +306,22 @@ func (f *fakeController) CompactTask(_ context.Context) ([]controller.Transcript
 		}, nil
 	}
 	return append([]controller.TranscriptEvent(nil), f.compactTaskEvents...), nil
+}
+
+func (f *fakeController) InspectProposedContext(_ context.Context) ([]controller.TranscriptEvent, error) {
+	f.inspectContextCalls++
+	if len(f.inspectContextEvents) == 0 {
+		return []controller.TranscriptEvent{{
+			Kind: controller.EventCommandResult,
+			Payload: controller.CommandResultSummary{
+				Command:  "inspect current shell context",
+				State:    controller.CommandExecutionCompleted,
+				ExitCode: 0,
+				Summary: "user_host=localuser@workstation\ncwd=/workspace/project\nremote=false",
+			},
+		}}, nil
+	}
+	return append([]controller.TranscriptEvent(nil), f.inspectContextEvents...), nil
 }
 
 func (f *fakeController) SetApprovalMode(_ context.Context, mode controller.ApprovalMode) ([]controller.TranscriptEvent, error) {

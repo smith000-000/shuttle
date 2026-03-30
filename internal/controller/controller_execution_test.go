@@ -658,6 +658,90 @@ func TestLocalControllerSubmitProposedShellCommandUsesTrackedShellWhenUserShellR
 	}
 }
 
+func TestLocalControllerSubmitProposedShellCommandRepairsPatchableRemoteEdit(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Proposal: &Proposal{
+				Kind:        ProposalPatch,
+				Patch:       diffNewFileFixture("foo.txt", "hello\n"),
+				PatchTarget: PatchTargetRemoteShell,
+				Description: "Apply a remote patch instead.",
+			},
+		},
+	}
+	controller := New(agent, &stubRunner{}, &stubContextReader{
+		context: shell.PromptContext{
+			User:         "openclaw",
+			Host:         "openclaw",
+			Directory:    "/home/openclaw",
+			PromptSymbol: "$",
+			RawLine:      "openclaw@openclaw /home/openclaw $",
+			Remote:       true,
+		},
+	}, SessionContext{
+		SessionName:      "shuttle-test",
+		TrackedShell:     TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
+		WorkingDirectory: "/workspace/project",
+	})
+
+	events, err := controller.SubmitProposedShellCommand(context.Background(), "sed -i 's/foo/bar/' /home/openclaw/foo.txt && cat /home/openclaw/foo.txt")
+	if err != nil {
+		t.Fatalf("SubmitProposedShellCommand() error = %v", err)
+	}
+
+	if len(events) != 1 || events[0].Kind != EventProposal {
+		t.Fatalf("expected repaired proposal event, got %#v", events)
+	}
+	payload, _ := events[0].Payload.(ProposalPayload)
+	if payload.Kind != ProposalPatch || payload.PatchTarget != PatchTargetRemoteShell {
+		t.Fatalf("expected remote patch proposal, got %#v", payload)
+	}
+	if !strings.Contains(agent.lastInput.Prompt, "Do not emit another shell mutation command.") {
+		t.Fatalf("expected repair prompt, got %q", agent.lastInput.Prompt)
+	}
+}
+
+func TestLocalControllerSubmitProposedShellCommandConvertsPatchableRemoteEditToApprovalWhenRepairFails(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "I still think a shell command is fine here.",
+			Proposal: &Proposal{
+				Kind:    ProposalCommand,
+				Command: "sed -i 's/foo/bar/' /home/openclaw/foo.txt",
+			},
+		},
+	}
+	controller := New(agent, &stubRunner{}, &stubContextReader{
+		context: shell.PromptContext{
+			User:         "openclaw",
+			Host:         "openclaw",
+			Directory:    "/home/openclaw",
+			PromptSymbol: "$",
+			RawLine:      "openclaw@openclaw /home/openclaw $",
+			Remote:       true,
+		},
+	}, SessionContext{
+		SessionName:      "shuttle-test",
+		TrackedShell:     TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
+		WorkingDirectory: "/workspace/project",
+	})
+
+	events, err := controller.SubmitProposedShellCommand(context.Background(), "sed -i 's/foo/bar/' /home/openclaw/foo.txt")
+	if err != nil {
+		t.Fatalf("SubmitProposedShellCommand() error = %v", err)
+	}
+
+	if len(events) != 2 || events[0].Kind != EventApproval || events[1].Kind != EventSystemNotice {
+		t.Fatalf("expected approval plus notice, got %#v", events)
+	}
+	if controller.task.PendingApproval == nil || controller.task.PendingApproval.Kind != ApprovalCommand {
+		t.Fatalf("expected pending approval, got %#v", controller.task.PendingApproval)
+	}
+	if !strings.Contains(controller.task.PendingApproval.Summary, "prefer native patches") {
+		t.Fatalf("expected approval summary to mention patches, got %#v", controller.task.PendingApproval)
+	}
+}
+
 func TestLocalControllerOwnedExecutionDoesNotOverwriteUserShellContext(t *testing.T) {
 	runner := &ownedExecutionRunner{
 		stubRunner: stubRunner{
@@ -836,6 +920,47 @@ func TestLocalControllerActiveExecutionVisibleWhileCommandRuns(t *testing.T) {
 
 	if controller.ActiveExecution() != nil {
 		t.Fatal("expected active execution to clear after completion")
+	}
+}
+
+func TestSubmitProposedShellCommandRepairsRemoteLocalPathProposal(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "Use a remote-relative inspection command instead.",
+			Proposal: &Proposal{
+				Kind:        ProposalCommand,
+				Command:     "find ~ -name foo.txt -type f -print",
+				Description: "Find the file on the remote shell.",
+			},
+		},
+	}
+	controller := New(agent, nil, nil, SessionContext{
+		TrackedShell:       TrackedShellTarget{PaneID: "%0"},
+		LocalWorkspaceRoot: "/home/jsmith/source/repos/aiterm",
+		CurrentShell: &shell.PromptContext{
+			User:         "openclaw",
+			Host:         "openclaw",
+			Directory:    "/home/openclaw",
+			PromptSymbol: "$",
+			RawLine:      "openclaw@openclaw ~ $",
+			Remote:       true,
+		},
+	})
+
+	events, err := controller.SubmitProposedShellCommand(context.Background(), `find /home/jsmith -name foo.txt -type f -print`)
+	if err != nil {
+		t.Fatalf("SubmitProposedShellCommand() error = %v", err)
+	}
+	if !strings.Contains(agent.lastInput.Prompt, "referenced local machine paths") {
+		t.Fatalf("expected remote local-path repair prompt, got %q", agent.lastInput.Prompt)
+	}
+	last := events[len(events)-1]
+	if last.Kind != EventProposal {
+		t.Fatalf("expected repaired proposal event, got %#v", events)
+	}
+	payload := last.Payload.(ProposalPayload)
+	if payload.Command != "find ~ -name foo.txt -type f -print" {
+		t.Fatalf("expected remote-safe replacement command, got %#v", payload)
 	}
 }
 

@@ -354,6 +354,46 @@ func TestPrimaryActionRunsEnterOnlyKeysProposal(t *testing.T) {
 	}
 }
 
+func TestPrimaryActionRunsInspectContextProposal(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.pendingProposal = &controller.ProposalPayload{
+		Kind:        controller.ProposalInspectContext,
+		Description: "Refresh the active shell identity and current working directory.",
+	}
+
+	updated, cmd := model.primaryAction()
+	next := updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected inspect_context proposal primary action to run")
+	}
+	msg := controllerEventsFromCmd(t, cmd)
+	updated, cmd = next.Update(msg)
+	next = updated.(Model)
+
+	if ctrl.inspectContextCalls != 1 {
+		t.Fatalf("expected one inspect_context call, got %d", ctrl.inspectContextCalls)
+	}
+	if next.pendingProposal != nil {
+		t.Fatalf("expected pending proposal to clear after inspect_context, got %#v", next.pendingProposal)
+	}
+	if ctrl.continueCalls != 0 {
+		t.Fatalf("expected auto-continue to not run before processing follow-up cmd, got %d", ctrl.continueCalls)
+	}
+	if cmd == nil {
+		t.Fatal("expected inspect_context result to trigger follow-up continuation")
+	}
+	msg = controllerEventsFromCmd(t, cmd)
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+	if ctrl.continueCalls != 1 {
+		t.Fatalf("expected inspect_context to flow into ContinueAfterCommand, got %d", ctrl.continueCalls)
+	}
+	if next.busy {
+		t.Fatal("expected inspect_context continuation to settle cleanly")
+	}
+}
+
 func TestProposalCanBeRefined(t *testing.T) {
 	ctrl := &fakeController{
 		agentEvents: []controller.TranscriptEvent{

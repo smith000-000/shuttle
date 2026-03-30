@@ -22,8 +22,12 @@ What is working now:
 - bounded agent check-ins for interactive/fullscreen waits, with explicit `Ctrl+G` resume after Shuttle pauses automatic retries
 - partial semantic shell integration for local shells
 - serial agentic command loops with one proposal at a time and auto-continue after results
+- first-class shell-context inspection support so the model can refresh authoritative user@host/cwd state instead of guessing from stale prompt text
 - native unified-diff patch proposals with explicit apply/reject/ask-agent flow
+- controller-synthesized patch proposals for common single-file text edits, so the model can express insert/replace intent without hand-authoring unified hunks
+- target-aware patch application for both the local workspace and the active tracked remote shell
 - local file creation and edits through native patch application
+- remote tracked-shell file edits through the same patch UX, preferring native remote patches over ad hoc shell rewrites and using staged remote payloads with transport selection `git`, then `python3`, then verified shell fallback
 - foreground attach and handoff reconciliation for manually started shell commands
 - real OpenAI Responses API path with API-key auth
 - provider settings UI with:
@@ -48,6 +52,7 @@ What is working now:
 
 What is still in progress:
 - broader semantic shell integration (`OSC 133` / `OSC 7`) consumption and subshell/bootstrap support
+- deeper shell-transition verification for more interactive and nested remote cases beyond the current prompt-plus-probe state machine
 - provider onboarding polish and provider-auth validation
 - provider registry/plugin architecture instead of static first-class wiring
 - any richer shell bootstrap/helper mode beyond those standards
@@ -315,6 +320,7 @@ Transcript result notes:
 - very long result-command headers stay single-line by default and can be expanded inline by clicking the command text
 - model-reply metadata is kept in the selected entry's `Ctrl+O` detail view instead of as a separate visible transcript row
 - the initial workspace-ready system notice is retained in trace data but hidden from the default transcript view
+- when the model needs authoritative shell identity or location, Shuttle can satisfy a native context inspection step internally instead of guessing from stale local/remote path context
 
 Status line notes:
 - the lower-right status uses compact inline segments separated with `*`, instead of filled badge backgrounds

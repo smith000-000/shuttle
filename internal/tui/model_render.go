@@ -282,6 +282,9 @@ func (m Model) currentActionCardSpec() *actionCardSpec {
 			body = append(body, "command: "+m.pendingApproval.Command)
 		}
 		if m.pendingApproval.Patch != "" {
+			if m.pendingApproval.PatchTarget != "" {
+				body = append(body, "target: "+string(m.pendingApproval.PatchTarget))
+			}
 			body = append(body, fmt.Sprintf("patch attached (%d lines, Ctrl+O to inspect)", countNonEmptyLines(m.pendingApproval.Patch)))
 		}
 		if m.pendingApproval.Risk != "" {
@@ -325,6 +328,9 @@ func (m Model) currentActionCardSpec() *actionCardSpec {
 		body := []string{}
 		if m.pendingProposal.Description != "" {
 			body = append(body, m.pendingProposal.Description)
+		}
+		if m.pendingProposal.PatchTarget != "" {
+			body = append(body, "target: "+string(m.pendingProposal.PatchTarget))
 		}
 		body = append(body, fmt.Sprintf("patch attached (%d lines, Ctrl+O to inspect)", countNonEmptyLines(m.pendingProposal.Patch)))
 		return &actionCardSpec{

@@ -125,6 +125,103 @@ func TestResponsesAgentRespondMapsStructuredOutput(t *testing.T) {
 	}
 }
 
+func TestResponsesAgentRespondMapsInspectContextProposal(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(http.StatusOK, `{
+			"id":"resp_124",
+			"object":"response",
+			"model":"gpt-5-nano-2025-08-07",
+			"output":[
+				{
+					"type":"message",
+					"content":[
+						{
+							"type":"output_text",
+							"text":"{\"message\":\"I should refresh the active shell context before answering.\",\"plan_summary\":\"\",\"plan_steps\":[],\"proposal_kind\":\"inspect_context\",\"proposal_command\":\"\",\"proposal_keys\":\"\",\"proposal_patch\":\"\",\"proposal_patch_target\":\"\",\"proposal_description\":\"Refresh the active shell identity and current working directory.\",\"approval_kind\":\"\",\"approval_title\":\"\",\"approval_summary\":\"\",\"approval_command\":\"\",\"approval_patch\":\"\",\"approval_patch_target\":\"\",\"approval_risk\":\"\"}"
+						}
+					]
+				}
+			]
+		}`), nil
+	})}
+
+	agent, err := NewResponsesAgent(Profile{
+		BackendFamily: BackendResponsesHTTP,
+		Preset:        PresetOpenAI,
+		AuthMethod:    AuthAPIKey,
+		BaseURL:       "https://provider.test/v1",
+		Model:         "gpt-5-nano-2025-08-07",
+		APIKey:        "test-key",
+		APIKeyEnvVar:  "OPENAI_API_KEY",
+	}, client)
+	if err != nil {
+		t.Fatalf("NewResponsesAgent() error = %v", err)
+	}
+
+	response, err := agent.Respond(context.Background(), controller.AgentInput{Prompt: "where am I?"})
+	if err != nil {
+		t.Fatalf("Respond() error = %v", err)
+	}
+	if response.Proposal == nil {
+		t.Fatal("expected inspect_context proposal")
+	}
+	if response.Proposal.Kind != controller.ProposalInspectContext {
+		t.Fatalf("expected inspect_context proposal, got %#v", response.Proposal)
+	}
+	if response.Proposal.Description == "" {
+		t.Fatalf("expected inspect_context description, got %#v", response.Proposal)
+	}
+}
+
+func TestResponsesAgentRespondMapsStructuredEditProposal(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(http.StatusOK, `{
+			"id":"resp_125",
+			"object":"response",
+			"model":"gpt-5-nano-2025-08-07",
+			"output":[
+				{
+					"type":"message",
+					"content":[
+						{
+							"type":"output_text",
+							"text":"{\"message\":\"I can prepare a structured edit.\",\"plan_summary\":\"\",\"plan_steps\":[],\"proposal_kind\":\"edit\",\"proposal_command\":\"\",\"proposal_keys\":\"\",\"proposal_patch\":\"\",\"proposal_patch_target\":\"tracked_remote_shell\",\"proposal_edit_path\":\"foo.txt\",\"proposal_edit_operation\":\"insert_after\",\"proposal_edit_anchor_text\":\"INSERT BELOW HERE\",\"proposal_edit_old_text\":\"\",\"proposal_edit_new_text\":\"alpha\\nbeta\\n\",\"proposal_edit_start_line\":0,\"proposal_edit_end_line\":0,\"proposal_description\":\"Insert text below the marker.\",\"approval_kind\":\"\",\"approval_title\":\"\",\"approval_summary\":\"\",\"approval_command\":\"\",\"approval_patch\":\"\",\"approval_patch_target\":\"\",\"approval_risk\":\"\"}"
+						}
+					]
+				}
+			]
+		}`), nil
+	})}
+
+	agent, err := NewResponsesAgent(Profile{
+		BackendFamily: BackendResponsesHTTP,
+		Preset:        PresetOpenAI,
+		AuthMethod:    AuthAPIKey,
+		BaseURL:       "https://provider.test/v1",
+		Model:         "gpt-5-nano-2025-08-07",
+		APIKey:        "test-key",
+		APIKeyEnvVar:  "OPENAI_API_KEY",
+	}, client)
+	if err != nil {
+		t.Fatalf("NewResponsesAgent() error = %v", err)
+	}
+
+	response, err := agent.Respond(context.Background(), controller.AgentInput{Prompt: "edit foo.txt"})
+	if err != nil {
+		t.Fatalf("Respond() error = %v", err)
+	}
+	if response.Proposal == nil || response.Proposal.Kind != controller.ProposalEdit || response.Proposal.Edit == nil {
+		t.Fatalf("expected structured edit proposal, got %#v", response.Proposal)
+	}
+	if response.Proposal.Edit.Target != controller.PatchTargetRemoteShell ||
+		response.Proposal.Edit.Path != "foo.txt" ||
+		response.Proposal.Edit.Operation != controller.EditInsertAfter ||
+		response.Proposal.Edit.AnchorText != "INSERT BELOW HERE" ||
+		response.Proposal.Edit.NewText != "alpha\nbeta\n" {
+		t.Fatalf("unexpected structured edit payload %#v", response.Proposal.Edit)
+	}
+}
+
 func TestStructuredResponsesRequestIncludesSerialContinuationGuidance(t *testing.T) {
 	request, err := newStructuredResponsesRequest("gpt-5-test", controller.AgentInput{
 		Prompt: "continue",
@@ -150,6 +247,12 @@ func TestStructuredResponsesRequestIncludesSerialContinuationGuidance(t *testing
 	}
 	if !strings.Contains(systemPrompt, "Never propose a shell command that invokes apply_patch, git apply, patch") {
 		t.Fatalf("expected shell patch-tool prohibition in system prompt, got %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "\"proposal_kind\":\"edit\"") || !strings.Contains(systemPrompt, "Shuttle will synthesize the exact unified diff") {
+		t.Fatalf("expected structured edit guidance in system prompt, got %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "\"proposal_kind\":\"inspect_context\"") || !strings.Contains(systemPrompt, "active shell identity or location matters") {
+		t.Fatalf("expected inspect_context guidance in system prompt, got %q", systemPrompt)
 	}
 	if !strings.Contains(systemPrompt, "approval_mode=auto") || !strings.Contains(systemPrompt, "safe local inspection or verification commands may be auto-executed") {
 		t.Fatalf("expected approval auto-mode guidance in system prompt, got %q", systemPrompt)

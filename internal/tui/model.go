@@ -280,6 +280,9 @@ type settingsProviderTestedMsg struct {
 
 const (
 	agentTurnTimeout       = 60 * time.Second
+	patchTurnTimeout       = 120 * time.Second
+	ollamaAgentTurnTimeout = 180 * time.Second
+	ollamaPatchTurnTimeout = 240 * time.Second
 	shellTailPollLines     = 40
 	shellTailPollTimeout   = 750 * time.Millisecond
 	firstCheckInDelay      = 10 * time.Second
@@ -382,6 +385,20 @@ type Model struct {
 	pendingDangerousConfirm     *dangerousApprovalConfirm
 	completion                  *composerCompletion
 	styles                      styles
+}
+
+func (m Model) currentAgentTurnTimeout() time.Duration {
+	if m.activeProvider.BackendFamily == provider.BackendOllama {
+		return ollamaAgentTurnTimeout
+	}
+	return agentTurnTimeout
+}
+
+func (m Model) currentPatchTurnTimeout() time.Duration {
+	if m.activeProvider.BackendFamily == provider.BackendOllama {
+		return ollamaPatchTurnTimeout
+	}
+	return patchTurnTimeout
 }
 
 func NewModel(workspace tmux.Workspace, ctrl controller.Controller) Model {
@@ -533,9 +550,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.busyStartedAt = time.Now()
 			m.showShellTail = false
 			m.liveShellTail = ""
-			ctx, cancel := context.WithTimeout(context.Background(), agentTurnTimeout)
-			m.inFlightCancel = cancel
 			continueAfterPatch := containsEventKind(msg.events, controller.EventPatchApplyResult) && !containsEventKind(msg.events, controller.EventCommandResult)
+			timeout := m.currentAgentTurnTimeout()
+			if continueAfterPatch {
+				timeout = m.currentPatchTurnTimeout()
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			m.inFlightCancel = cancel
 			return m, tea.Batch(func() tea.Msg {
 				defer cancel()
 
@@ -599,7 +620,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.handoffReturnGraceUntil = time.Now().Add(2 * time.Second)
 			m.showShellTail = false
 			m.liveShellTail = ""
-			ctx, cancel := context.WithTimeout(context.Background(), agentTurnTimeout)
+			ctx, cancel := context.WithTimeout(context.Background(), m.currentAgentTurnTimeout())
 			m.inFlightCancel = cancel
 			return m, tea.Batch(func() tea.Msg {
 				defer cancel()
@@ -1470,7 +1491,7 @@ func (m Model) submitWithOptions(appendEnterToFullscreenKeys bool) (tea.Model, t
 		refiningProposal := m.refiningProposal
 		m.refiningApproval = nil
 		m.refiningProposal = nil
-		ctx, cancel := context.WithTimeout(context.Background(), agentTurnTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), m.currentAgentTurnTimeout())
 		m.inFlightCancel = cancel
 		return m, tea.Batch(func() tea.Msg {
 			defer cancel()
@@ -1710,6 +1731,9 @@ func (m Model) primaryAction() (tea.Model, tea.Cmd) {
 	case m.pendingProposal != nil && m.pendingProposal.Patch != "":
 		logging.Trace("tui.primary_action", "action", "apply_proposal_patch")
 		return m.runProposalPatch()
+	case m.pendingProposal != nil && m.pendingProposal.Kind == controller.ProposalInspectContext:
+		logging.Trace("tui.primary_action", "action", "inspect_proposal_context")
+		return m.runProposalInspectContext()
 	case m.pendingProposal != nil && m.pendingProposal.Command != "":
 		logging.Trace("tui.primary_action", "action", "run_proposal", "command", m.pendingProposal.Command)
 		return m.runProposalCommand()
@@ -1820,7 +1844,7 @@ func (m Model) continueActivePlan() (tea.Model, tea.Cmd) {
 	m.showShellTail = false
 	m.liveShellTail = ""
 	m.activeExecution = nil
-	ctx, cancel := context.WithTimeout(context.Background(), agentTurnTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), m.currentAgentTurnTimeout())
 	m.inFlightCancel = cancel
 	return m, tea.Batch(func() tea.Msg {
 		defer cancel()
@@ -2040,13 +2064,30 @@ func (m Model) runProposalPatch() (tea.Model, tea.Cmd) {
 
 	logging.Trace("tui.proposal.apply_patch")
 	patch := m.pendingProposal.Patch
+	target := m.pendingProposal.PatchTarget
 	m.pendingProposal = nil
 	m.refiningProposal = nil
 	m.editingProposal = nil
 	return m.startControllerRequest(func(next *Model) {
 		next.proposalRunPending = true
 	}, func(ctx context.Context) ([]controller.TranscriptEvent, error) {
-		return m.ctrl.ApplyProposedPatch(ctx, patch)
+		return m.ctrl.ApplyProposedPatch(ctx, patch, target)
+	}, false)
+}
+
+func (m Model) runProposalInspectContext() (tea.Model, tea.Cmd) {
+	if m.busy || m.ctrl == nil || m.pendingProposal == nil || m.pendingProposal.Kind != controller.ProposalInspectContext {
+		return m, nil
+	}
+
+	logging.Trace("tui.proposal.inspect_context")
+	m.pendingProposal = nil
+	m.refiningProposal = nil
+	m.editingProposal = nil
+	return m.startControllerRequest(func(next *Model) {
+		next.proposalRunPending = true
+	}, func(ctx context.Context) ([]controller.TranscriptEvent, error) {
+		return m.ctrl.InspectProposedContext(ctx)
 	}, false)
 }
 

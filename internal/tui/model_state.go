@@ -376,7 +376,7 @@ func (m *Model) maybeExecutionCheckInCmd(now time.Time) tea.Cmd {
 	m.checkInInFlight = true
 	executionID := m.activeExecution.ID
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), agentTurnTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), m.currentAgentTurnTimeout())
 		defer cancel()
 
 		events, err := m.ctrl.CheckActiveExecution(ctx)
@@ -783,7 +783,8 @@ func latestProposal(events []controller.TranscriptEvent) *controller.ProposalPay
 func isActionableProposalPayload(payload controller.ProposalPayload) bool {
 	return strings.TrimSpace(payload.Command) != "" ||
 		payload.Keys != "" ||
-		strings.TrimSpace(payload.Patch) != ""
+		strings.TrimSpace(payload.Patch) != "" ||
+		payload.Kind == controller.ProposalInspectContext
 }
 
 func latestModelInfo(events []controller.TranscriptEvent) *controller.AgentModelInfo {

@@ -28,12 +28,14 @@ type SessionContext struct {
 	TrackedShell         TrackedShellTarget
 	WorkingDirectory     string
 	LocalWorkspaceRoot   string
+	StateDir             string
 	UserShellHistoryFile string
 	RecentShellOutput    string
 	RecentManualCommands []string
 	RecentManualActions  []string
 	ApprovalMode         ApprovalMode
 	CurrentShell         *shell.PromptContext
+	RemoteCapabilities   *RemoteCapabilitySummary
 }
 
 type TaskContext struct {
@@ -43,6 +45,7 @@ type TaskContext struct {
 	PendingApproval      *ApprovalRequest
 	LastCommandResult    *CommandResultSummary
 	LastPatchApplyResult *PatchApplySummary
+	PatchRepairCount     int
 	ActivePlan           *ActivePlan
 	PrimaryExecutionID   string
 	ExecutionRegistry    []CommandExecution
@@ -93,27 +96,59 @@ type Proposal struct {
 	Command     string
 	Keys        string
 	Patch       string
+	PatchTarget PatchTarget
+	Edit        *EditIntent
 	Description string
 }
 
 type ProposalKind string
 
 const (
-	ProposalAnswer  ProposalKind = "answer"
-	ProposalCommand ProposalKind = "command"
-	ProposalKeys    ProposalKind = "keys"
-	ProposalPatch   ProposalKind = "patch"
+	ProposalAnswer         ProposalKind = "answer"
+	ProposalCommand        ProposalKind = "command"
+	ProposalKeys           ProposalKind = "keys"
+	ProposalPatch          ProposalKind = "patch"
+	ProposalEdit           ProposalKind = "edit"
+	ProposalInspectContext ProposalKind = "inspect_context"
 )
 
-type ApprovalRequest struct {
-	ID      string
-	Kind    ApprovalKind
-	Title   string
-	Summary string
-	Command string
-	Patch   string
-	Risk    RiskLevel
+type EditOperation string
+
+const (
+	EditInsertBefore EditOperation = "insert_before"
+	EditInsertAfter  EditOperation = "insert_after"
+	EditReplaceExact EditOperation = "replace_exact"
+	EditReplaceRange EditOperation = "replace_range"
+)
+
+type EditIntent struct {
+	Target     PatchTarget
+	Path       string
+	Operation  EditOperation
+	AnchorText string
+	OldText    string
+	NewText    string
+	StartLine  int
+	EndLine    int
 }
+
+type ApprovalRequest struct {
+	ID          string
+	Kind        ApprovalKind
+	Title       string
+	Summary     string
+	Command     string
+	Patch       string
+	PatchTarget PatchTarget
+	Risk        RiskLevel
+}
+
+type PatchTarget string
+
+const (
+	PatchTargetLocalWorkspace PatchTarget = "local_workspace"
+	PatchTargetRemoteShell    PatchTarget = "tracked_remote_shell"
+)
 
 type ApprovalKind string
 
@@ -177,15 +212,41 @@ type PatchApplyFile struct {
 }
 
 type PatchApplySummary struct {
-	WorkspaceRoot string
-	Validation    string
-	Applied       bool
-	Created       int
-	Updated       int
-	Deleted       int
-	Renamed       int
-	Files         []PatchApplyFile
-	Error         string
+	WorkspaceRoot    string
+	Validation       string
+	Applied          bool
+	Target           PatchTarget
+	TargetLabel      string
+	Transport        PatchTransport
+	CapabilitySource string
+	Created          int
+	Updated          int
+	Deleted          int
+	Renamed          int
+	Files            []PatchApplyFile
+	Error            string
+}
+
+type PatchTransport string
+
+const (
+	PatchTransportNone   PatchTransport = ""
+	PatchTransportGit    PatchTransport = "git"
+	PatchTransportPython PatchTransport = "python3"
+	PatchTransportShell  PatchTransport = "shell"
+)
+
+type RemoteCapabilitySummary struct {
+	Identity                string
+	System                  string
+	OSRelease               string
+	ShellFamily             string
+	Source                  string
+	LastSuccessfulTransport PatchTransport
+	Git                     bool
+	Python3                 bool
+	Base64                  bool
+	Mktemp                  bool
 }
 
 type CommandOrigin string
@@ -271,7 +332,8 @@ type Controller interface {
 	RefreshActiveExecution(ctx context.Context) ([]TranscriptEvent, *CommandExecution, error)
 	SubmitShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error)
 	SubmitProposedShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error)
-	ApplyProposedPatch(ctx context.Context, patch string) ([]TranscriptEvent, error)
+	InspectProposedContext(ctx context.Context) ([]TranscriptEvent, error)
+	ApplyProposedPatch(ctx context.Context, patch string, target PatchTarget) ([]TranscriptEvent, error)
 	DecideApproval(ctx context.Context, approvalID string, decision ApprovalDecision, refineText string) ([]TranscriptEvent, error)
 	SetApprovalMode(ctx context.Context, mode ApprovalMode) ([]TranscriptEvent, error)
 	StartNewTask(ctx context.Context) ([]TranscriptEvent, error)

@@ -69,6 +69,10 @@ func (c *LocalController) ContinueAfterCommand(ctx context.Context) ([]Transcrip
 }
 
 func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string, agentPrompt string, refinement *ApprovalRequest, emitUserMessage bool) ([]TranscriptEvent, error) {
+	return c.submitAgentTurnWithInspectBudget(ctx, userPrompt, agentPrompt, refinement, emitUserMessage, 2)
+}
+
+func (c *LocalController) submitAgentTurnWithInspectBudget(ctx context.Context, userPrompt string, agentPrompt string, refinement *ApprovalRequest, emitUserMessage bool, inspectBudget int) ([]TranscriptEvent, error) {
 	logging.Trace(
 		"controller.agent_turn.start",
 		"user_prompt", userPrompt,
@@ -127,6 +131,63 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 		return append(append([]TranscriptEvent(nil), events...), errEvent), nil
 	}
 	response = normalizeAgentResponse(response)
+	response, err = c.synthesizeStructuredEditResponse(ctx, response)
+	if err != nil {
+		logging.TraceError("controller.agent_turn.edit_synthesis_error", err)
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if errors.Is(err, context.Canceled) {
+			if emitUserMessage {
+				c.appendEvents(events...)
+			}
+			return append([]TranscriptEvent(nil), events...), err
+		}
+		errEvent := c.newEvent(EventError, TextPayload{Text: err.Error()})
+		c.appendEvents(events...)
+		c.appendEvents(errEvent)
+		return append(append([]TranscriptEvent(nil), events...), errEvent), nil
+	}
+	response, repaired, repairErr := c.repairInvalidPatchResponse(ctx, input, response)
+	if repairErr != nil {
+		logging.TraceError("controller.agent_turn.patch_repair_error", repairErr)
+	}
+	if repaired {
+		logging.Trace("controller.agent_turn.patch_repaired")
+	}
+	if response.Proposal != nil && response.Proposal.Kind == ProposalInspectContext {
+		if inspectBudget <= 0 {
+			logging.Trace("controller.agent_turn.inspect_context.exhausted")
+			response.Proposal = nil
+			if strings.TrimSpace(response.Message) == "" {
+				response.Message = "I could not stabilize shell context well enough to continue reliably."
+			}
+		} else {
+			logging.Trace("controller.agent_turn.inspect_context.internal")
+			summary, promptContext, inspectErr := c.inspectProposedContextSummary(ctx)
+			if inspectErr != nil {
+				c.mu.Lock()
+				defer c.mu.Unlock()
+				if errors.Is(inspectErr, context.Canceled) {
+					if emitUserMessage {
+						c.appendEvents(events...)
+					}
+					return append([]TranscriptEvent(nil), events...), inspectErr
+				}
+				errEvent := c.newEvent(EventError, TextPayload{Text: inspectErr.Error()})
+				c.appendEvents(events...)
+				c.appendEvents(errEvent)
+				return append(append([]TranscriptEvent(nil), events...), errEvent), nil
+			}
+			c.mu.Lock()
+			c.task.LastCommandResult = &summary
+			if promptContext != nil {
+				contextCopy := *promptContext
+				c.applyPromptContextLocked(&contextCopy)
+			}
+			c.mu.Unlock()
+			return c.submitAgentTurnWithInspectBudget(ctx, userPrompt, agentPrompt, refinement, emitUserMessage, inspectBudget-1)
+		}
+	}
 
 	c.mu.Lock()
 	if shouldSuppressReturnedPlan(response.Plan, emitUserMessage, userPrompt, c.task.ActivePlan) {
@@ -171,6 +232,7 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 			Command:     response.Proposal.Command,
 			Keys:        response.Proposal.Keys,
 			Patch:       response.Proposal.Patch,
+			PatchTarget: response.Proposal.PatchTarget,
 			Description: response.Proposal.Description,
 		}))
 	}
@@ -202,7 +264,7 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 		"has_approval", response.Approval != nil,
 	)
 	if autoAction.patch != "" {
-		patchEvents, patchErr := c.applyPatch(ctx, autoAction.patch)
+		patchEvents, patchErr := c.applyPatch(ctx, autoAction.patch, autoAction.patchTarget)
 		newEvents = append(newEvents, patchEvents...)
 		if patchErr != nil {
 			return newEvents, patchErr
@@ -220,6 +282,138 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 		}
 	}
 	return newEvents, nil
+}
+
+func (c *LocalController) repairInvalidPatchResponse(ctx context.Context, input AgentInput, response AgentResponse) (AgentResponse, bool, error) {
+	kind, target, patch, err := c.invalidPatchInResponse(ctx, response)
+	if err == nil {
+		return response, false, nil
+	}
+
+	repairPrompt := buildInvalidPatchRepairPrompt(kind, target, patch, err)
+	repairInput := input
+	repairInput.Prompt = repairPrompt
+
+	repairedResponse, repairErr := c.agent.Respond(ctx, repairInput)
+	if repairErr != nil {
+		return response, false, repairErr
+	}
+	repairedResponse = normalizeAgentResponse(repairedResponse)
+	if _, _, _, repairedErr := c.invalidPatchInResponse(ctx, repairedResponse); repairedErr != nil {
+		if strings.TrimSpace(repairedResponse.Message) == "" {
+			repairedResponse.Message = invalidPatchProposalNotice + " " + strings.TrimSpace(repairedErr.Error())
+		} else {
+			repairedResponse.Message = strings.TrimSpace(repairedResponse.Message) + "\n\n" + invalidPatchProposalNotice + " " + strings.TrimSpace(repairedErr.Error())
+		}
+		if repairedResponse.Proposal != nil && repairedResponse.Proposal.Kind == ProposalPatch {
+			repairedResponse.Proposal = nil
+		}
+		if repairedResponse.Approval != nil && repairedResponse.Approval.Kind == ApprovalPatch {
+			repairedResponse.Approval = nil
+		}
+		return repairedResponse, true, nil
+	}
+	return repairedResponse, true, nil
+}
+
+func (c *LocalController) invalidPatchInResponse(ctx context.Context, response AgentResponse) (string, PatchTarget, string, error) {
+	if response.Proposal != nil && response.Proposal.Kind == ProposalPatch && strings.TrimSpace(response.Proposal.Patch) != "" {
+		err := c.validatePatchPayload(ctx, response.Proposal.Patch, response.Proposal.PatchTarget)
+		return "proposal", response.Proposal.PatchTarget, response.Proposal.Patch, err
+	}
+	if response.Approval != nil && response.Approval.Kind == ApprovalPatch && strings.TrimSpace(response.Approval.Patch) != "" {
+		err := c.validatePatchPayload(ctx, response.Approval.Patch, response.Approval.PatchTarget)
+		return "approval", response.Approval.PatchTarget, response.Approval.Patch, err
+	}
+	return "", "", "", nil
+}
+
+func (c *LocalController) validatePatchPayload(ctx context.Context, patch string, target PatchTarget) error {
+	patch = strings.TrimSpace(patch)
+	if patch == "" {
+		return nil
+	}
+	if target == PatchTargetRemoteShell {
+		_, err := parseRemotePatchFiles(patch)
+		return err
+	}
+	c.mu.Lock()
+	applier := c.patches
+	patchInitErr := c.patchInitErr
+	c.mu.Unlock()
+	if patchInitErr != nil {
+		return patchInitErr
+	}
+	if applier == nil {
+		return nil
+	}
+	_, err := applier.Validate(ctx, patch)
+	return err
+}
+
+func buildInvalidPatchRepairPrompt(kind string, target PatchTarget, patch string, err error) string {
+	targetValue := string(target)
+	if strings.TrimSpace(targetValue) == "" {
+		targetValue = string(PatchTargetLocalWorkspace)
+	}
+	lines := []string{
+		"The previous " + kind + " patch is invalid and was intercepted before it became actionable.",
+		"Return a corrected JSON response that preserves the same user intent.",
+		"Do not explain the patch. Do not apologize. Fix the patch payload only.",
+		"Leave every unrelated field empty. Do not emit a plan. Do not switch to a command or keys proposal.",
+		"If the invalid action was a proposal, return only a patch proposal. If it was an approval, return only a patch approval.",
+		"If you still need a patch, treat proposal_patch or approval_patch as a strict tool payload.",
+		"Requirements for a valid patch payload:",
+		"- raw unified diff only",
+		"- starts with the first diff header line, with no prose, no bullets, no code fence, no preamble",
+		"- exact hunk headers and counts",
+		"- complete diff body with no truncation",
+		"- for insertion hunks, the new line count must equal the old line count plus the number of inserted lines",
+		"- prefer one-file, minimum-context diffs when the edit is small",
+		"- patch target must remain " + targetValue,
+		"- do not switch to apply_patch, git apply, patch, or heredoc patch commands",
+		"Valid insertion example:",
+		"diff --git a/foo.txt b/foo.txt",
+		"--- a/foo.txt",
+		"+++ b/foo.txt",
+		"@@ -2,2 +2,5 @@",
+		" keep this line",
+		"+new inserted line one",
+		"+new inserted line two",
+		"+new inserted line three",
+		" keep this line after the insertion",
+		"Invalid insertion example:",
+		"@@ -2,2 +2,1 @@",
+		" keep this line",
+		"+new inserted line one",
+		" keep this line after the insertion",
+		"Invalid patch error: " + strings.TrimSpace(err.Error()),
+	}
+	if guidance := patchValidationGuidance(err); guidance != "" {
+		lines = append(lines, "Patch-specific correction guidance: "+guidance)
+	}
+	lines = append(lines,
+		"Invalid patch payload:",
+		patch,
+	)
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
+func patchValidationGuidance(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	switch {
+	case strings.Contains(message, "fragment header miscounts lines"):
+		return "Recompute the @@ -old_start,old_count +new_start,new_count @@ header so the old count matches the number of removed-plus-context lines and the new count matches the number of added-plus-context lines."
+	case strings.Contains(message, "unexpected eof"):
+		return "The diff body was truncated. Return the complete diff and ensure every hunk includes all required context, removal, and addition lines."
+	case strings.Contains(message, "unsupported preamble before the first diff"):
+		return "Remove every line before the first diff header. The patch must begin immediately with diff --git or --- / +++ lines."
+	default:
+		return ""
+	}
 }
 
 func normalizeAgentResponse(response AgentResponse) AgentResponse {
@@ -344,7 +538,9 @@ func isInlinePatchTool(fields []string) bool {
 func isActionableProposal(proposal Proposal) bool {
 	return strings.TrimSpace(proposal.Command) != "" ||
 		proposal.Keys != "" ||
-		strings.TrimSpace(proposal.Patch) != ""
+		strings.TrimSpace(proposal.Patch) != "" ||
+		proposal.Edit != nil ||
+		proposal.Kind == ProposalInspectContext
 }
 
 func completionPlanFromContinuation(response AgentResponse, emitUserMessage bool, activePlan *ActivePlan) *ActivePlan {
@@ -453,6 +649,9 @@ func buildAutoContinuePrompt(task TaskContext) string {
 	if shouldForceNextActionAfterInspection(task) {
 		prompt += " " + autoContinuePromptUnresolvedInspectionSuffix
 	}
+	if shouldForcePatchRebaseAfterInspection(task) {
+		prompt += " " + autoContinuePromptPatchRebaseSuffix
+	}
 	if !shouldPreferSerialContinuation(task) {
 		return prompt
 	}
@@ -552,6 +751,21 @@ func shouldForceNextActionAfterInspection(task TaskContext) bool {
 	return transcriptShowsRecentUnresolvedFailure(task.PriorTranscript)
 }
 
+func shouldForcePatchRebaseAfterInspection(task TaskContext) bool {
+	result := task.LastCommandResult
+	if result == nil || result.State != CommandExecutionCompleted {
+		return false
+	}
+	if !isReadOnlyInspectionCommand(result.Command) {
+		return false
+	}
+	lastPatch := task.LastPatchApplyResult
+	if lastPatch == nil || lastPatch.Applied {
+		return false
+	}
+	return strings.Contains(strings.ToLower(strings.TrimSpace(lastPatch.Error)), "conflict: fragment line does not match src line")
+}
+
 func isReadOnlyInspectionCommand(command string) bool {
 	fields := strings.Fields(strings.TrimSpace(command))
 	if len(fields) == 0 {
@@ -559,7 +773,7 @@ func isReadOnlyInspectionCommand(command string) bool {
 	}
 
 	switch fields[0] {
-	case "cat", "sed", "grep", "rg", "find", "ls", "head", "tail":
+	case "cat", "sed", "grep", "rg", "find", "ls", "head", "tail", "nl":
 		return true
 	case "git":
 		if len(fields) < 2 {

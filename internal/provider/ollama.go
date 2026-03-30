@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"aiterm/internal/controller"
 )
@@ -49,7 +48,7 @@ func NewOllamaAgent(profile Profile, client *http.Client) (*OllamaAgent, error) 
 		return nil, errors.New("ollama provider requires a model; use --model or onboarding model selection")
 	}
 	if client == nil {
-		client = &http.Client{Timeout: 75 * time.Second}
+		client = &http.Client{}
 	}
 
 	return &OllamaAgent{

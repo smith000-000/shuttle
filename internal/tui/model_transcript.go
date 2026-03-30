@@ -968,6 +968,7 @@ func compactProposalEntry(payload controller.ProposalPayload) Entry {
 		detailLines = append(detailLines, "keys: "+previewFullscreenKeys(payload.Keys))
 	}
 	if payload.Patch != "" {
+		detailLines = append(detailLines, "patch target: "+string(payload.PatchTarget))
 		if len(detailLines) > 0 {
 			detailLines = append(detailLines, "")
 		}
@@ -988,6 +989,9 @@ func compactProposalEntry(payload controller.ProposalPayload) Entry {
 	case payload.Keys != "":
 		previewLines = append(previewLines, "keys: "+previewFullscreenKeys(payload.Keys))
 	case payload.Patch != "":
+		if payload.PatchTarget != "" {
+			previewLines = append(previewLines, "target: "+string(payload.PatchTarget))
+		}
 		previewLines = append(previewLines, fmt.Sprintf("patch attached (%d lines, Ctrl+O to inspect)", countNonEmptyLines(payload.Patch)))
 	case payload.Kind != "":
 		previewLines = append(previewLines, "kind: "+string(payload.Kind))
@@ -1021,6 +1025,7 @@ func compactApprovalEntry(payload controller.ApprovalRequest) Entry {
 		detailLines = append(detailLines, "command: "+payload.Command)
 	}
 	if payload.Patch != "" {
+		detailLines = append(detailLines, "patch target: "+string(payload.PatchTarget))
 		if len(detailLines) > 0 {
 			detailLines = append(detailLines, "")
 		}
@@ -1042,6 +1047,9 @@ func compactApprovalEntry(payload controller.ApprovalRequest) Entry {
 		previewLines = append(previewLines, "command: "+payload.Command)
 	}
 	if payload.Patch != "" {
+		if payload.PatchTarget != "" {
+			previewLines = append(previewLines, "target: "+string(payload.PatchTarget))
+		}
 		previewLines = append(previewLines, fmt.Sprintf("patch attached (%d lines, Ctrl+O to inspect)", countNonEmptyLines(payload.Patch)))
 	}
 	if payload.Risk != "" {
@@ -1065,12 +1073,27 @@ func compactPatchApplyEntry(payload controller.PatchApplySummary) Entry {
 	previewLines := []string{
 		fmt.Sprintf("applied=%t created=%d updated=%d deleted=%d renamed=%d", payload.Applied, payload.Created, payload.Updated, payload.Deleted, payload.Renamed),
 	}
+	if strings.TrimSpace(string(payload.Transport)) != "" {
+		previewLines = append(previewLines, "transport="+string(payload.Transport))
+	}
 	if strings.TrimSpace(payload.Error) != "" {
 		previewLines = append(previewLines, payload.Error)
 	}
 
 	detailLines := make([]string, 0, len(payload.Files)+8)
 	detailLines = append(detailLines, fmt.Sprintf("applied: %t", payload.Applied))
+	if strings.TrimSpace(string(payload.Target)) != "" {
+		detailLines = append(detailLines, "target: "+string(payload.Target))
+	}
+	if strings.TrimSpace(payload.TargetLabel) != "" {
+		detailLines = append(detailLines, "target_label: "+payload.TargetLabel)
+	}
+	if strings.TrimSpace(string(payload.Transport)) != "" {
+		detailLines = append(detailLines, "transport: "+string(payload.Transport))
+	}
+	if strings.TrimSpace(payload.CapabilitySource) != "" {
+		detailLines = append(detailLines, "capability_source: "+payload.CapabilitySource)
+	}
 	if strings.TrimSpace(payload.WorkspaceRoot) != "" {
 		detailLines = append(detailLines, "workspace_root: "+payload.WorkspaceRoot)
 	}
