@@ -340,6 +340,8 @@ func resolveAuthMethod(value string) AuthMethod {
 		return AuthAPIKey
 	case "codex_login":
 		return AuthCodexLogin
+	case "inherited_env":
+		return AuthInherited
 	default:
 		return AuthAPIKey
 	}
