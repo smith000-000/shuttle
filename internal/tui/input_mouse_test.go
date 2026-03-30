@@ -128,6 +128,53 @@ func TestTabCyclesSlashCompletionCandidatesInline(t *testing.T) {
 	}
 }
 
+func TestSlashCompletionIncludesHelpCommand(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.mode = AgentMode
+	model.setInput("/he")
+
+	if ghost := model.currentCompletionGhostText(); ghost != "lp" {
+		t.Fatalf("expected help ghost text, got %q", ghost)
+	}
+}
+
+func TestShellHistoryCompletionAcceptsGhostWithRightArrow(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.mode = ShellMode
+	model.shellContext = shell.PromptContext{Directory: t.TempDir()}
+	model.shellHistory.record("git status")
+	model.shellHistory.record("git stash")
+	model.setInput("git sta")
+
+	if ghost := model.currentCompletionGhostText(); ghost != "sh" {
+		t.Fatalf("expected most recent history suggestion ghost text, got %q", ghost)
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRight})
+	next := updated.(Model)
+	if next.input != "git stash" {
+		t.Fatalf("expected right arrow to accept history completion, got %q", next.input)
+	}
+}
+
+func TestAgentHistoryCompletionCyclesWithTab(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.mode = AgentMode
+	model.agentHistory.record("summarize the diff")
+	model.agentHistory.record("summarize the test failures")
+	model.setInput("summarize the ")
+
+	if ghost := model.currentCompletionGhostText(); ghost != "test failures" {
+		t.Fatalf("expected most recent agent history ghost text, got %q", ghost)
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	next := updated.(Model)
+	if ghost := next.currentCompletionGhostText(); ghost != "diff" {
+		t.Fatalf("expected tab to cycle agent history suggestions, got %q", ghost)
+	}
+}
+
 func TestShellPathCompletionAcceptsGhostWithRightArrow(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "alpha.txt"), []byte("a"), 0o644); err != nil {

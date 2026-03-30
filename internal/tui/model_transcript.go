@@ -730,6 +730,7 @@ func (m Model) openDetail() (tea.Model, tea.Cmd) {
 	m.clampSelection()
 	m.detailOpen = true
 	m.detailScroll = 0
+	m.detailFilter = ""
 	m.clampDetailScroll()
 	return m, nil
 }
@@ -741,8 +742,15 @@ func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyF2:
 		return m.takeControlNow()
 	case tea.KeyEsc:
+		if strings.TrimSpace(m.detailFilter) != "" {
+			m.detailFilter = ""
+			m.detailScroll = 0
+			m.clampDetailScroll()
+			return m, nil
+		}
 		m.detailOpen = false
 		m.detailScroll = 0
+		m.detailFilter = ""
 		return m, nil
 	case tea.KeyUp:
 		if m.detailScroll > 0 {
@@ -767,13 +775,44 @@ func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEnd:
 		m.detailScroll = m.maxDetailScroll()
 		return m, nil
+	case tea.KeyBackspace:
+		if strings.TrimSpace(m.detailFilter) == "" {
+			return m, nil
+		}
+		m.detailFilter = trimLastRune(m.detailFilter)
+		m.detailScroll = 0
+		m.clampDetailScroll()
+		return m, nil
+	case tea.KeyDelete:
+		if strings.TrimSpace(m.detailFilter) == "" {
+			return m, nil
+		}
+		m.detailFilter = ""
+		m.detailScroll = 0
+		m.clampDetailScroll()
+		return m, nil
+	case tea.KeyRunes:
+		if msg.Alt || len(msg.Runes) == 0 {
+			return m, nil
+		}
+		inserted := string(msg.Runes)
+		if strings.TrimSpace(inserted) == "" && strings.TrimSpace(m.detailFilter) == "" {
+			return m, nil
+		}
+		m.detailFilter += inserted
+		m.detailScroll = 0
+		m.clampDetailScroll()
+		return m, nil
 	default:
 		return m, nil
 	}
 }
 
 func (m Model) renderDetailFooter(width int) string {
-	left := "Esc close  Up/Down scroll  PgUp/PgDn page"
+	left := "Type filter  Esc close  Up/Down scroll  PgUp/PgDn page"
+	if strings.TrimSpace(m.detailFilter) != "" {
+		left = "Type filter  Backspace edit  Esc clear/close"
+	}
 	right := m.detailScrollIndicator()
 	if right == "" {
 		return left
@@ -801,6 +840,45 @@ func (m Model) detailScrollIndicator() string {
 	default:
 		return "↑↓"
 	}
+}
+
+func (m Model) detailBodyLines(contentWidth int) ([]string, int, bool) {
+	entry := m.selectedEntryValue()
+	body := strings.ReplaceAll(entry.DetailBody(), "\r\n", "\n")
+	rawLines := strings.Split(body, "\n")
+	filter := strings.ToLower(strings.TrimSpace(m.detailFilter))
+	filtered := make([]string, 0, len(rawLines))
+	matchCount := 0
+	if filter == "" {
+		filtered = rawLines
+	} else {
+		for _, line := range rawLines {
+			if strings.Contains(strings.ToLower(line), filter) {
+				filtered = append(filtered, line)
+				matchCount++
+			}
+		}
+	}
+	if len(filtered) == 0 {
+		if filter == "" {
+			filtered = []string{""}
+		} else {
+			return []string{"No detail lines match the current filter."}, 0, true
+		}
+	}
+
+	lines := make([]string, 0, len(filtered)*2)
+	for _, line := range filtered {
+		wrapped := wrapText(line, max(10, contentWidth))
+		if len(wrapped) == 0 {
+			wrapped = []string{""}
+		}
+		lines = append(lines, wrapped...)
+	}
+	if filter == "" {
+		matchCount = len(rawLines)
+	}
+	return lines, matchCount, false
 }
 
 func detailWindow(lines []string, start int, height int) []string {
@@ -1161,13 +1239,12 @@ func (m *Model) clampDetailScroll() {
 }
 
 func (m Model) maxDetailScroll() int {
-	entry := m.selectedEntryValue()
 	width := m.width
 	if width <= 0 {
 		width = 100
 	}
 	contentWidth := m.contentWidthFor(width, m.styles.detail)
-	lines := wrapParagraphs(entry.DetailBody(), max(10, contentWidth))
+	lines, _, _ := m.detailBodyLines(contentWidth)
 	height := m.height
 	if height <= 0 {
 		height = 24

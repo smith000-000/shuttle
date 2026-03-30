@@ -315,6 +315,7 @@ type Model struct {
 	helpScroll                  int
 	detailOpen                  bool
 	detailScroll                int
+	detailFilter                string
 	shellHistory                composerHistory
 	agentHistory                composerHistory
 	activePlan                  *controller.ActivePlan
@@ -1604,12 +1605,16 @@ func (m Model) handleComposerCommand(text string) (bool, tea.Model, tea.Cmd) {
 			m.currentHistory().reset()
 			m.appendTranscriptEntry(Entry{
 				Title: "system",
-				Body:  fmt.Sprintf("Unknown slash command: %s. Try /help, /approvals, /new, /compact, /onboard, /provider, /model, or /quit.", trimmed),
+				Body:  fmt.Sprintf("Unknown slash command: %s. Try %s.", trimmed, strings.Join(primarySlashCommands(), ", ")),
 			})
 			return true, m, nil
 		}
 		return false, m, nil
 	}
+}
+
+func primarySlashCommands() []string {
+	return []string{"/help", "/approvals", "/new", "/compact", "/onboard", "/provider", "/model", "/quit"}
 }
 
 func (m Model) handleApprovalsCommand(text string) (bool, tea.Model, tea.Cmd) {

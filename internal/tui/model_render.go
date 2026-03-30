@@ -1010,9 +1010,23 @@ func (m Model) renderDetailView() string {
 	lines := []string{
 		m.styles.detailTitle.Render(strings.ToUpper(entry.Title)),
 		m.styles.detailMeta.Render(fmt.Sprintf("entry %d/%d", m.selectedEntry+1, max(1, len(m.entries)))),
-		"",
 	}
-	bodyLines := wrapParagraphs(entry.DetailBody(), max(10, contentWidth))
+	filterLabel := "Filter: type to narrow visible lines"
+	if strings.TrimSpace(m.detailFilter) != "" {
+		filterLabel = fmt.Sprintf("Filter: %s", m.detailFilter)
+	}
+	bodyLines, matches, empty := m.detailBodyLines(contentWidth)
+	if strings.TrimSpace(m.detailFilter) != "" {
+		switch {
+		case empty:
+			filterLabel += "  (0 matches)"
+		case matches == 1:
+			filterLabel += "  (1 matching line)"
+		default:
+			filterLabel += fmt.Sprintf("  (%d matching lines)", matches)
+		}
+	}
+	lines = append(lines, m.styles.detailMeta.Render(filterLabel), "")
 	viewportHeight := height - lipgloss.Height(strings.Join(lines, "\n")) - m.styles.detail.GetVerticalFrameSize() - 2
 	if viewportHeight < 4 {
 		viewportHeight = 4

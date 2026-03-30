@@ -1,7 +1,7 @@
 # Shuttle Shell Tracking Architecture
 
 ## Purpose
-Describe the current shell tracking architecture on `semantic-shell-bootstrap` so contributors can reason about command monitoring, semantic shell signals, pane ownership, handoff, and recovery without reverse-engineering the implementation from `internal/shell`, `internal/controller`, and `internal/tui`.
+Describe the current shell tracking architecture on `main` so contributors can reason about command monitoring, semantic shell signals, pane ownership, handoff, and recovery without reverse-engineering the implementation from `internal/shell`, `internal/controller`, and `internal/tui`.
 
 This note is intentionally implementation-facing. It describes how the current system works, where the authoritative state lives, and what tradeoffs still exist.
 

@@ -102,7 +102,7 @@ func TestUnknownSlashCommandRendersNotice(t *testing.T) {
 	if last.Title != "system" || !strings.Contains(last.Body, "Unknown slash command: /wat") {
 		t.Fatalf("expected unknown slash command notice, got %#v", last)
 	}
-	if !strings.Contains(last.Body, "/approvals") || !strings.Contains(last.Body, "/new") || !strings.Contains(last.Body, "/compact") {
+	if !strings.Contains(last.Body, "/help") || !strings.Contains(last.Body, "/approvals") || !strings.Contains(last.Body, "/new") || !strings.Contains(last.Body, "/compact") {
 		t.Fatalf("expected updated slash command hint, got %#v", last)
 	}
 }

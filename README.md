@@ -58,7 +58,7 @@ What is still in progress:
 - any richer shell bootstrap/helper mode beyond those standards
 - transcript/UI cleanup and continued TUI/controller decomposition
 - multi-card or parallel execution UI
-- release packaging
+- package-manager distribution and other post-archive release UX
 
 ## Requirements
 
@@ -287,6 +287,7 @@ Core controls:
 - in `KEYS>` mode, `Enter` sends the current buffer exactly as typed, `Ctrl+Y` sends the current buffer plus `Enter`, and `Ctrl+J` inserts a literal `Enter` into the key sequence
 - `KEYS>` also accepts explicit tmux control-key tokens such as `<Ctrl+C>` or `<Esc>` for key events the TUI cannot capture directly
 - `Ctrl+O`: inspect the selected transcript entry
+- while the `Ctrl+O` detail view is open, typing incrementally filters visible detail lines; `Backspace` edits the filter and `Esc` clears it before closing the view
 - `F10`: open settings
 
 Slash commands in agent mode:
@@ -317,6 +318,7 @@ Transcript result notes:
 - result tags are exit-aware: nonzero exits no longer render as green success entries
 - completed shell commands now collapse into a single result block that shows the command header plus inline output, instead of keeping a separate expandable preview row
 - `Ctrl+O` still opens the full detail view for the selected transcript entry, and clicking a transcript icon does the same
+- the detail view supports incremental typed filtering so large command results and plans can be narrowed without leaving the keyboard
 - very long result-command headers stay single-line by default and can be expanded inline by clicking the command text
 - model-reply metadata is kept in the selected entry's `Ctrl+O` detail view instead of as a separate visible transcript row
 - the initial workspace-ready system notice is retained in trace data but hidden from the default transcript view

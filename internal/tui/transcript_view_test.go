@@ -640,6 +640,77 @@ func TestDetailViewScrolls(t *testing.T) {
 	}
 }
 
+func TestDetailViewTypingFiltersVisibleLines(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.width = 80
+	model.height = 20
+	model.entries = []Entry{
+		{Title: "result", Detail: "alpha\nbeta\nbeta-two\ngamma"},
+	}
+	model.selectedEntry = 0
+	model.detailOpen = true
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	model = updated.(Model)
+
+	view := model.renderDetailView()
+	if !strings.Contains(view, "Filter: be  (2 matching lines)") {
+		t.Fatalf("expected detail filter summary, got %q", view)
+	}
+	if !strings.Contains(view, "beta") || !strings.Contains(view, "beta-two") {
+		t.Fatalf("expected filtered lines to remain visible, got %q", view)
+	}
+	if strings.Contains(view, "alpha") || strings.Contains(view, "gamma") {
+		t.Fatalf("expected non-matching lines to be hidden, got %q", view)
+	}
+}
+
+func TestDetailViewEscClearsFilterBeforeClosing(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.width = 80
+	model.height = 20
+	model.entries = []Entry{
+		{Title: "result", Detail: "alpha\nbeta"},
+	}
+	model.selectedEntry = 0
+	model.detailOpen = true
+	model.detailFilter = "be"
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(Model)
+	if !model.detailOpen {
+		t.Fatal("expected first Esc to keep detail open")
+	}
+	if model.detailFilter != "" {
+		t.Fatalf("expected first Esc to clear filter, got %q", model.detailFilter)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(Model)
+	if model.detailOpen {
+		t.Fatal("expected second Esc to close detail view")
+	}
+}
+
+func TestDetailViewFilterNoMatchesRendersEmptyState(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.width = 80
+	model.height = 20
+	model.entries = []Entry{
+		{Title: "result", Detail: "alpha\nbeta"},
+	}
+	model.selectedEntry = 0
+	model.detailOpen = true
+	model.detailFilter = "zzz"
+
+	view := model.renderDetailView()
+	if !strings.Contains(view, "No detail lines match the current filter.") {
+		t.Fatalf("expected no-match detail message, got %q", view)
+	}
+}
+
 func TestCommandResultEntryIsCollapsedInTranscriptButPreservedInDetail(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.width = 80

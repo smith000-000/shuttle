@@ -136,12 +136,12 @@ func (c *tmuxTakeControlCommand) installTemporaryPaneWindowHook(targetPaneID str
 		return nil, fmt.Errorf("hook command is required")
 	}
 
-	hookName := fmt.Sprintf("window-unlinked[%d]", time.Now().UnixNano())
-	if err := c.runTmux("set-hook", "-w", "-t", targetPaneID, "--", hookName, hookCommand); err != nil {
+	const hookName = "window-unlinked"
+	if err := c.runTmux("set-hook", "-w", "-t", targetPaneID, hookName, hookCommand); err != nil {
 		return nil, fmt.Errorf("install temporary window hook: %w", err)
 	}
 	return func() {
-		_ = c.runTmux("set-hook", "-w", "-u", "-t", targetPaneID, "--", hookName)
+		_ = c.runTmux("set-hook", "-w", "-u", "-t", targetPaneID, hookName)
 	}, nil
 }
 

@@ -36,11 +36,11 @@ Temporary place to capture Shuttle UX and UI notes during testing.
 - [done] Transcript command results now render inline as a single command-plus-output block. Clicking the transcript icon opens the full inspect view, and only long command headers can expand inline for extra wrapping.
 - [done] Have clickable areas for proposed shell commands (Yes/No/Refine) in all of our approval contexts
 - [done] Introduce initial slash commands: `/model` opens the current provider model picker, `/provider` opens the provider picker, `/quit` quits, and invalid slash commands are handled gracefully.
-- Slash command suggestions like Codex does are still pending.
-- Backlog: add fzf-style incremental search/filtering inside the `Ctrl+O` transcript detail view.
+- [done] Slash command suggestions now autocomplete only the supported slash commands instead of arbitrary history.
+- [done] Add incremental filtering inside the `Ctrl+O` transcript detail view.
 - [done] Return plain `Tab` to the composer and move the mode toggle/dial to `Ctrl-]`.
 - [done] some sort of tab completion support. First pass is ghost-text completion with inline cycling and right-arrow accept.
-- some sort of command suggestion? Not sure how warp does this but it's shitty. zsh has some command suggestion built in. maybe we can detect the zsh shell and piggy-back and just leave standard tab completions for bash and sh
+- [done] Composer suggestions now fall back to command history ghost text when slash/path/executable completion does not apply.
 - resume functionality... /resume to pick up previous session. if we're tracking session content maybe we can have a session picker? I'm not sure if this is a feature yet
 - UI themeing support
 - [done] warning when running as root #

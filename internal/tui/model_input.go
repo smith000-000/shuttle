@@ -310,6 +310,9 @@ func (m *Model) computeCompletion() *composerCompletion {
 	case m.mode == AgentMode && m.refiningApproval == nil && m.refiningProposal == nil:
 		completion = m.computeSlashCompletion(runes)
 	}
+	if completion == nil && !(m.mode == AgentMode && strings.HasPrefix(m.input, "/")) {
+		completion = m.computeHistoryCompletion(runes)
+	}
 	if completion == nil || len(completion.Candidates) == 0 {
 		return nil
 	}
@@ -333,7 +336,7 @@ func (m *Model) computeSlashCompletion(runes []rune) *composerCompletion {
 		return nil
 	}
 
-	commands := []string{"/approvals", "/compact", "/exit", "/model", "/models", "/new", "/onboard", "/onboarding", "/provider", "/providers", "/quit"}
+	commands := availableSlashCommands()
 	candidates := make([]string, 0, len(commands))
 	for _, command := range commands {
 		if strings.HasPrefix(command, input) {
@@ -371,6 +374,42 @@ func (m *Model) computeShellCompletion(runes []rune) *composerCompletion {
 		Start:      start,
 		End:        len(runes),
 		Fragment:   fragment,
+		Candidates: candidates,
+	}
+}
+
+func (m *Model) computeHistoryCompletion(runes []rune) *composerCompletion {
+	input := string(runes)
+	if strings.TrimSpace(input) == "" {
+		return nil
+	}
+
+	history := m.currentHistory()
+	if len(history.entries) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(history.entries))
+	candidates := make([]string, 0, len(history.entries))
+	for index := len(history.entries) - 1; index >= 0; index-- {
+		entry := history.entries[index]
+		if entry == input || !strings.HasPrefix(entry, input) {
+			continue
+		}
+		if _, ok := seen[entry]; ok {
+			continue
+		}
+		seen[entry] = struct{}{}
+		candidates = append(candidates, entry)
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	return &composerCompletion{
+		Start:      0,
+		End:        len(runes),
+		Fragment:   input,
 		Candidates: candidates,
 	}
 }
@@ -427,6 +466,23 @@ func (m Model) currentWorkingDirectory() string {
 
 func sameCompletionQuery(current composerCompletion, next composerCompletion) bool {
 	return current.Start == next.Start && current.End == next.End && current.Fragment == next.Fragment
+}
+
+func availableSlashCommands() []string {
+	return []string{
+		"/approvals",
+		"/compact",
+		"/exit",
+		"/help",
+		"/model",
+		"/models",
+		"/new",
+		"/onboard",
+		"/onboarding",
+		"/provider",
+		"/providers",
+		"/quit",
+	}
 }
 
 func lastTokenStart(runes []rune) int {
