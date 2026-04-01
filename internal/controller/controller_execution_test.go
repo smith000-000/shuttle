@@ -346,6 +346,47 @@ func TestLocalControllerResumeAfterTakeControlDoesNotReconcileWithoutCurrentProm
 	}
 }
 
+func TestLocalControllerResumeAfterTakeControlDoesNotReenterAgentWhileTrackedExecutionStillActive(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "This should not be called.",
+		},
+	}
+	reader := &stubContextReader{
+		snapshot: "still scanning",
+		contexts: []shell.PromptContext{{}},
+	}
+	controller := New(agent, nil, reader, SessionContext{
+		SessionName:  "shuttle-test",
+		TrackedShell: TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
+	})
+	setPrimaryExecutionForTest(controller, CommandExecution{
+		ID:        "cmd-1",
+		Command:   "find . -type f -name '*.md'",
+		Origin:    CommandOriginAgentProposal,
+		State:     CommandExecutionRunning,
+		StartedAt: time.Now().Add(-10 * time.Second),
+		TrackedShell: TrackedShellTarget{
+			SessionName: "shuttle-test",
+			PaneID:      "%0",
+		},
+	})
+
+	events, err := controller.ResumeAfterTakeControl(context.Background())
+	if err != nil {
+		t.Fatalf("ResumeAfterTakeControl() error = %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected no resume events while tracked execution is still active, got %#v", events)
+	}
+	if agent.lastInput.Prompt != "" {
+		t.Fatalf("expected no agent re-entry while command is still active, got %#v", agent.lastInput)
+	}
+	if active := controller.ActiveExecution(); active == nil || active.ID != "cmd-1" {
+		t.Fatalf("expected active execution to remain running, got %#v", active)
+	}
+}
+
 func TestLocalControllerResumeAfterTakeControlPrefersAttachedExecutionTail(t *testing.T) {
 	exitCode := 0
 	reader := &stubContextReader{
@@ -920,6 +961,55 @@ func TestLocalControllerActiveExecutionVisibleWhileCommandRuns(t *testing.T) {
 
 	if controller.ActiveExecution() != nil {
 		t.Fatal("expected active execution to clear after completion")
+	}
+}
+
+func TestLocalControllerSubmitProposedShellCommandUsesTrackedShellWhenFreshPromptIsRemote(t *testing.T) {
+	runner := &ownedExecutionRunner{
+		ownedPane: shell.OwnedExecutionPane{SessionName: "shuttle-test", PaneID: "%9"},
+	}
+	runner.result = shell.TrackedExecution{
+		CommandID: "cmd-1",
+		Command:   "find . -name implementation-plan.md",
+		ExitCode:  0,
+		Captured:  "implementation-plan.md",
+	}
+	reader := &stubContextReader{
+		context: shell.PromptContext{
+			User:         "openclaw",
+			Host:         "openclaw",
+			Directory:    "~",
+			PromptSymbol: "$",
+			RawLine:      "openclaw@openclaw ~ $",
+			Remote:       true,
+		},
+	}
+	controller := New(nil, runner, reader, SessionContext{
+		SessionName:  "shuttle-test",
+		TrackedShell: TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
+		CurrentShell: &shell.PromptContext{
+			User:         "jsmith",
+			Host:         "linuxdesktop",
+			Directory:    "~/source/repos/aiterm",
+			PromptSymbol: "%",
+			RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+			Remote:       false,
+		},
+	})
+
+	if _, err := controller.SubmitProposedShellCommand(context.Background(), "find . -name implementation-plan.md"); err != nil {
+		t.Fatalf("SubmitProposedShellCommand() error = %v", err)
+	}
+	if runner.startDir != "" {
+		t.Fatalf("expected no owned execution pane for fresh remote prompt, got start dir %q", runner.startDir)
+	}
+	if len(runner.paneIDs) != 1 || runner.paneIDs[0] != "%0" {
+		t.Fatalf("expected command to run in tracked shell pane %%0, got %#v", runner.paneIDs)
+	}
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if controller.session.CurrentShell == nil || !controller.session.CurrentShell.Remote || controller.session.CurrentShell.Host != "openclaw" {
+		t.Fatalf("expected session current shell to refresh to remote prompt, got %#v", controller.session.CurrentShell)
 	}
 }
 
@@ -1720,5 +1810,66 @@ func TestLocalControllerCheckActiveExecutionSkipsUserShellCommands(t *testing.T)
 	}
 	if agent.lastInput.Prompt != "" {
 		t.Fatalf("expected agent not to be called, got input %#v", agent.lastInput)
+	}
+}
+
+func TestLocalControllerSubmitShellCommandPreservesMonitoredTailWhenCompletionCaptureEmpty(t *testing.T) {
+	monitor := newManualMonitor()
+	runner := &monitoringRunner{monitor: monitor, started: make(chan struct{}, 1)}
+	controller := New(nil, runner, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+
+	done := make(chan struct{})
+	var (
+		events []TranscriptEvent
+		err    error
+	)
+	go func() {
+		events, err = controller.SubmitShellCommand(context.Background(), "find . -name '*.md'")
+		close(done)
+	}()
+
+	runner.waitForStart(t)
+	monitor.publish(shell.MonitorSnapshot{
+		State:            shell.MonitorStateRunning,
+		LatestOutputTail: "docs/a.md\ndocs/b.md\n... (2004 more lines)",
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		active := controller.ActiveExecution()
+		if active != nil && strings.Contains(active.LatestOutputTail, "docs/a.md") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected active execution tail to update before completion, got %#v", active)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	monitor.finish(shell.TrackedExecution{
+		CommandID: "cmd-1",
+		Command:   "find . -name '*.md'",
+		ExitCode:  0,
+		Captured:  "",
+	}, nil)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for monitored command to finish")
+	}
+	if err != nil {
+		t.Fatalf("SubmitShellCommand() error = %v", err)
+	}
+	if len(events) != 2 || events[1].Kind != EventCommandResult {
+		t.Fatalf("expected start/result events, got %#v", events)
+	}
+	payload, ok := events[1].Payload.(CommandResultSummary)
+	if !ok {
+		t.Fatalf("expected command result payload, got %#v", events[1].Payload)
+	}
+	if !strings.Contains(payload.Summary, "docs/a.md") {
+		t.Fatalf("expected result summary to preserve monitored tail, got %q", payload.Summary)
+	}
+	if controller.task.LastCommandResult == nil || !strings.Contains(controller.task.LastCommandResult.Summary, "docs/b.md") {
+		t.Fatalf("expected last command result to preserve monitored tail, got %#v", controller.task.LastCommandResult)
 	}
 }

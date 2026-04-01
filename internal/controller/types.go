@@ -35,6 +35,7 @@ type SessionContext struct {
 	RecentManualActions  []string
 	ApprovalMode         ApprovalMode
 	CurrentShell         *shell.PromptContext
+	CurrentShellLocation *shell.ShellLocation
 	RemoteCapabilities   *RemoteCapabilitySummary
 }
 

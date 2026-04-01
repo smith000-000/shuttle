@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"aiterm/internal/logging"
+	"aiterm/internal/tmux"
 )
 
 func (o *Observer) AttachForegroundCommand(ctx context.Context, paneID string) (CommandMonitor, error) {
@@ -24,21 +25,22 @@ func (o *Observer) AttachForegroundCommand(ctx context.Context, paneID string) (
 	command := attachedForegroundCommandLabel(currentPaneCommand)
 	focusedCapture := focusAttachedForegroundCapture(captured, currentPaneCommand)
 	tail := monitorTail(focusedCapture, "")
-	promptContext, hasPromptContext := ParsePromptContextFromCapture(captured)
-	if hasPromptContext && !captureHasCurrentPromptContext(captured, promptContext) {
-		hasPromptContext = false
-		promptContext = PromptContext{}
+	observed := o.observeShellState(ctx, paneID, "", captured, &paneInfo, o.promptHint)
+	observed.Tail = tail
+	if observed.HasPromptContext && !captureHasCurrentPromptContext(captured, observed.PromptContext) {
+		observed.HasPromptContext = false
+		observed.PromptContext = PromptContext{}
 	}
-	state := classifyActiveMonitorState(command, tail, paneInfo.AlternateOn, currentPaneCommand)
-	if !shouldAttachForegroundMonitor(hasPromptContext, currentPaneCommand, state) {
+	state := classifyActiveMonitorState(command, observed)
+	if !shouldAttachForegroundMonitor(observed.HasPromptContext, currentPaneCommand, state) {
 		return nil, nil
 	}
 
 	monitor := newTrackedCommandMonitor("", command)
 	monitor.updateForegroundCommand(currentPaneCommand)
 	monitor.updateTail(tail)
-	if hasPromptContext {
-		monitor.updateShellContext(promptContext)
+	if observed.HasPromptContext {
+		monitor.updateShellContext(observed.PromptContext)
 	}
 	monitor.setState(state)
 
@@ -102,25 +104,6 @@ func (o *Observer) runAttachedForegroundMonitor(ctx context.Context, monitor *tr
 		lastCapture = focusedCapture
 		tail := monitorTail(focusedCapture, "")
 
-		var parsedShellContext PromptContext
-		hasParsedShellContext := false
-		if shellContext, ok := ParsePromptContextFromCapture(captured); ok {
-			if captureHasCurrentPromptContext(captured, shellContext) {
-				parsedShellContext = shellContext
-				hasParsedShellContext = true
-				monitor.updateShellContext(shellContext)
-			}
-		}
-		if hasParsedShellContext {
-			trimmedTail := stripEchoedForegroundCommand(strings.TrimSpace(tail), currentPaneCommand)
-			trimmedTail = stripTrailingPromptLine(trimmedTail, parsedShellContext)
-			if trimmedTail != "" {
-				monitor.updateTail(trimmedTail)
-			}
-		} else {
-			monitor.updateTail(tail)
-		}
-
 		if lastPaneInfoCheck.IsZero() || time.Since(lastPaneInfoCheck) >= 200*time.Millisecond {
 			lastPaneInfoCheck = time.Now()
 			if paneInfo, paneErr := o.paneInfo(ctx, paneID); paneErr == nil {
@@ -130,29 +113,34 @@ func (o *Observer) runAttachedForegroundMonitor(ctx context.Context, monitor *tr
 				monitor.updateForegroundCommand(currentPaneCommand)
 			}
 		}
-
-		semanticBaseContext := monitor.Snapshot().ShellContext
-		if semanticBaseContext.PromptLine() == "" {
-			semanticBaseContext = o.promptHint
+		paneInfo := tmux.Pane{CurrentCommand: currentPaneCommand, TTY: paneTTY, AlternateOn: alternateOn}
+		observed := o.observeShellState(ctx, paneID, "", captured, &paneInfo, monitor.Snapshot().ShellContext)
+		observed.Tail = tail
+		if observed.HasPromptContext && !captureHasCurrentPromptContext(captured, observed.PromptContext) {
+			observed.HasPromptContext = false
+			observed.PromptContext = PromptContext{}
 		}
-		if hasParsedShellContext {
-			semanticBaseContext = parsedShellContext
+		if observed.HasPromptContext {
+			trimmedTail := stripEchoedForegroundCommand(strings.TrimSpace(observed.Tail), currentPaneCommand)
+			trimmedTail = stripTrailingPromptLine(trimmedTail, observed.PromptContext)
+			observed.Tail = trimmedTail
+			monitor.updateShellContext(observed.PromptContext)
 		}
-
-		semanticState, semanticSource, hasSemanticState := o.captureSemanticShellState(ctx, paneID, paneTTY, "", currentPaneCommand, semanticBaseContext)
-		if hasSemanticState {
-			monitor.updateSemanticMetadata(true, semanticSource)
-			monitor.updateShellContext(synthesizePromptContext(semanticBaseContext, semanticState))
+		if observed.Tail != "" || !observed.HasPromptContext {
+			monitor.updateTail(observed.Tail)
+		}
+		if observed.HasSemanticState {
+			monitor.updateSemanticMetadata(true, observed.SemanticSource)
 		} else {
 			monitor.updateSemanticMetadata(false, "")
 		}
 
-		monitor.setState(classifyActiveMonitorState(command, tail, alternateOn, currentPaneCommand))
+		monitor.setState(classifyActiveMonitorState(command, observed))
 
-		if hasSemanticState && semanticState.Event == semanticEventPrompt {
+		if observed.HasSemanticState && observed.SemanticState.Event == semanticEventPrompt {
 			promptContext := monitor.Snapshot().ShellContext
 			if promptContext.PromptLine() == "" {
-				promptContext = synthesizePromptContext(o.promptHint, semanticState)
+				promptContext = synthesizePromptContext(o.promptHint, observed.SemanticState)
 			}
 			if !captureHasCurrentPromptContext(captured, promptContext) {
 				select {
@@ -168,7 +156,7 @@ func (o *Observer) runAttachedForegroundMonitor(ctx context.Context, monitor *tr
 				}
 				continue
 			}
-			cleanBody := stripEchoedForegroundCommand(strings.TrimSpace(tail), currentPaneCommand)
+			cleanBody := stripEchoedForegroundCommand(strings.TrimSpace(observed.Tail), currentPaneCommand)
 			if promptContext.PromptLine() != "" {
 				cleanBody = stripTrailingPromptLine(cleanBody, promptContext)
 			}
@@ -177,8 +165,8 @@ func (o *Observer) runAttachedForegroundMonitor(ctx context.Context, monitor *tr
 				cleanBody = stripEchoedForegroundCommand(strings.TrimSpace(snapshot.LatestOutputTail), command)
 			}
 			exitCode := 0
-			if semanticState.ExitCode != nil {
-				exitCode = *semanticState.ExitCode
+			if observed.SemanticState.ExitCode != nil {
+				exitCode = *observed.SemanticState.ExitCode
 			}
 			state := MonitorStateCompleted
 			switch exitCode {
@@ -202,7 +190,7 @@ func (o *Observer) runAttachedForegroundMonitor(ctx context.Context, monitor *tr
 				Cause:          CompletionCausePromptReturn,
 				Confidence:     ConfidenceStrong,
 				SemanticShell:  true,
-				SemanticSource: semanticSource,
+				SemanticSource: observed.SemanticSource,
 				ExitCode:       exitCode,
 				Captured:       cleanBody,
 				ShellContext:   promptContext,
@@ -210,10 +198,10 @@ func (o *Observer) runAttachedForegroundMonitor(ctx context.Context, monitor *tr
 			return
 		}
 
-		if hasParsedShellContext && allowPromptReturnInference("", alternateOn, currentPaneCommand) {
-			cleanBody := stripEchoedForegroundCommand(strings.TrimSpace(tail), currentPaneCommand)
-			if parsedShellContext.PromptLine() != "" {
-				cleanBody = stripTrailingPromptLine(cleanBody, parsedShellContext)
+		if observed.HasPromptContext && allowPromptReturnInference("", observed) {
+			cleanBody := stripEchoedForegroundCommand(strings.TrimSpace(observed.Tail), currentPaneCommand)
+			if observed.PromptContext.PromptLine() != "" {
+				cleanBody = stripTrailingPromptLine(cleanBody, observed.PromptContext)
 			}
 			if cleanBody == "" {
 				snapshot := monitor.Snapshot()
@@ -236,7 +224,7 @@ func (o *Observer) runAttachedForegroundMonitor(ctx context.Context, monitor *tr
 				Confidence:   confidence,
 				ExitCode:     0,
 				Captured:     cleanBody,
-				ShellContext: parsedShellContext,
+				ShellContext: observed.PromptContext,
 			}, nil, MonitorStateCompleted)
 			return
 		}

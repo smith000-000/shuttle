@@ -85,6 +85,7 @@ type TrackedPaneResolver interface {
 
 type ShellContextReader interface {
 	CaptureRecentOutput(ctx context.Context, paneID string, lines int) (string, error)
+	CaptureObservedShellState(ctx context.Context, paneID string) (shell.ObservedShellState, error)
 	CaptureShellContext(ctx context.Context, paneID string) (shell.PromptContext, error)
 }
 
@@ -175,8 +176,12 @@ func normalizeSessionContext(session SessionContext) SessionContext {
 		contextCopy := *session.CurrentShell
 		session.CurrentShell = &contextCopy
 		if session.WorkingDirectory == "" {
-			session.WorkingDirectory = normalizeWorkingDirectory(contextCopy.Directory)
+			session.WorkingDirectory = normalizeShellWorkingDirectory(contextCopy.Directory, session.CurrentShellLocation)
 		}
+	}
+	if session.CurrentShellLocation != nil {
+		locationCopy := *session.CurrentShellLocation
+		session.CurrentShellLocation = &locationCopy
 	}
 	if session.RemoteCapabilities != nil {
 		capsCopy := *session.RemoteCapabilities

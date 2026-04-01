@@ -39,23 +39,17 @@ func (c *LocalController) ResumeAfterTakeControl(ctx context.Context) ([]Transcr
 
 	c.mu.Lock()
 	primary := c.primaryExecutionLocked()
-	agentOwned := primary != nil && isAgentOwnedExecution(primary.Origin)
-	agentExecutionUsesTrackedShell := primary != nil && shouldSyncExecutionIntoUserShellSession(primary, c.session)
 	c.mu.Unlock()
-	if !agentOwned {
+	if primary != nil {
 		if len(pendingEvents) == 0 {
 			return nil, nil
 		}
 		return pendingEvents, nil
 	}
-	if !agentExecutionUsesTrackedShell {
-		if len(pendingEvents) == 0 {
-			return nil, nil
-		}
-		return pendingEvents, nil
+	if len(pendingEvents) == 0 {
+		return nil, nil
 	}
-	events, err := c.submitAgentTurn(ctx, "", resumeAfterTakeControlPrompt, nil, false)
-	return append(pendingEvents, events...), err
+	return pendingEvents, nil
 }
 
 func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context) ([]TranscriptEvent, bool, bool, error) {
@@ -195,33 +189,27 @@ func inferHandoffPromptReturnResult(promptContext shell.PromptContext, execution
 }
 
 func (c *LocalController) RefreshShellContext(ctx context.Context) (*shell.PromptContext, error) {
-	c.refreshUserShellContext(ctx, false)
-	c.mu.Lock()
-	trackedShell := c.session.TrackedShell
-	current := c.session.CurrentShell
-	c.mu.Unlock()
-	if current != nil && current.PromptLine() != "" {
-		contextCopy := *current
+	trackedShell := c.syncTrackedShellTarget(ctx)
+	if observed := c.captureObservedShellStateForTarget(ctx, trackedShell); observed != nil && observed.HasPromptContext {
+		c.mu.Lock()
+		c.session.TrackedShell = trackedShell
+		if trackedShell.SessionName != "" {
+			c.session.SessionName = trackedShell.SessionName
+		}
+		c.applyObservedShellStateLocked(observed)
+		contextCopy := observed.PromptContext
+		c.mu.Unlock()
 		return &contextCopy, nil
 	}
-	if c.reader == nil || trackedShell.PaneID == "" {
-		return nil, nil
-	}
 
-	promptContext, err := c.reader.CaptureShellContext(ctx, trackedShell.PaneID)
-	if err != nil {
-		return nil, err
-	}
-	if promptContext.PromptLine() == "" {
-		return nil, nil
-	}
-
+	c.refreshUserShellContextForTarget(ctx, trackedShell, false)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	contextCopy := promptContext
-	c.applyPromptContextLocked(&contextCopy)
-
+	current := c.session.CurrentShell
+	if current == nil || current.PromptLine() == "" {
+		return nil, nil
+	}
+	contextCopy := *current
 	return &contextCopy, nil
 }
 

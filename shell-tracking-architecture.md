@@ -57,6 +57,8 @@ That distinction exists because after a broken handoff recovery there is no real
 
 Relevant file:
 - `internal/shell/observer.go`
+- `internal/shell/observation.go`
+- `internal/shell/transition_tracker.go`
 
 The observer is the low-level shell integration layer.
 
@@ -69,6 +71,8 @@ Responsibilities:
 - recover from stale pane IDs
 - recreate missing tmux sessions when configured with a session ensurer
 - manage semantic shell source precedence
+- normalize prompt, pane, semantic, and transition evidence into a single observed-shell snapshot for monitor loops
+- drive context-transition settling through an explicit transition tracker instead of open-coded per-loop local variables
 
 The observer knows about shell and tmux mechanics. It should not own transcript policy or TUI rendering decisions.
 
@@ -76,6 +80,13 @@ Current transition rule:
 - shell-transition commands like `ssh`, `exit`, and `sudo -i` do not settle from a single apparent prompt return
 - Shuttle now requires a candidate prompt to be re-observed and then verified by a context probe before the transition is treated as settled
 - if the tail still looks like `password:` or other awaiting-input text, Shuttle keeps the transition unresolved and does not inject the probe
+
+Current implementation note:
+- monitor loops now build an `ObservedShellState` snapshot that bundles prompt parse, pane metadata, semantic state, remembered transition kind, and inferred shell location
+- `ShellLocation` now also carries cwd source/confidence metadata so the controller can distinguish prompt-derived directories, probe-confirmed directories, and low-confidence carried-forward cwd
+- context-transition polling now routes through a dedicated transition tracker state machine with states such as `submitted`, `candidate_prompt_seen`, `awaiting_interactive_input`, and `probe_verifying`
+- this is intended as an internal cleanup seam so later remote-shell reliability work can replace scattered boolean checks without redesigning the shell product model again
+- when a post-transition probe succeeds, its `PWD` becomes the authoritative tracked cwd; when it fails after a remote transition, Shuttle keeps the remote identity but downgrades cwd confidence instead of overclaiming certainty
 
 ## 2.3 Semantic Collectors
 
@@ -126,6 +137,7 @@ Important state:
 - `SessionContext.TrackedShell`
 - `SessionContext.RecentManualCommands`
 - `SessionContext.RecentManualActions`
+- `SessionContext.CurrentShellLocation`
 - `TaskContext.PrimaryExecutionID`
 - `TaskContext.ExecutionRegistry`
 - `TaskContext.CurrentExecution`
@@ -134,8 +146,10 @@ Important state:
 Current rule:
 - `TrackedShellTarget` is the explicit ownership field
 - `SessionContext` describes the persistent user shell
+- `SessionContext.CurrentShellLocation` is the controller's normalized view of whether that shell is local, remote, containerized, or nested, plus how trustworthy the tracked cwd is
 - `CommandExecution.TrackedShell` describes where the active command is actually running
 - owned execution results do not overwrite persistent user-shell cwd or prompt context
+- controller and provider policy should key remote-sensitive decisions from `CurrentShellLocation`, not from `PromptContext.Remote`
 
 ## 2.5 TUI and Handoff
 
@@ -149,6 +163,15 @@ Responsibilities:
 - route `F2` to the controller-selected take-control target
 - route `KEYS>` and local interrupts to the active execution pane when one exists
 - mirror controller-tracked pane/session updates into local UI state
+
+Current `KEYS>` behavior:
+- `awaiting_input` and `interactive_fullscreen` executions can use `KEYS>`
+- a freshly observed `awaiting_input` prompt auto-opens `KEYS>` once as a convenience path
+- `Shift-Tab` inside `KEYS>` dismisses that auto-open suggestion for the current observed prompt fingerprint instead of toggling agent/shell mode
+- a successful key send also suppresses auto-reopen for that same unchanged prompt fingerprint
+- if the observed waiting prompt changes materially, `KEYS>` may auto-open again
+- each send requires a fresh observed execution/tail snapshot before the TUI will transmit raw keys
+- manual `Enter` in `KEYS>` stays exact for "press any key" style waits, but appends `Enter` for password, confirmation, and menu-style prompts
 
 Important rule:
 - the TUI does not decide which pane is authoritative
@@ -193,6 +216,11 @@ This context is refreshed from:
 - prompt capture
 - recent pane output
 - the tmux-backed shell history file configured for the session
+
+The tracked cwd is not a single undifferentiated string anymore:
+- prompt-derived cwd is useful but not treated as authoritative for remote overclaiming-sensitive flows
+- probe-confirmed cwd is authoritative
+- carried-forward cwd is explicitly low-confidence until a fresh prompt or probe refreshes it
 
 That is what lets later prompts like “see the file I just renamed” work even when the actual rename happened manually in the user shell rather than inside an agent-owned command pane.
 

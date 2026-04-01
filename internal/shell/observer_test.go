@@ -168,49 +168,49 @@ func TestCommandTimeout(t *testing.T) {
 }
 
 func TestClassifyActiveMonitorStateTreatsInteractiveCommandAsAwaitingInput(t *testing.T) {
-	if got := classifyActiveMonitorState("sudo ls", "[sudo] password for localuser:", false, "sudo"); got != MonitorStateAwaitingInput {
+	if got := classifyActiveMonitorState("sudo ls", ObservedShellState{Tail: "[sudo] password for localuser:", CurrentPaneCommand: "sudo"}); got != MonitorStateAwaitingInput {
 		t.Fatalf("classifyActiveMonitorState(sudo ls) = %s, want %s", got, MonitorStateAwaitingInput)
 	}
 }
 
 func TestClassifyActiveMonitorStateTreatsAlternateScreenAsInteractiveFullscreen(t *testing.T) {
-	if got := classifyActiveMonitorState("wrapped-btop", "", true, "btop"); got != MonitorStateInteractiveFullscreen {
+	if got := classifyActiveMonitorState("wrapped-btop", ObservedShellState{AlternateOn: true, CurrentPaneCommand: "btop"}); got != MonitorStateInteractiveFullscreen {
 		t.Fatalf("classifyActiveMonitorState(alternate screen) = %s, want %s", got, MonitorStateInteractiveFullscreen)
 	}
 }
 
 func TestClassifyActiveMonitorStateTreatsFullscreenForegroundCommandAsInteractiveFullscreen(t *testing.T) {
-	if got := classifyActiveMonitorState("wrapped-alias", "", false, "nano"); got != MonitorStateInteractiveFullscreen {
+	if got := classifyActiveMonitorState("wrapped-alias", ObservedShellState{CurrentPaneCommand: "nano"}); got != MonitorStateInteractiveFullscreen {
 		t.Fatalf("classifyActiveMonitorState(foreground nano) = %s, want %s", got, MonitorStateInteractiveFullscreen)
 	}
 }
 
 func TestClassifyActiveMonitorStateTreatsAwaitingForegroundCommandAsAwaitingInput(t *testing.T) {
-	if got := classifyActiveMonitorState("wrapped-alias", "", false, "sudo"); got != MonitorStateAwaitingInput {
+	if got := classifyActiveMonitorState("wrapped-alias", ObservedShellState{CurrentPaneCommand: "sudo"}); got != MonitorStateAwaitingInput {
 		t.Fatalf("classifyActiveMonitorState(foreground sudo) = %s, want %s", got, MonitorStateAwaitingInput)
 	}
 }
 
 func TestAllowPromptReturnInferenceDisablesInteractiveCommands(t *testing.T) {
-	if allowPromptReturnInference("btop", false, "btop") {
+	if allowPromptReturnInference("btop", ObservedShellState{CurrentPaneCommand: "btop"}) {
 		t.Fatal("expected fullscreen interactive command to disable prompt-return inference")
 	}
-	if allowPromptReturnInference("wrapped-btop", true, "btop") {
+	if allowPromptReturnInference("wrapped-btop", ObservedShellState{AlternateOn: true, CurrentPaneCommand: "btop"}) {
 		t.Fatal("expected alternate-screen command to disable prompt-return inference")
 	}
-	if !allowPromptReturnInference("bash -lc 'sleep 5; echo ready'", false, "zsh") {
+	if !allowPromptReturnInference("bash -lc 'sleep 5; echo ready'", ObservedShellState{CurrentPaneCommand: "zsh", Location: ShellLocation{Kind: ShellLocationLocal}}) {
 		t.Fatal("expected ordinary shell command to allow prompt-return inference")
 	}
 }
 
 func TestAllowPromptReturnInferenceDisablesNonShellPaneCommands(t *testing.T) {
-	if allowPromptReturnInference("bash -lc 'sleep 5; echo ready'", false, "nano") {
+	if allowPromptReturnInference("bash -lc 'sleep 5; echo ready'", ObservedShellState{CurrentPaneCommand: "nano", Location: ShellLocation{Kind: ShellLocationLocal}}) {
 		t.Fatal("expected non-shell foreground command to disable prompt-return inference")
 	}
 }
 
 func TestAllowPromptReturnInferenceAllowsRemoteTransportPaneCommands(t *testing.T) {
-	if !allowPromptReturnInference("bash -lc 'sleep 5; echo ready'", false, "ssh") {
+	if !allowPromptReturnInference("bash -lc 'sleep 5; echo ready'", ObservedShellState{CurrentPaneCommand: "ssh", Location: ShellLocation{Kind: ShellLocationRemote}}) {
 		t.Fatal("expected ssh pane command to allow prompt-return inference for remote shell reconciliation")
 	}
 }

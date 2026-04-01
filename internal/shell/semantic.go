@@ -130,11 +130,13 @@ func (o *Observer) ensureLocalShellIntegration(ctx context.Context, paneID strin
 		return false, nil
 	}
 
-	promptContext, err := o.CaptureShellContext(ctx, paneID)
+	observed, err := o.CaptureObservedShellState(ctx, paneID)
 	if err != nil {
-		promptContext = o.promptHint
+		observed = ObservedShellState{PromptContext: o.promptHint, HasPromptContext: o.promptHint.PromptLine() != ""}
+		observed.Location = inferShellLocation(observed.PromptContext, pane.CurrentCommand, o.rememberedTransition(paneID))
 	}
-	if promptContext.PromptLine() == "" || promptContext.Remote {
+	promptContext := observed.PromptContext
+	if !observed.HasPromptContext || promptContext.PromptLine() == "" || observed.Location.Kind == ShellLocationRemote {
 		return false, nil
 	}
 

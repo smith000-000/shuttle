@@ -73,7 +73,14 @@ Shuttle now has a usable first pass of the redesigned execution stack on `main`:
 - local managed transport using sourced temp scripts instead of giant inline wrappers where possible
 - active execution states including `awaiting_input`, `interactive_fullscreen`, `background_monitoring`, `canceled`, and `lost`
 - `F2` take-control handoff and reconciliation back into Shuttle
+- returning from `F2` while a tracked command is still active now resumes monitoring only; it does not force an immediate extra agent turn before the command has actually reconciled
 - raw `KEYS>` input for active prompts and fullscreen apps, including explicit control-key tokens such as `<Ctrl+C>`
+- TUI-level guardrails for `KEYS>` and agent key proposals so each send requires a fresh observed execution/tail snapshot and consumes that lease until Shuttle refreshes again
+- automatic `KEYS>` entry for fresh `awaiting_input` prompts, with explicit `Shift-Tab` dismissal that suppresses re-entry until the observed prompt state changes
+- successful `KEYS>` sends also suppress auto-reentry for that same unchanged prompt state, so password or menu prompts do not immediately reopen after an answer is sent
+- manual `KEYS>` Enter now distinguishes likely submit prompts from exact-key prompts:
+  - password / passphrase / confirmation / menu-style waits append Enter automatically
+  - "press any key" style waits remain exact and do not append Enter unless the user explicitly uses `Ctrl+Y` or inserts a newline
 - agent-side recovery guidance informed by a larger recovery snapshot
 - first-class agent `keys` proposals so the model can ask Shuttle to send small raw key sequences instead of only narrating them
 - bounded interactive/fullscreen check-ins that eventually pause automatic model retries and require an explicit `Ctrl+G` resume

@@ -9,12 +9,14 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"aiterm/internal/controller"
 	"aiterm/internal/logging"
+	"aiterm/internal/shell"
 )
 
 type ResponsesAgent struct {
@@ -553,11 +555,11 @@ func buildTurnContext(input controller.AgentInput) string {
 	options := turnContextOptionsForTask(input.Task)
 
 	sessionLines := []string{}
-	remoteShellActive := false
+	location := sessionShellLocation(input.Session)
+	remoteShellActive := location.Kind == shell.ShellLocationRemote
 	if input.Session.CurrentShell != nil && strings.TrimSpace(input.Session.CurrentShell.PromptLine()) != "" {
 		sessionLines = append(sessionLines, "prompt="+input.Session.CurrentShell.PromptLine())
-		if input.Session.CurrentShell.Remote {
-			remoteShellActive = true
+		if remoteShellActive {
 			sessionLines = append(sessionLines, "remote=true")
 			if input.Session.WorkingDirectory != "" {
 				sessionLines = append(sessionLines, "remote_patch_root="+input.Session.WorkingDirectory)
@@ -565,6 +567,16 @@ func buildTurnContext(input controller.AgentInput) string {
 			}
 		}
 	}
+	if location.Kind != "" {
+		sessionLines = append(sessionLines, "shell_location="+string(location.Kind))
+	}
+	if location.DirectorySource != "" && location.DirectorySource != shell.ShellDirectorySourceUnknown {
+		sessionLines = append(sessionLines, "cwd_source="+string(location.DirectorySource))
+	}
+	if location.DirectoryConfidence != "" {
+		sessionLines = append(sessionLines, "cwd_confidence="+string(location.DirectoryConfidence))
+	}
+	sessionLines = append(sessionLines, "cwd_authoritative="+strconv.FormatBool(location.DirectorySource == shell.ShellDirectorySourceProbe))
 	if input.Session.SessionName != "" {
 		sessionLines = append(sessionLines, "session="+input.Session.SessionName)
 	}
@@ -798,6 +810,41 @@ func buildTurnContext(input controller.AgentInput) string {
 	}
 
 	return strings.Join(sections, "\n\n")
+}
+
+func sessionShellLocation(session controller.SessionContext) shell.ShellLocation {
+	if session.CurrentShellLocation != nil {
+		location := *session.CurrentShellLocation
+		if session.CurrentShell != nil && (location.Kind == "" || location.DirectorySource == "" || location.DirectoryConfidence == "") {
+			inferred := shell.InferShellLocation(*session.CurrentShell, "")
+			if location.Kind == "" {
+				location.Kind = inferred.Kind
+			}
+			if location.Directory == "" {
+				location.Directory = inferred.Directory
+			}
+			if location.DirectorySource == "" {
+				location.DirectorySource = inferred.DirectorySource
+			}
+			if location.DirectoryConfidence == "" {
+				location.DirectoryConfidence = inferred.DirectoryConfidence
+			}
+			if location.User == "" {
+				location.User = inferred.User
+			}
+			if location.Host == "" {
+				location.Host = inferred.Host
+			}
+			if location.Confidence == "" {
+				location.Confidence = inferred.Confidence
+			}
+		}
+		return location
+	}
+	if session.CurrentShell != nil {
+		return shell.InferShellLocation(*session.CurrentShell, "")
+	}
+	return shell.ShellLocation{}
 }
 
 type turnContextOptions struct {

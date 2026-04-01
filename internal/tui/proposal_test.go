@@ -342,6 +342,8 @@ func TestPrimaryActionRunsEnterOnlyKeysProposal(t *testing.T) {
 		Keys:        "\n",
 		Description: "Send Enter to the active terminal.",
 	}
+	model.liveShellTail = "Press any key"
+	model.observeActiveKeysLease("test")
 
 	updated, cmd := model.primaryAction()
 	next := updated.(Model)
@@ -351,6 +353,41 @@ func TestPrimaryActionRunsEnterOnlyKeysProposal(t *testing.T) {
 	}
 	if next.pendingProposal != nil {
 		t.Fatalf("expected pending proposal to clear after sending keys, got %#v", next.pendingProposal)
+	}
+}
+
+func TestPrimaryActionBlocksKeysProposalWithoutFreshObservedLease(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.takeControl = takeControlConfig{
+		SocketName:    "shuttle-test",
+		SessionName:   "shuttle-test",
+		TrackedPaneID: "%0",
+		DetachKey:     TakeControlKey,
+	}
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "read",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now(),
+	}
+	model.pendingProposal = &controller.ProposalPayload{
+		Kind:        controller.ProposalKeys,
+		Keys:        "\n",
+		Description: "Send Enter to the active terminal.",
+	}
+
+	updated, cmd := model.primaryAction()
+	next := updated.(Model)
+
+	if cmd == nil {
+		t.Fatal("expected refresh command when keys proposal lacks a fresh observed lease")
+	}
+	if next.pendingProposal == nil {
+		t.Fatal("expected keys proposal to remain pending when the guard blocks it")
+	}
+	if len(next.entries) == 0 || !strings.Contains(next.entries[len(next.entries)-1].Body, "fresh read of the active terminal") {
+		t.Fatalf("expected guard notice, got %#v", next.entries)
 	}
 }
 

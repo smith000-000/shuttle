@@ -80,7 +80,10 @@ func (c *LocalController) submitAgentTurnWithInspectBudget(ctx context.Context, 
 		"emit_user_message", emitUserMessage,
 		"has_refinement", refinement != nil,
 	)
-	c.refreshUserShellContext(ctx, true)
+	if _, err := c.RefreshShellContext(ctx); err != nil {
+		return nil, err
+	}
+	c.refreshUserShellContext(ctx, false)
 
 	events := make([]TranscriptEvent, 0, 4)
 

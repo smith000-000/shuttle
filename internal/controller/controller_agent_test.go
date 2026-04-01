@@ -52,8 +52,8 @@ func TestLocalControllerSubmitAgentPrompt(t *testing.T) {
 		t.Fatalf("unexpected event sequence: %#v", events)
 	}
 
-	if agent.lastInput.Session.RecentShellOutput != "recent shell output" {
-		t.Fatalf("expected recent shell output in agent input, got %q", agent.lastInput.Session.RecentShellOutput)
+	if agent.lastInput.Session.RecentShellOutput != "" {
+		t.Fatalf("expected ordinary agent turn not to recapture tracked-pane output, got %q", agent.lastInput.Session.RecentShellOutput)
 	}
 }
 
@@ -220,7 +220,11 @@ func TestLocalControllerInspectProposedContextReturnsAuthoritativeShellState(t *
 	if !strings.Contains(result.Summary, "user_host=openclaw@openclaw") ||
 		!strings.Contains(result.Summary, "shell_target=openclaw@openclaw") ||
 		!strings.Contains(result.Summary, "cwd=/home/openclaw") ||
+		!strings.Contains(result.Summary, "cwd_source=prompt") ||
+		!strings.Contains(result.Summary, "cwd_confidence=medium") ||
+		!strings.Contains(result.Summary, "cwd_authoritative=false") ||
 		!strings.Contains(result.Summary, "remote=true") ||
+		!strings.Contains(result.Summary, "shell_location=remote") ||
 		!strings.Contains(result.Summary, "system=Linux") ||
 		!strings.Contains(result.Summary, "git_branch=main") ||
 		!strings.Contains(result.Summary, "local_workspace_root=/workspace/project") ||
@@ -233,6 +237,53 @@ func TestLocalControllerInspectProposedContextReturnsAuthoritativeShellState(t *
 	}
 	if controller.task.LastCommandResult == nil || controller.task.LastCommandResult.Command != inspectContextCommandLabel {
 		t.Fatalf("expected task last command result to be updated, got %#v", controller.task.LastCommandResult)
+	}
+}
+
+func TestLocalControllerInspectProposedContextPreservesRemoteTildeDirectory(t *testing.T) {
+	controller := New(nil, nil, &stubContextReader{
+		observed: shell.ObservedShellState{
+			PromptContext: shell.PromptContext{
+				User:         "openclaw",
+				Host:         "openclaw",
+				Directory:    "~",
+				System:       "Linux",
+				PromptSymbol: "$",
+				RawLine:      "openclaw@openclaw ~ $",
+				Remote:       true,
+			},
+			HasPromptContext: true,
+			Location: shell.ShellLocation{
+				Kind:      shell.ShellLocationRemote,
+				User:      "openclaw",
+				Host:      "openclaw",
+				Directory: "~",
+			},
+		},
+	}, SessionContext{
+		TrackedShell:       TrackedShellTarget{PaneID: "%0"},
+		LocalWorkspaceRoot: "/workspace/project",
+	})
+
+	events, err := controller.InspectProposedContext(context.Background())
+	if err != nil {
+		t.Fatalf("InspectProposedContext() error = %v", err)
+	}
+	result, ok := events[0].Payload.(CommandResultSummary)
+	if !ok {
+		t.Fatalf("expected command result payload, got %#v", events[0].Payload)
+	}
+	if !strings.Contains(result.Summary, "cwd=~") {
+		t.Fatalf("expected inspect summary to preserve remote tilde cwd, got %q", result.Summary)
+	}
+	if !strings.Contains(result.Summary, "cwd_source=prompt") || !strings.Contains(result.Summary, "cwd_confidence=low") || !strings.Contains(result.Summary, "cwd_authoritative=false") {
+		t.Fatalf("expected inspect summary to mark remote tilde cwd as prompt-derived and approximate, got %q", result.Summary)
+	}
+	if !strings.Contains(result.Summary, "remote_patch_root=~") {
+		t.Fatalf("expected remote patch root to preserve remote tilde cwd, got %q", result.Summary)
+	}
+	if strings.Contains(result.Summary, "/home/jsmith") {
+		t.Fatalf("expected no local-home expansion in remote inspect summary, got %q", result.Summary)
 	}
 }
 

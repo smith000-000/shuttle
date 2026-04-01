@@ -231,6 +231,12 @@ func TestBuildTurnContextIncludesWorkspaceRootAndPatchResult(t *testing.T) {
 	if !strings.Contains(context, "approval_mode=auto") {
 		t.Fatalf("expected approval mode, got %q", context)
 	}
+	if !strings.Contains(context, "shell_location=remote") {
+		t.Fatalf("expected shell location, got %q", context)
+	}
+	if !strings.Contains(context, "cwd_source=prompt") || !strings.Contains(context, "cwd_confidence=medium") || !strings.Contains(context, "cwd_authoritative=false") {
+		t.Fatalf("expected cwd authority metadata, got %q", context)
+	}
 	if !strings.Contains(context, "remote_patch_root=/tmp/remote") {
 		t.Fatalf("expected remote patch root, got %q", context)
 	}

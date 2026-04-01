@@ -12,6 +12,16 @@ import (
 	"aiterm/internal/shell"
 )
 
+func finalExecutionSummaryOutput(result shell.TrackedExecution, current *CommandExecution) string {
+	if strings.TrimSpace(result.Captured) != "" {
+		return result.Captured
+	}
+	if current != nil && strings.TrimSpace(current.LatestOutputTail) != "" {
+		return current.LatestOutputTail
+	}
+	return result.Captured
+}
+
 func (c *LocalController) SubmitProposedShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error) {
 	logging.Trace("controller.submit_proposed_shell_command", "command", command)
 	if handled, events, err := c.handleRemoteLocalPathProposal(ctx, command); handled {
@@ -39,10 +49,11 @@ func (c *LocalController) handleRemotePatchableProposal(ctx context.Context, com
 
 	c.mu.Lock()
 	currentShell := c.session.CurrentShell
+	currentLocation := c.session.CurrentShellLocation
 	agentAvailable := c.agent != nil
 	c.mu.Unlock()
 
-	if currentShell == nil || !currentShell.Remote {
+	if !isRemoteShellLocation(currentLocation, currentShell) {
 		return false, nil, nil
 	}
 
@@ -71,11 +82,12 @@ func (c *LocalController) handleRemoteLocalPathProposal(ctx context.Context, com
 
 	c.mu.Lock()
 	currentShell := c.session.CurrentShell
+	currentLocation := c.session.CurrentShellLocation
 	localWorkspaceRoot := c.session.LocalWorkspaceRoot
 	agentAvailable := c.agent != nil
 	c.mu.Unlock()
 
-	if currentShell == nil || !currentShell.Remote {
+	if !isRemoteShellLocation(currentLocation, currentShell) {
 		return false, nil, nil
 	}
 
@@ -105,7 +117,8 @@ func buildRemotePatchRepairPrompt(command string, prompt *shell.PromptContext) s
 	}
 	cwd := ""
 	if prompt != nil {
-		cwd = normalizeWorkingDirectory(prompt.Directory)
+		location := shell.InferShellLocation(*prompt, "")
+		cwd = normalizeShellWorkingDirectory(prompt.Directory, &location)
 	}
 	lines := []string{
 		"The previous proposal was a raw remote shell file-edit command.",
@@ -127,7 +140,8 @@ func buildRemoteCommandPathRepairPrompt(command string, prompt *shell.PromptCont
 	}
 	cwd := ""
 	if prompt != nil {
-		cwd = normalizeWorkingDirectory(prompt.Directory)
+		location := shell.InferShellLocation(*prompt, "")
+		cwd = normalizeShellWorkingDirectory(prompt.Directory, &location)
 	}
 	lines := []string{
 		"The previous proposal was a remote-shell command that referenced local machine paths.",
@@ -266,10 +280,21 @@ func (c *LocalController) prepareCommandExecutionTarget(ctx context.Context, tra
 		return trackedShell, nil, nil
 	}
 
+	if promptContext := c.capturePromptContextForTarget(ctx, trackedShell); promptContext != nil {
+		c.mu.Lock()
+		c.applyPromptContextLocked(promptContext)
+		currentLocation := c.session.CurrentShellLocation
+		c.mu.Unlock()
+		if isRemoteShellLocation(currentLocation, promptContext) {
+			return trackedShell, nil, nil
+		}
+	}
+
 	c.mu.Lock()
 	currentShell := c.session.CurrentShell
+	currentLocation := c.session.CurrentShellLocation
 	c.mu.Unlock()
-	if currentShell != nil && currentShell.Remote {
+	if isRemoteShellLocation(currentLocation, currentShell) {
 		return trackedShell, nil, nil
 	}
 
@@ -407,6 +432,9 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 				lostExecution.ShellContextAfter = &shellContext
 				c.applyPromptContextLocked(&shellContext)
 			}
+			if result.Location.Kind != "" {
+				c.applyShellLocationLocked(result.Location)
+			}
 
 			summary := CommandResultSummary{
 				ExecutionID:    execution.ID,
@@ -484,7 +512,8 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 	if result.State == shell.MonitorStateCanceled {
 		canceledExecution := *current
 		canceledExecution.State = CommandExecutionCanceled
-		canceledExecution.LatestOutputTail = result.Captured
+		finalOutput := finalExecutionSummaryOutput(result, current)
+		canceledExecution.LatestOutputTail = finalOutput
 		completedAt := time.Now()
 		canceledExecution.CompletedAt = &completedAt
 		exitCode := result.ExitCode
@@ -501,7 +530,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 			SemanticShell:  result.SemanticShell,
 			SemanticSource: result.SemanticSource,
 			ExitCode:       result.ExitCode,
-			Summary:        result.Captured,
+			Summary:        finalOutput,
 		}
 		if result.ShellContext.PromptLine() != "" {
 			shellContext := result.ShellContext
@@ -510,6 +539,9 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 			if shouldSyncExecutionIntoUserShellSession(current, c.session) {
 				c.applyPromptContextLocked(&shellContext)
 			}
+		}
+		if result.Location.Kind != "" && shouldSyncExecutionIntoUserShellSession(current, c.session) {
+			c.applyShellLocationLocked(result.Location)
 		}
 		c.task.LastCommandResult = &summary
 		cleanup := c.removeExecutionLocked(execution.ID)
@@ -526,7 +558,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 			"command", command,
 			"origin", origin,
 			"command_id", result.CommandID,
-			"summary_preview", logging.Preview(result.Captured, 1000),
+			"summary_preview", logging.Preview(finalOutput, 1000),
 			"prompt", result.ShellContext.PromptLine(),
 		)
 		return prependTranscriptEvent(append(events, resultEvent), trackedShellEvent), nil
@@ -534,7 +566,8 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 
 	completedExecution := *current
 	completedExecution.State = CommandExecutionCompleted
-	completedExecution.LatestOutputTail = result.Captured
+	finalOutput := finalExecutionSummaryOutput(result, current)
+	completedExecution.LatestOutputTail = finalOutput
 	completedAt := time.Now()
 	completedExecution.CompletedAt = &completedAt
 	exitCode := result.ExitCode
@@ -551,7 +584,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 		SemanticShell:  result.SemanticShell,
 		SemanticSource: result.SemanticSource,
 		ExitCode:       result.ExitCode,
-		Summary:        result.Captured,
+		Summary:        finalOutput,
 	}
 	if result.ShellContext.PromptLine() != "" {
 		shellContext := result.ShellContext
@@ -560,6 +593,9 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 		if shouldSyncExecutionIntoUserShellSession(current, c.session) {
 			c.applyPromptContextLocked(&shellContext)
 		}
+	}
+	if result.Location.Kind != "" && shouldSyncExecutionIntoUserShellSession(current, c.session) {
+		c.applyShellLocationLocked(result.Location)
 	}
 	c.task.LastCommandResult = &summary
 	cleanup := c.removeExecutionLocked(execution.ID)
@@ -577,7 +613,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 		"origin", origin,
 		"command_id", result.CommandID,
 		"exit_code", result.ExitCode,
-		"summary_preview", logging.Preview(result.Captured, 1000),
+		"summary_preview", logging.Preview(finalOutput, 1000),
 		"prompt", result.ShellContext.PromptLine(),
 	)
 	return prependTranscriptEvent(append(events, resultEvent), trackedShellEvent), nil

@@ -2,7 +2,7 @@
 
 Shuttle is a tmux-backed AI terminal assistant.
 
-It runs a persistent real shell in the top tmux pane and a Bubble Tea TUI in the bottom pane. Agent-approved commands can also run in owned tmux execution panes for local work. The persistent shell remains the continuity surface for `$>`, cwd, recent manual shell activity, and remote SSH continuity, while `F2` can temporarily hand off into an owned interactive execution pane when that pane is the thing waiting for input.
+It runs a persistent real shell in the top tmux pane and a Bubble Tea TUI in the bottom pane. Agent-approved commands can also run in owned tmux execution panes for local work. The persistent shell remains the continuity surface for shell-command input, cwd, recent manual shell activity, and remote SSH continuity, while `F2` can temporarily hand off into an owned interactive execution pane when that pane is the thing waiting for input.
 
 ## Status
 
@@ -23,6 +23,8 @@ What is working now:
 - partial semantic shell integration for local shells
 - serial agentic command loops with one proposal at a time and auto-continue after results
 - first-class shell-context inspection support so the model can refresh authoritative user@host/cwd state instead of guessing from stale prompt text
+- inspect-context and provider turn context now include cwd source/confidence metadata so prompt-derived remote directories like `~` are treated as approximate while probe-confirmed directories are treated as authoritative
+- ordinary agent turns refresh tracked-shell identity and manual shell history without blindly reusing whatever old scrollback is still visible in the top pane as fresh command output
 - native unified-diff patch proposals with explicit apply/reject/ask-agent flow
 - controller-synthesized patch proposals for common single-file text edits, so the model can express insert/replace intent without hand-authoring unified hunks
 - target-aware patch application for both the local workspace and the active tracked remote shell
@@ -272,7 +274,7 @@ Codex CLI model selection:
 
 Core controls:
 - `F1`: open the in-app help view
-- `Ctrl+]`: switch Agent/Shell mode
+- `Shift-Tab`: switch Agent/Shell mode
 - `Tab`: cycle composer completions, or insert a literal tab when no completion is available
 - `Right Arrow`: accept the current ghost-text completion
 - `Enter`: submit composer input
@@ -284,8 +286,12 @@ Core controls:
 - `F2`: take control of the live shell pane, or the active temporary execution pane when an owned interactive command is waiting for input
 - `Ctrl+G`: continue an active plan, or resume paused interactive agent check-ins after you handled a prompt/fullscreen app
 - `S`: enter `KEYS>` mode when the active terminal is waiting for input or a fullscreen app owns the pane
-- in `KEYS>` mode, `Enter` sends the current buffer exactly as typed, `Ctrl+Y` sends the current buffer plus `Enter`, and `Ctrl+J` inserts a literal `Enter` into the key sequence
+- Shuttle also auto-enters `KEYS>` once when a fresh `awaiting_input` prompt is observed, such as a `sudo` password prompt
+- in `KEYS>` mode, `Enter` normally sends the current buffer; for password, passphrase, confirmation, and menu-style prompts including common `ssh`/`sudo` auth waits Shuttle also appends `Enter` automatically, while true "press any key" prompts stay exact
+- `Ctrl+Y` sends the current buffer plus `Enter`, and `Ctrl+J` inserts a literal `Enter` into the key sequence
+- in `KEYS>` mode, `Shift-Tab` dismisses `KEYS>` and suppresses auto-reopen for the current waiting prompt until Shuttle observes a material prompt-state change
 - `KEYS>` also accepts explicit tmux control-key tokens such as `<Ctrl+C>` or `<Esc>` for key events the TUI cannot capture directly
+- each `KEYS>` send requires a fresh observed read of the active terminal; after Shuttle sends keys it refreshes the active execution and shell tail before allowing another send, and it briefly suppresses `KEYS>` auto-reopen while the prompt state settles so successful auth/input transitions do not bounce the composer back into key-send mode
 - `Ctrl+O`: inspect the selected transcript entry
 - while the `Ctrl+O` detail view is open, typing incrementally filters visible detail lines; `Backspace` edits the filter and `Esc` clears it before closing the view
 - `F10`: open settings

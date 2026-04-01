@@ -61,7 +61,7 @@ func TestAgentAndShellHistoryStaySeparate(t *testing.T) {
 	updated, _ = model.Update(msg)
 	model = updated.(Model)
 
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlCloseBracket})
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	model = updated.(Model)
 	model.input = "show plan"
 	updated, cmd = model.submit()
@@ -77,7 +77,7 @@ func TestAgentAndShellHistoryStaySeparate(t *testing.T) {
 		t.Fatalf("expected agent history entry, got %q", model.input)
 	}
 
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlCloseBracket})
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	model = updated.(Model)
 	model.input = ""
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
@@ -263,7 +263,7 @@ func TestShortTranscriptSitsAboveComposer(t *testing.T) {
 
 	composer := -1
 	for index, line := range lines {
-		if strings.Contains(line, "$>") || strings.Contains(line, "#>") || strings.Contains(line, "Œ>") {
+		if strings.Contains(line, shellComposerPrompt) || strings.Contains(line, rootComposerPrompt) || strings.Contains(line, agentComposerPrompt) || strings.Contains(line, keysComposerPrompt) {
 			composer = index
 			break
 		}
@@ -487,14 +487,14 @@ func TestComposerPrefixUsesAgentAndRootPrompts(t *testing.T) {
 	model.mode = AgentMode
 	model.input = ""
 	view := model.View()
-	if !strings.Contains(view, "Œ>") {
+	if !strings.Contains(view, agentComposerPrompt) {
 		t.Fatalf("expected agent prompt prefix, got %q", view)
 	}
 
 	model.mode = ShellMode
 	model.shellContext = shell.PromptContext{Root: true}
 	view = model.View()
-	if !strings.Contains(view, "#>") {
+	if !strings.Contains(view, rootComposerPrompt) {
 		t.Fatalf("expected root shell prompt prefix, got %q", view)
 	}
 }

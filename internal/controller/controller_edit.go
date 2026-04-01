@@ -107,11 +107,12 @@ func (c *LocalController) readStructuredEditSnapshot(ctx context.Context, target
 		c.mu.Lock()
 		runner := c.runner
 		currentShell := c.session.CurrentShell
+		currentLocation := c.session.CurrentShellLocation
 		c.mu.Unlock()
 		if runner == nil {
 			return remoteFileSnapshot{}, fmt.Errorf("remote structured edit runner is not configured")
 		}
-		if currentShell == nil || !currentShell.Remote {
+		if !isRemoteShellLocation(currentLocation, currentShell) {
 			return remoteFileSnapshot{}, fmt.Errorf("remote structured edit target is ambiguous or not currently active")
 		}
 		caps, _, err := c.resolveRemotePatchCapabilities(ctx, runner, trackedShell, currentShell)

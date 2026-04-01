@@ -156,17 +156,17 @@ func newStyles() styles {
 			Padding(0, 1),
 		composerPromptShell: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("230")).
-			Background(lipgloss.Color("30")).
+			Background(lipgloss.Color("238")).
 			Bold(true).
 			Padding(0, 1),
 		composerPromptAgent: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("230")).
-			Background(lipgloss.Color("166")).
+			Background(lipgloss.Color("238")).
 			Bold(true).
 			Padding(0, 1),
 		composerPromptRefine: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("230")).
-			Background(lipgloss.Color("136")).
+			Background(lipgloss.Color("238")).
 			Bold(true).
 			Padding(0, 1),
 		input: lipgloss.NewStyle().

@@ -237,6 +237,10 @@ func (c *LocalController) awaitAttachedMonitor(executionID string, monitor shell
 	if strings.TrimSpace(result.Captured) != "" {
 		execution.LatestOutputTail = result.Captured
 	}
+	finalOutput := finalExecutionSummaryOutput(result, execution)
+	if strings.TrimSpace(finalOutput) != "" {
+		execution.LatestOutputTail = finalOutput
+	}
 	if result.ExitCode != 0 || result.State == shell.MonitorStateCompleted || result.State == shell.MonitorStateCanceled {
 		exitCode := result.ExitCode
 		execution.ExitCode = &exitCode
@@ -257,7 +261,7 @@ func (c *LocalController) awaitAttachedMonitor(executionID string, monitor shell
 		SemanticShell:  result.SemanticShell,
 		SemanticSource: result.SemanticSource,
 		ExitCode:       result.ExitCode,
-		Summary:        result.Captured,
+		Summary:        finalOutput,
 	}
 	if result.ShellContext.PromptLine() != "" {
 		contextCopy := result.ShellContext

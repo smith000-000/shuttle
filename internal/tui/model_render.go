@@ -16,6 +16,13 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
+const (
+	shellComposerPrompt = "💲"
+	rootComposerPrompt  = "#️⃣"
+	agentComposerPrompt = "🤖"
+	keysComposerPrompt  = "⌨️"
+)
+
 func (m Model) renderMainView() string {
 	width := m.width
 	if width <= 0 {
@@ -433,8 +440,21 @@ func (m Model) renderActiveExecutionCard(width int) string {
 		if len(lines) > 2 {
 			lines = lines[len(lines)-2:]
 		}
+		if m.activeExecution.State == controller.CommandExecutionAwaitingInput {
+			body = append(body, "Terminal input prompt detected.")
+		}
 		body = append(body, "tail: "+strings.Join(lines, " | "))
-		if takeControlTargetsExecution || usesTrackedShell {
+		if m.activeExecution.State == controller.CommandExecutionAwaitingInput {
+			if takeControlTargetsExecution || usesTrackedShell {
+				body = append(body, "F2 take control  S send keys")
+				if takeControlTargetsExecution && !usesTrackedShell {
+					body = append(body, "Temporary Shuttle execution pane. It closes when the command finishes.")
+				}
+			} else {
+				body = append(body, "S send keys")
+				body = append(body, "This command is running in an owned execution pane. F2 opens the persistent user shell.")
+			}
+		} else if takeControlTargetsExecution || usesTrackedShell {
 			body = append(body, "F2 take control")
 			if takeControlTargetsExecution && !usesTrackedShell {
 				body = append(body, "Temporary Shuttle execution pane. It closes when the command finishes.")
@@ -475,23 +495,23 @@ func (m Model) renderComposer(width int) string {
 	}
 
 	promptStyle := m.styles.composerPromptShell
-	prompt := "$>"
+	prompt := shellComposerPrompt
 	switch {
 	case m.sendingFullscreenKeys:
 		promptStyle = m.styles.composerPromptRefine
-		prompt = "KEYS>"
+		prompt = keysComposerPrompt
 	case m.editingProposal != nil:
 		promptStyle = m.styles.composerPromptRefine
 		prompt = "CMD>"
 	case m.refiningApproval != nil || m.refiningProposal != nil:
 		promptStyle = m.styles.composerPromptRefine
-		prompt = "Œ>"
+		prompt = agentComposerPrompt
 	case m.mode == AgentMode:
 		promptStyle = m.styles.composerPromptAgent
-		prompt = "Œ>"
+		prompt = agentComposerPrompt
 	case m.shellContext.Root:
 		promptStyle = m.styles.composerPromptShell
-		prompt = "#>"
+		prompt = rootComposerPrompt
 	}
 
 	inputStyle := m.styles.input.Copy().Background(composerStyle.GetBackground())
@@ -831,7 +851,7 @@ func (m Model) footerParts(width int) []string {
 
 	switch {
 	case width < 72:
-		parts := []string{"[F1]", "[Ctrl+]]", "[Tab]", "[→]", "[Pg]", "[Enter]", "[Esc]", "[F2]", "[F10]", "[Ctrl+O]", "[Ctrl+C]"}
+		parts := []string{"[F1]", "[S-Tab]", "[Tab]", "[→]", "[Pg]", "[Enter]", "[Esc]", "[F2]", "[F10]", "[Ctrl+O]", "[Ctrl+C]"}
 		if m.canSendActiveKeys() {
 			parts = append(parts, "[S]")
 		}
@@ -854,7 +874,7 @@ func (m Model) footerParts(width int) []string {
 		}
 		return parts
 	case width < 100:
-		parts := []string{"[F1] help", "[Ctrl+]] mode", "[Tab] cycle/tab", "[→] accept", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Enter] submit", escHint, "[F2] shell", "[F10] settings", "[Ctrl+C] quit"}
+		parts := []string{"[F1] help", "[Shift-Tab] mode", "[Tab] cycle/tab", "[→] accept", "[Alt+Up/Down] entry", "[Ctrl+O] detail", "[PgUp/PgDn] scroll", "[Enter] submit", escHint, "[F2] shell", "[F10] settings", "[Ctrl+C] quit"}
 		if m.canSendActiveKeys() {
 			parts = append(parts, "[S] keys")
 		}
@@ -878,7 +898,7 @@ func (m Model) footerParts(width int) []string {
 		return parts
 	}
 
-	parts := []string{"[F1] help", "[Ctrl+]] mode", "[Tab] cycle/tab", "[→] accept", "[Ctrl+O] detail", "[Enter] submit", escHint, "[Ctrl+J] newline", "[F2] shell", "[F10] settings"}
+	parts := []string{"[F1] help", "[Shift-Tab] mode", "[Tab] cycle/tab", "[→] accept", "[Ctrl+O] detail", "[Enter] submit", escHint, "[Ctrl+J] newline", "[F2] shell", "[F10] settings"}
 	if m.canSendActiveKeys() {
 		parts = append(parts, "[S] send keys")
 	}
@@ -1191,7 +1211,7 @@ func helpContentLines(width int, mode Mode, canSendKeys bool) []string {
 		"F10: open settings",
 		"Ctrl+C: quit Shuttle",
 		"Ctrl+G: continue an active plan, or resume paused interactive agent check-ins",
-		"Ctrl+]: toggle between agent and shell mode",
+		"Shift-Tab: toggle between agent and shell mode",
 		"Ctrl+O: open the selected transcript entry in the full detail view",
 		"PgUp/PgDn: scroll transcript",
 		"Ctrl+U / Ctrl+D: half-page transcript scroll",
@@ -1229,7 +1249,9 @@ func helpContentLines(width int, mode Mode, canSendKeys bool) []string {
 			"KEYS> Enter: send the current buffer exactly as typed",
 			"KEYS> Ctrl+Y: send the current buffer plus Enter",
 			"KEYS> Ctrl+J: insert a literal Enter/newline into the key sequence",
+			"KEYS> Shift-Tab: dismiss KEYS> and suppress auto-reopen for the current prompt state",
 			`KEYS> tokens like <Ctrl+C> or <Esc>: send tmux control-key events that the TUI cannot capture directly`,
+			"Each KEYS> send requires a fresh observed read of the active terminal; Shuttle refreshes before retries.",
 		)
 	}
 	lines = append(lines,
@@ -1243,7 +1265,7 @@ func helpContentLines(width int, mode Mode, canSendKeys bool) []string {
 		"Ctrl+Shift+C / Ctrl+Shift+V: use your terminal copy and paste shortcuts for selected text and pasted input",
 		"",
 		"# Modes",
-		"Shell mode: direct shell commands from $>",
+		"Shell mode: direct shell commands from "+shellComposerPrompt,
 		"Agent mode: send natural-language prompts from OE>",
 		"> The current mode changes the composer prompt, history, slash-command behavior, and completion source.",
 	)

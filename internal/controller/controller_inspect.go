@@ -74,10 +74,22 @@ func (c *LocalController) summarizeInspectedShellContext(promptContext *shell.Pr
 		lines = append(lines, fmt.Sprintf("user_host=%s", userHost))
 		lines = append(lines, fmt.Sprintf("shell_target=%s", userHost))
 	}
-	if cwd := strings.TrimSpace(promptContext.Directory); cwd != "" {
+	location := effectiveShellLocation(c.session.CurrentShellLocation, promptContext)
+	if cwd := strings.TrimSpace(location.Directory); cwd != "" {
 		lines = append(lines, fmt.Sprintf("cwd=%s", cwd))
 	}
-	lines = append(lines, fmt.Sprintf("remote=%t", promptContext.Remote))
+	if location.DirectorySource != "" && location.DirectorySource != shell.ShellDirectorySourceUnknown {
+		lines = append(lines, fmt.Sprintf("cwd_source=%s", location.DirectorySource))
+	}
+	if location.DirectoryConfidence != "" {
+		lines = append(lines, fmt.Sprintf("cwd_confidence=%s", location.DirectoryConfidence))
+	}
+	lines = append(lines, fmt.Sprintf("cwd_authoritative=%t", location.DirectorySource == shell.ShellDirectorySourceProbe))
+	remote := location.Kind == shell.ShellLocationRemote
+	lines = append(lines, fmt.Sprintf("remote=%t", remote))
+	if location.Kind != "" {
+		lines = append(lines, fmt.Sprintf("shell_location=%s", location.Kind))
+	}
 	if system := strings.TrimSpace(promptContext.System); system != "" {
 		lines = append(lines, fmt.Sprintf("system=%s", system))
 	}
@@ -89,11 +101,11 @@ func (c *LocalController) summarizeInspectedShellContext(promptContext *shell.Pr
 	}
 	if localRoot := strings.TrimSpace(c.session.LocalWorkspaceRoot); localRoot != "" {
 		lines = append(lines, fmt.Sprintf("local_workspace_root=%s", localRoot))
-		if cwd := strings.TrimSpace(promptContext.Directory); cwd != "" {
+		if cwd := strings.TrimSpace(location.Directory); cwd != "" {
 			lines = append(lines, fmt.Sprintf("workspace_relation=%s", workspaceRelation(cwd, localRoot)))
 		}
 	}
-	if promptContext.Remote {
+	if remote {
 		if remoteRoot := strings.TrimSpace(c.session.WorkingDirectory); remoteRoot != "" {
 			lines = append(lines, fmt.Sprintf("remote_patch_root=%s", remoteRoot))
 		}
