@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"aiterm/internal/controller"
+	"aiterm/internal/shell"
 )
 
 func TestCodexCLIAgentRespondUsesStructuredOutputFile(t *testing.T) {
@@ -57,6 +58,64 @@ func TestCodexCLIAgentRespondUsesStructuredOutputFile(t *testing.T) {
 		if !strings.Contains(argText, fragment) {
 			t.Fatalf("expected args to contain %q, got %q", fragment, argText)
 		}
+	}
+}
+
+func TestCodexCLIAgentRespondUsesLocalWorkspaceRootWhenTrackedShellIsRemote(t *testing.T) {
+	script := writeFakeCodexCLI(t)
+	argsFile := filepath.Join(t.TempDir(), "codex-args.txt")
+	t.Setenv("FAKE_CODEX_LOGIN_STATUS", "Logged in using ChatGPT")
+	t.Setenv("FAKE_CODEX_LAST_MESSAGE", `{"message":"Remote shell context handled.","plan_summary":"","plan_steps":[],"proposal_kind":"command","proposal_command":"ls","proposal_patch":"","proposal_description":"Inspect remote home.","approval_kind":"","approval_title":"","approval_summary":"","approval_command":"","approval_patch":"","approval_risk":""}`)
+	t.Setenv("FAKE_CODEX_ARGS_FILE", argsFile)
+
+	agent, err := NewCodexCLIAgent(Profile{
+		BackendFamily: BackendCLIAgent,
+		Preset:        PresetCodexCLI,
+		AuthMethod:    AuthCodexLogin,
+		Model:         "gpt-5.2-codex",
+		CLICommand:    script,
+	})
+	if err != nil {
+		t.Fatalf("NewCodexCLIAgent() error = %v", err)
+	}
+
+	_, err = agent.Respond(context.Background(), controller.AgentInput{
+		Prompt: "inspect my openclaw configuration",
+		Session: controller.SessionContext{
+			WorkingDirectory:   "/home/openclaw",
+			LocalWorkspaceRoot: "/home/jsmith/source/repos/aiterm",
+			CurrentShell: &shell.PromptContext{
+				User:         "openclaw",
+				Host:         "openclaw",
+				Directory:    "~",
+				PromptSymbol: "$",
+				RawLine:      "openclaw@openclaw ~ $",
+				Remote:       true,
+			},
+			CurrentShellLocation: &shell.ShellLocation{
+				Kind:                shell.ShellLocationRemote,
+				User:                "openclaw",
+				Host:                "openclaw",
+				Directory:           "~",
+				DirectorySource:     shell.ShellDirectorySourcePrompt,
+				DirectoryConfidence: shell.ConfidenceLow,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Respond() error = %v", err)
+	}
+
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	argText := string(args)
+	if !strings.Contains(argText, "--cd\n/home/jsmith/source/repos/aiterm\n") && !strings.Contains(argText, "--cd /home/jsmith/source/repos/aiterm") {
+		t.Fatalf("expected local workspace root in codex args, got %q", argText)
+	}
+	if strings.Contains(argText, "--cd\n/home/openclaw\n") || strings.Contains(argText, "--cd /home/openclaw") {
+		t.Fatalf("expected remote cwd not to be used for local codex CLI, got %q", argText)
 	}
 }
 
