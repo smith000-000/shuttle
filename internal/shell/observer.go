@@ -407,61 +407,55 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 		}
 
 		if started && observed.HasSemanticState && observed.SemanticState.Event == semanticEventPrompt && !observed.SemanticState.UpdatedAt.Before(commandSentAt) {
-			promptContext := monitor.Snapshot().ShellContext
-			if promptContext.PromptLine() == "" {
-				promptContext = synthesizePromptContext(o.promptHint, observed.SemanticState)
-			}
-			cleanBody := sanitizeCapturedBody(capturePaneDelta(beforeCapture, captured))
-			cleanBody = stripEchoedCommand(cleanBody, transportCommand)
-			if promptContext.PromptLine() != "" {
-				cleanBody = stripTrailingPromptLine(cleanBody, promptContext)
-			}
-			exitCode := 0
-			if observed.SemanticState.ExitCode != nil {
-				exitCode = *observed.SemanticState.ExitCode
-			}
-			state := MonitorStateCompleted
-			switch exitCode {
-			case InterruptedExitCode:
-				state = MonitorStateCanceled
-			case 0:
-				state = MonitorStateCompleted
-			default:
-				state = MonitorStateFailed
+			evaluation, complete := evaluateSemanticPromptReturn(promptReturnInputs{
+				CommandID:  markers.CommandID,
+				Command:    command,
+				Observed:   observed,
+				Snapshot:   monitor.Snapshot(),
+				PromptHint: o.promptHint,
+				RawBody:    capturePaneDelta(beforeCapture, captured),
+				BodyCleaner: func(body string, promptContext PromptContext) string {
+					return stripTrailingPromptLine(stripEchoedCommand(sanitizeCapturedBody(body), transportCommand), promptContext)
+				},
+				SemanticSource: observed.SemanticSource,
+			})
+			if !complete {
+				continue
 			}
 			logging.Trace(
 				"shell.tracked.semantic_prompt_returned",
 				"pane", paneID,
 				"command", command,
 				"command_id", markers.CommandID,
-				"exit_code", exitCode,
-				"state", state,
-				"prompt", promptContext.PromptLine(),
-				"capture_preview", logging.Preview(cleanBody, 1200),
+				"exit_code", evaluation.Result.ExitCode,
+				"state", evaluation.State,
+				"prompt", evaluation.Result.ShellContext.PromptLine(),
+				"capture_preview", logging.Preview(evaluation.Result.Captured, 1200),
 			)
-			monitor.finish(TrackedExecution{
-				CommandID:      markers.CommandID,
-				Command:        command,
-				Cause:          CompletionCausePromptReturn,
-				Confidence:     ConfidenceStrong,
-				SemanticShell:  true,
-				SemanticSource: observed.SemanticSource,
-				ExitCode:       exitCode,
-				Captured:       cleanBody,
-				ShellContext:   promptContext,
-			}, nil, state)
+			monitor.finish(evaluation.Result, nil, evaluation.State)
 			return
 		}
 
 		if started && allowPromptReturnInference(command, observed) {
-			promptContext := monitor.Snapshot().ShellContext
+			promptContext := promptReturnContext(promptReturnInputs{
+				Observed:   observed,
+				Snapshot:   monitor.Snapshot(),
+				PromptHint: o.promptHint,
+			})
 			if TailSuggestsPromptReturn(captured, promptContext) {
-				cleanBody := sanitizeCapturedBody(capturePaneDelta(beforeCapture, captured))
-				cleanBody = stripEchoedCommand(cleanBody, transportCommand)
-				if promptContext.PromptLine() != "" {
-					cleanBody = stripTrailingPromptLine(cleanBody, promptContext)
-				}
-				if cleanBody == "" && promptContext.LastExitCode == nil && observed.SemanticState.ExitCode == nil {
+				evaluation, complete := evaluatePromptReturnInference(promptReturnInputs{
+					CommandID:  markers.CommandID,
+					Command:    command,
+					Observed:   observed,
+					Snapshot:   monitor.Snapshot(),
+					PromptHint: o.promptHint,
+					RawBody:    capturePaneDelta(beforeCapture, captured),
+					BodyCleaner: func(body string, promptContext PromptContext) string {
+						return stripTrailingPromptLine(stripEchoedCommand(sanitizeCapturedBody(body), transportCommand), promptContext)
+					},
+					SemanticSource: observed.SemanticSource,
+				})
+				if !complete {
 					select {
 					case <-ctx.Done():
 						logging.TraceError(
@@ -479,36 +473,20 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 					}
 					continue
 				}
-				exitCode, state, confidence, inferred := inferPromptReturnResult(promptContext, cleanBody, observed.SemanticState.ExitCode)
-				semanticShell := !inferred && (promptContext.LastExitCode != nil || observed.SemanticState.ExitCode != nil)
-				semanticSourceValue := ""
-				if semanticShell {
-					semanticSourceValue = observed.SemanticSource
-				}
 				logging.Trace(
 					"shell.tracked.prompt_returned",
 					"pane", paneID,
 					"command", command,
 					"command_id", markers.CommandID,
-					"captured_preview", logging.Preview(cleanBody, 1200),
-					"prompt", promptContext.PromptLine(),
+					"captured_preview", logging.Preview(evaluation.Result.Captured, 1200),
+					"prompt", evaluation.Result.ShellContext.PromptLine(),
 					"pane_command", currentPaneCommand,
-					"confidence", confidence,
-					"exit_code", exitCode,
-					"state", state,
-					"inferred_exit", inferred,
+					"confidence", evaluation.Result.Confidence,
+					"exit_code", evaluation.Result.ExitCode,
+					"state", evaluation.State,
+					"inferred_exit", !evaluation.Result.SemanticShell && evaluation.Result.Confidence != ConfidenceStrong,
 				)
-				monitor.finish(TrackedExecution{
-					CommandID:      markers.CommandID,
-					Command:        command,
-					Cause:          CompletionCausePromptReturn,
-					Confidence:     confidence,
-					SemanticShell:  semanticShell,
-					SemanticSource: semanticSourceValue,
-					ExitCode:       exitCode,
-					Captured:       cleanBody,
-					ShellContext:   promptContext,
-				}, nil, state)
+				monitor.finish(evaluation.Result, nil, evaluation.State)
 				return
 			}
 		}

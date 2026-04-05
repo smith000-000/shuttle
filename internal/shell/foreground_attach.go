@@ -138,10 +138,11 @@ func (o *Observer) runAttachedForegroundMonitor(ctx context.Context, monitor *tr
 		monitor.setState(classifyActiveMonitorState(command, observed))
 
 		if observed.HasSemanticState && observed.SemanticState.Event == semanticEventPrompt {
-			promptContext := monitor.Snapshot().ShellContext
-			if promptContext.PromptLine() == "" {
-				promptContext = synthesizePromptContext(o.promptHint, observed.SemanticState)
-			}
+			promptContext := promptReturnContext(promptReturnInputs{
+				Observed:   observed,
+				Snapshot:   monitor.Snapshot(),
+				PromptHint: o.promptHint,
+			})
 			if !captureHasCurrentPromptContext(captured, promptContext) {
 				select {
 				case <-ctx.Done():
@@ -156,76 +157,65 @@ func (o *Observer) runAttachedForegroundMonitor(ctx context.Context, monitor *tr
 				}
 				continue
 			}
-			cleanBody := stripEchoedForegroundCommand(strings.TrimSpace(observed.Tail), currentPaneCommand)
-			if promptContext.PromptLine() != "" {
-				cleanBody = stripTrailingPromptLine(cleanBody, promptContext)
-			}
-			if cleanBody == "" {
-				snapshot := monitor.Snapshot()
-				cleanBody = stripEchoedForegroundCommand(strings.TrimSpace(snapshot.LatestOutputTail), command)
-			}
-			exitCode := 0
-			if observed.SemanticState.ExitCode != nil {
-				exitCode = *observed.SemanticState.ExitCode
-			}
-			state := MonitorStateCompleted
-			switch exitCode {
-			case InterruptedExitCode:
-				state = MonitorStateCanceled
-			case 0:
-				state = MonitorStateCompleted
-			default:
-				state = MonitorStateFailed
+			evaluation, complete := evaluateSemanticPromptReturn(promptReturnInputs{
+				Command:    command,
+				Observed:   observed,
+				Snapshot:   monitor.Snapshot(),
+				PromptHint: o.promptHint,
+				RawBody:    observed.Tail,
+				BodyCleaner: func(body string, promptContext PromptContext) string {
+					return stripTrailingPromptLine(stripEchoedForegroundCommand(strings.TrimSpace(body), currentPaneCommand), promptContext)
+				},
+				FallbackBody: func(snapshot MonitorSnapshot) string {
+					return stripEchoedForegroundCommand(strings.TrimSpace(snapshot.LatestOutputTail), command)
+				},
+				SemanticSource: observed.SemanticSource,
+			})
+			if !complete {
+				continue
 			}
 			logging.Trace(
 				"shell.attach_foreground.complete_semantic",
 				"pane", paneID,
 				"command", command,
-				"state", state,
-				"exit_code", exitCode,
+				"state", evaluation.State,
+				"exit_code", evaluation.Result.ExitCode,
 				"pane_command", currentPaneCommand,
 			)
-			monitor.finish(TrackedExecution{
-				Command:        command,
-				Cause:          CompletionCausePromptReturn,
-				Confidence:     ConfidenceStrong,
-				SemanticShell:  true,
-				SemanticSource: observed.SemanticSource,
-				ExitCode:       exitCode,
-				Captured:       cleanBody,
-				ShellContext:   promptContext,
-			}, nil, state)
+			monitor.finish(evaluation.Result, nil, evaluation.State)
 			return
 		}
 
 		if observed.HasPromptContext && allowPromptReturnInference("", observed) {
-			cleanBody := stripEchoedForegroundCommand(strings.TrimSpace(observed.Tail), currentPaneCommand)
-			if observed.PromptContext.PromptLine() != "" {
-				cleanBody = stripTrailingPromptLine(cleanBody, observed.PromptContext)
+			evaluation, complete := evaluatePromptReturnInference(promptReturnInputs{
+				Command:    command,
+				Observed:   observed,
+				Snapshot:   monitor.Snapshot(),
+				PromptHint: o.promptHint,
+				RawBody:    observed.Tail,
+				BodyCleaner: func(body string, promptContext PromptContext) string {
+					return stripTrailingPromptLine(stripEchoedForegroundCommand(strings.TrimSpace(body), currentPaneCommand), promptContext)
+				},
+				FallbackBody: func(snapshot MonitorSnapshot) string {
+					return stripEchoedForegroundCommand(strings.TrimSpace(snapshot.LatestOutputTail), command)
+				},
+				AllowEmptyBody: true,
+				SemanticSource: observed.SemanticSource,
+			})
+			if !complete {
+				continue
 			}
-			if cleanBody == "" {
-				snapshot := monitor.Snapshot()
-				cleanBody = stripEchoedForegroundCommand(strings.TrimSpace(snapshot.LatestOutputTail), command)
-			}
-			confidence := ConfidenceMedium
-			if paneCommandAllowsPromptInference(currentPaneCommand) {
-				confidence = ConfidenceStrong
+			if paneCommandAllowsPromptInference(currentPaneCommand) && evaluation.Result.Confidence == ConfidenceMedium {
+				evaluation.Result.Confidence = ConfidenceStrong
 			}
 			logging.Trace(
 				"shell.attach_foreground.complete_prompt",
 				"pane", paneID,
 				"command", command,
 				"pane_command", currentPaneCommand,
-				"confidence", confidence,
+				"confidence", evaluation.Result.Confidence,
 			)
-			monitor.finish(TrackedExecution{
-				Command:      command,
-				Cause:        CompletionCausePromptReturn,
-				Confidence:   confidence,
-				ExitCode:     0,
-				Captured:     cleanBody,
-				ShellContext: observed.PromptContext,
-			}, nil, MonitorStateCompleted)
+			monitor.finish(evaluation.Result, nil, evaluation.State)
 			return
 		}
 

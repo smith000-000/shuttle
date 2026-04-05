@@ -114,7 +114,11 @@ func (c *LocalController) applyObservedShellStateLocked(observed *shell.Observed
 	if observed.HasPromptContext && observed.PromptContext.PromptLine() != "" {
 		contextCopy := observed.PromptContext
 		c.session.CurrentShell = &contextCopy
-		if workingDirectory := normalizeShellWorkingDirectory(contextCopy.Directory, &locationCopy); workingDirectory != "" {
+		workingDirectorySource := contextCopy.Directory
+		if locationCopy.DirectorySource == shell.ShellDirectorySourceProbe && strings.TrimSpace(locationCopy.Directory) != "" {
+			workingDirectorySource = locationCopy.Directory
+		}
+		if workingDirectory := normalizeShellWorkingDirectory(workingDirectorySource, &locationCopy); workingDirectory != "" {
 			c.session.WorkingDirectory = workingDirectory
 		}
 	}

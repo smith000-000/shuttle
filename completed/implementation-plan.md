@@ -597,7 +597,7 @@ integration/
 - `patchapply` owns unified-diff parsing, validation, staging, and apply.
 - `tui` stays presentation-focused.
 - `provider` stays behind a narrow interface so it can be mocked early.
-- `integration/harness` owns tmux-driven interactive regression coverage that exercises the real TUI and controller loop together.
+- `integration/harness` owns tmux-driven interactive regression coverage that exercises the real TUI and controller loop together; it is currently opt-in only while broader interactive UX automation is paused.
 
 ---
 
@@ -730,6 +730,10 @@ Optional task aliases:
 - `make test`
 - `make run`
 - `make test-integration`
+
+Current testing policy:
+- unit and non-interactive integration suites are the default verification path
+- `integration/harness` remains available for explicit opt-in runs when working on end-to-end TUI UX, but it should not be part of the routine test gate for now
 
 ## 6.2 Logging
 During early development, write logs to a plain local file and also allow stderr logging when running interactively.

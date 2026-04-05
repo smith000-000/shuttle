@@ -83,6 +83,7 @@ Current transition rule:
 
 Current implementation note:
 - monitor loops now build an `ObservedShellState` snapshot that bundles prompt parse, pane metadata, semantic state, remembered transition kind, and inferred shell location
+- tracked-command and attached-foreground monitors now share the same prompt-return evaluator for semantic completion, inferred prompt-return completion, and tail normalization; the launch-mode-specific code only owns start detection, attach gating, and capture windowing
 - `ShellLocation` now also carries cwd source/confidence metadata so the controller can distinguish prompt-derived directories, probe-confirmed directories, and low-confidence carried-forward cwd
 - context-transition polling now routes through a dedicated transition tracker state machine with states such as `submitted`, `candidate_prompt_seen`, `awaiting_interactive_input`, and `probe_verifying`
 - this is intended as an internal cleanup seam so later remote-shell reliability work can replace scattered boolean checks without redesigning the shell product model again
@@ -509,4 +510,4 @@ Related docs:
 - [architecture.md](architecture.md)
 - [protocol-shell-observation.md](protocol-shell-observation.md)
 - [shell-execution-strategy.md](shell-execution-strategy.md)
-- [implementation-plan.md](implementation-plan.md)
+- [../BACKLOG.md](../BACKLOG.md)

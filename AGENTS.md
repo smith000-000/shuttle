@@ -11,21 +11,21 @@ These instructions apply to the entire repository.
 Before making nontrivial changes, anchor yourself in the current product and architecture docs instead of inferring structure only from local code.
 
 Primary references:
-- `README.md`: current user-visible behavior, supported workflows, limitations, build/test commands, and operator-facing usage
-- `architecture.md`: top-level system boundaries and responsibilities
-- `implementation-plan.md`: current implementation status, milestone state, active branch themes, and deferred work
+- `BACKLOG.md`: current implementation status, active branch themes, and prioritized remaining work
+- `inprocess/README.md`: current user-visible behavior, supported workflows, limitations, build/test commands, and operator-facing usage
+- `inprocess/architecture.md`: top-level system boundaries and responsibilities
 
 Important subsystem references:
-- `agent-runtime-design.md`: agent/runtime interaction boundaries
-- `shell-tracking-architecture.md`: tracked shell model, prompt-return logic, ownership, and recovery behavior
-- `shell-execution-strategy.md`: execution-control policy, regression checklist, and handoff/fullscreen expectations
-- `provider-integration-design.md` and `provider-integration-plan.md`: provider/auth structure and onboarding direction
-- `runtime-management-design.md`: socket/session/runtime-state lifecycle expectations
+- `inprocess/agent-runtime-design.md`: agent/runtime interaction boundaries
+- `inprocess/shell-tracking-architecture.md`: tracked shell model, prompt-return logic, ownership, and recovery behavior
+- `inprocess/shell-execution-strategy.md`: execution-control policy, regression checklist, and handoff/fullscreen expectations
+- `inprocess/provider-integration-design.md`: provider/auth structure and onboarding direction
+- `inprocess/runtime-management-design.md`: socket/session/runtime-state lifecycle expectations
 
 Patch and refactor references:
-- `patch-apply-implementation-plan.md`: intended patch/apply product flow and constraints
-- `patch-apply-strategy.md`: native patch runtime strategy and guardrails
-- `refactor-checklist.md`: decomposition/test-organization plan for large files
+- `inprocess/patch-apply-strategy.md`: native patch runtime strategy and guardrails
+- `completed/patch-apply-implementation-plan.md`: intended patch/apply product flow and constraints
+- `completed/refactor-checklist.md`: decomposition/test-organization plan for large files
 
 Treat these docs as part of the codebase contract. When implementation changes them materially, update them in the same branch.
 
@@ -66,8 +66,9 @@ When adding features, fit them into these boundaries rather than creating overla
 When a change affects behavior, user workflows, architecture, testing, or operator workflow, update the relevant docs in the same branch before opening a PR.
 
 This includes reviewing and updating:
-- `README.md` for current user-visible behavior, capabilities, limitations, and workflows
-- `architecture.md` and related design docs when implementation meaningfully changes the described system
+- `BACKLOG.md` for current implementation priorities and status
+- `inprocess/README.md` for current user-visible behavior, capabilities, limitations, and workflows
+- `inprocess/architecture.md` and related design docs when implementation meaningfully changes the described system
 - subsystem docs such as shell/provider/runtime design notes when changes affect those areas
 - test or harness docs when new test flows, scripts, or manual procedures are added
 - planning docs when they are intended to track the current implementation state
@@ -77,8 +78,8 @@ Do not assume existing docs are still correct after code changes.
 ## PR Checklist
 
 Before pushing or creating a PR, explicitly check:
-- does `README.md` still describe the current product behavior and current limitations?
-- do `architecture.md`, `implementation-plan.md`, or subsystem design docs now need updates?
+- does `inprocess/README.md` still describe the current product behavior and current limitations?
+- do `BACKLOG.md`, `inprocess/architecture.md`, or subsystem design docs now need updates?
 - do new commands, slash commands, prompts, flows, or test harnesses need documentation?
 - are stale statements from earlier phases still present and now misleading?
 - does the documented product structure still match the code paths you changed?

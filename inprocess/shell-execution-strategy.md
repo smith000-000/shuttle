@@ -194,6 +194,8 @@ Before changing subshell/bootstrap behavior, manually verify:
   - local prompt still stabilizes
   - tracked commands still complete normally
 
+This checklist is also the manual hardening gate for shell-tracking refactors that touch prompt-return reconciliation, attached foreground monitoring, or remote transition settling, even when they are not changing bootstrap behavior directly.
+
 ### 1. Introduce First-Class Command Executions
 Every shell command should create a tracked execution record.
 
@@ -587,7 +589,7 @@ Expect:
 Run:
 
 ```bash
-nano ui-scratchpad.md
+nano completed/ui-scratchpad.md
 ```
 
 Expect:

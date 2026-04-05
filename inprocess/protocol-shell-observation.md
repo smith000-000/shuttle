@@ -75,5 +75,5 @@ These cases should be treated as degraded modes, not as reasons to fall back to 
 
 # 7. Related Documents
 
-- Product acceptance criteria: [requirements-mvp.md](requirements-mvp.md)
+- Current prioritized backlog: [../BACKLOG.md](../BACKLOG.md)
 - System boundaries and implementation direction: [architecture.md](architecture.md)

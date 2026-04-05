@@ -11,17 +11,14 @@ Define the product requirements for a local, shell-native, two-pane agent worksp
 
 ## Document Map
 Detailed material that used to live in the monolithic PRD is now split into focused supporting docs:
-- [MVP Requirements](requirements-mvp.md)
+- [Current Backlog](../BACKLOG.md)
 - [Architecture](architecture.md)
 - [Shell Observation Protocol](protocol-shell-observation.md)
-- [Roadmap](roadmap.md)
-- [Implementation Plan](implementation-plan.md)
-- [Milestone 1 Plan](milestone-1-workspace.md)
 - [Agent Runtime Design](agent-runtime-design.md)
 - [Provider Integration Design](provider-integration-design.md)
-- [Provider Integration Plan](provider-integration-plan.md)
 - [Runtime Management Design](runtime-management-design.md)
 - [Shell Execution Strategy](shell-execution-strategy.md)
+- [Archived plans and milestones](../completed/)
 
 ---
 
@@ -197,7 +194,7 @@ The first usable release should focus on:
 - basic provider and model profile support
 - local persistence for useful session context
 
-Detailed acceptance criteria and delivery grouping live in [requirements-mvp.md](requirements-mvp.md).
+Current prioritized delivery work lives in [../BACKLOG.md](../BACKLOG.md); older milestone and requirements docs are archived under [../completed/](../completed/).
 
 ---
 

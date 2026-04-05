@@ -182,6 +182,10 @@ Integration-only tests:
 make test-integration
 ```
 
+Interactive tmux harness tests under `./integration/harness` are currently
+opt-in only while UX automation is paused. Run them explicitly with
+`SHUTTLE_RUN_INTERACTIVE_HARNESS=1`.
+
 Run from source without the launcher:
 
 ```bash
@@ -336,20 +340,19 @@ Status line notes:
 - the active model renders as `provider / model`, and context usage shows as a color-coded ASCII fill bar with current usage against the known window when available
 - active work renders as a braille spinner plus a fixed-width elapsed-seconds label until it grows into minute-scale durations
 
-The TUI is intentionally keyboard-first. Current behavior is still evolving, so see [ui-scratchpad.md](ui-scratchpad.md) for active UX backlog notes.
+The TUI is intentionally keyboard-first. Current priorities now live in [../BACKLOG.md](../BACKLOG.md), and older UX scratch notes are archived in [../completed/ui-scratchpad.md](../completed/ui-scratchpad.md).
 
 ## Important Docs
 
 - [shell-tracking-architecture.md](shell-tracking-architecture.md)
 - [architecture.md](architecture.md)
-- [implementation-plan.md](implementation-plan.md)
+- [../BACKLOG.md](../BACKLOG.md)
 - [provider-auth-guide.md](provider-auth-guide.md)
 - [shell-execution-strategy.md](shell-execution-strategy.md)
-- [provider-integration-plan.md](provider-integration-plan.md)
 - [agent-runtime-design.md](agent-runtime-design.md)
 - [runtime-management-design.md](runtime-management-design.md)
-- [requirements-mvp.md](requirements-mvp.md)
-- [patch-apply-research.md](patch-apply-research.md)
+- [provider-integration-design.md](provider-integration-design.md)
+- [../completed/implementation-plan.md](../completed/implementation-plan.md)
 
 ## Current Limitations
 

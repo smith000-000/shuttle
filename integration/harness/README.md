@@ -2,6 +2,10 @@
 
 This subfolder contains tmux-driven interactive integration coverage for Shuttle.
 
+The harness is currently opt-in and does not run in ordinary `go test` or
+`make test-integration` flows unless `SHUTTLE_RUN_INTERACTIVE_HARNESS=1` is set.
+This is intentional while interactive UX automation is paused.
+
 The harness runs the real TUI in one isolated tmux server and lets Shuttle create
 its managed workspace in a second isolated tmux server. That gives the tests a
 real tty for the bottom-pane interaction while still allowing direct inspection
@@ -21,13 +25,13 @@ Artifacts:
 Run only this harness:
 
 ```bash
-go test ./integration/harness -v
+SHUTTLE_RUN_INTERACTIVE_HARNESS=1 go test ./integration/harness -v
 ```
 
 Run the patch-focused test script:
 
 ```bash
-./integration/harness/run_patch_tests.sh
+SHUTTLE_RUN_INTERACTIVE_HARNESS=1 ./integration/harness/run_patch_tests.sh
 ```
 
 Requirements:
