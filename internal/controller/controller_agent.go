@@ -2,10 +2,9 @@ package controller
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"strings"
 
+	"aiterm/internal/agentruntime"
 	"aiterm/internal/logging"
 )
 
@@ -80,255 +79,32 @@ func (c *LocalController) submitAgentTurnWithInspectBudget(ctx context.Context, 
 		"emit_user_message", emitUserMessage,
 		"has_refinement", refinement != nil,
 	)
-	if _, err := c.RefreshShellContext(ctx); err != nil {
-		return nil, err
-	}
-	c.refreshUserShellContext(ctx, false)
-
-	events := make([]TranscriptEvent, 0, 4)
-
-	c.mu.Lock()
-	if emitUserMessage {
-		events = append(events, c.newEvent(EventUserMessage, TextPayload{Text: userPrompt}))
-	}
-	if c.agent == nil {
-		errEvent := c.newEvent(EventError, TextPayload{Text: "agent runtime is not configured"})
-		c.appendEvents(events...)
-		c.appendEvents(errEvent)
-		c.mu.Unlock()
-		return append(append([]TranscriptEvent(nil), events...), errEvent), nil
-	}
-
-	session := c.session
-	task := c.task
-	task.RecoverySnapshot = c.captureRecoverySnapshot(ctx, executionTarget(task.CurrentExecution, session.TrackedShell).PaneID, task.CurrentExecution)
-	c.mu.Unlock()
-
-	input := AgentInput{
-		Session: session,
-		Task:    task,
-		Prompt:  agentPrompt,
+	req := agentruntime.Request{
+		Kind:          agentruntime.RequestUserTurn,
+		Prompt:        agentPrompt,
+		UserPrompt:    userPrompt,
+		InspectBudget: inspectBudget,
 	}
 	if refinement != nil {
-		refinementCopy := *refinement
-		input.Task.PendingApproval = &refinementCopy
+		req.Kind = agentruntime.RequestApprovalRefinement
+		req.Approval = &agentruntime.ApprovalRequest{
+			ID:          refinement.ID,
+			Kind:        refinement.Kind,
+			Title:       refinement.Title,
+			Summary:     refinement.Summary,
+			Command:     refinement.Command,
+			Patch:       refinement.Patch,
+			PatchTarget: refinement.PatchTarget,
+			Risk:        refinement.Risk,
+		}
 	}
-
-	response, err := c.agent.Respond(ctx, input)
+	newEvents, err := c.handleRuntimeRequest(ctx, req, emitUserMessage)
 	if err != nil {
-		logging.TraceError(
-			"controller.agent_turn.error",
-			err,
-			"user_prompt", userPrompt,
-			"agent_prompt_preview", logging.Preview(agentPrompt, 800),
-		)
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		if errors.Is(err, context.Canceled) {
-			c.appendEvents(events...)
-			return append([]TranscriptEvent(nil), events...), err
-		}
-		errEvent := c.newEvent(EventError, TextPayload{Text: err.Error()})
-		c.appendEvents(events...)
-		c.appendEvents(errEvent)
-		return append(append([]TranscriptEvent(nil), events...), errEvent), nil
+		logging.TraceError("controller.agent_turn.error", err, "user_prompt", userPrompt, "agent_prompt_preview", logging.Preview(agentPrompt, 800))
+		return newEvents, err
 	}
-	response = normalizeAgentResponse(response)
-	response, err = c.synthesizeStructuredEditResponse(ctx, response)
-	if err != nil {
-		logging.TraceError("controller.agent_turn.edit_synthesis_error", err)
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		if errors.Is(err, context.Canceled) {
-			if emitUserMessage {
-				c.appendEvents(events...)
-			}
-			return append([]TranscriptEvent(nil), events...), err
-		}
-		errEvent := c.newEvent(EventError, TextPayload{Text: err.Error()})
-		c.appendEvents(events...)
-		c.appendEvents(errEvent)
-		return append(append([]TranscriptEvent(nil), events...), errEvent), nil
-	}
-	response, repaired, repairErr := c.repairInvalidPatchResponse(ctx, input, response)
-	if repairErr != nil {
-		logging.TraceError("controller.agent_turn.patch_repair_error", repairErr)
-	}
-	if repaired {
-		logging.Trace("controller.agent_turn.patch_repaired")
-	}
-	if response.Proposal != nil && response.Proposal.Kind == ProposalInspectContext {
-		if inspectBudget <= 0 {
-			logging.Trace("controller.agent_turn.inspect_context.exhausted")
-			response.Proposal = nil
-			if strings.TrimSpace(response.Message) == "" {
-				response.Message = "I could not stabilize shell context well enough to continue reliably."
-			}
-		} else {
-			logging.Trace("controller.agent_turn.inspect_context.internal")
-			summary, promptContext, inspectErr := c.inspectProposedContextSummary(ctx)
-			if inspectErr != nil {
-				c.mu.Lock()
-				defer c.mu.Unlock()
-				if errors.Is(inspectErr, context.Canceled) {
-					if emitUserMessage {
-						c.appendEvents(events...)
-					}
-					return append([]TranscriptEvent(nil), events...), inspectErr
-				}
-				errEvent := c.newEvent(EventError, TextPayload{Text: inspectErr.Error()})
-				c.appendEvents(events...)
-				c.appendEvents(errEvent)
-				return append(append([]TranscriptEvent(nil), events...), errEvent), nil
-			}
-			c.mu.Lock()
-			c.task.LastCommandResult = &summary
-			if promptContext != nil {
-				contextCopy := *promptContext
-				c.applyPromptContextLocked(&contextCopy)
-			}
-			c.mu.Unlock()
-			return c.submitAgentTurnWithInspectBudget(ctx, userPrompt, agentPrompt, refinement, emitUserMessage, inspectBudget-1)
-		}
-	}
-
-	c.mu.Lock()
-	if shouldSuppressReturnedPlan(response.Plan, emitUserMessage, userPrompt, c.task.ActivePlan) {
-		response.Plan = nil
-	}
-	completedPlan := completionPlanFromContinuation(response, emitUserMessage, c.task.ActivePlan)
-	autoAction := automaticActionFromResponse(c.session, response)
-	if autoAction.command != "" || autoAction.patch != "" {
-		if response.Approval != nil {
-			response.Approval = nil
-			response.Proposal = nil
-		} else {
-			response.Proposal = nil
-		}
-	}
-
-	newEvents := append([]TranscriptEvent(nil), events...)
-
-	if response.Message != "" {
-		newEvents = append(newEvents, c.newEvent(EventAgentMessage, TextPayload{Text: response.Message}))
-	}
-
-	if response.ModelInfo != nil {
-		modelInfo := *response.ModelInfo
-		newEvents = append(newEvents, c.newEvent(EventModelInfo, modelInfo))
-	}
-
-	if completedPlan != nil {
-		c.task.ActivePlan = nil
-		newEvents = append(newEvents, c.newEvent(EventPlan, *completedPlan))
-	}
-
-	if response.Plan != nil {
-		activePlan := buildActivePlan(*response.Plan)
-		c.task.ActivePlan = &activePlan
-		newEvents = append(newEvents, c.newEvent(EventPlan, activePlan))
-	}
-
-	if response.Proposal != nil {
-		newEvents = append(newEvents, c.newEvent(EventProposal, ProposalPayload{
-			Kind:        response.Proposal.Kind,
-			Command:     response.Proposal.Command,
-			Keys:        response.Proposal.Keys,
-			Patch:       response.Proposal.Patch,
-			PatchTarget: response.Proposal.PatchTarget,
-			Description: response.Proposal.Description,
-		}))
-	}
-
-	if response.Approval != nil {
-		approvalCopy := *response.Approval
-		c.task.PendingApproval = &approvalCopy
-		newEvents = append(newEvents, c.newEvent(EventApproval, approvalCopy))
-	}
-	if autoAction.command != "" {
-		notice := autoRunNotice(autoAction.command)
-		if c.session.ApprovalMode == ApprovalModeDanger {
-			notice = fmt.Sprintf("Auto-running agent command under /approvals dangerous: %s", strings.TrimSpace(autoAction.command))
-		}
-		newEvents = append(newEvents, c.newEvent(EventSystemNotice, TextPayload{Text: notice}))
-	}
-	if autoAction.patch != "" {
-		newEvents = append(newEvents, c.newEvent(EventSystemNotice, TextPayload{Text: "Auto-applying agent patch under /approvals dangerous."}))
-	}
-
-	c.appendEvents(newEvents...)
-	c.mu.Unlock()
-	logging.Trace(
-		"controller.agent_turn.complete",
-		"event_kinds", eventKinds(newEvents),
-		"message_preview", logging.Preview(response.Message, 600),
-		"has_plan", response.Plan != nil,
-		"has_proposal", response.Proposal != nil,
-		"has_approval", response.Approval != nil,
-	)
-	if autoAction.patch != "" {
-		patchEvents, patchErr := c.applyPatch(ctx, autoAction.patch, autoAction.patchTarget)
-		newEvents = append(newEvents, patchEvents...)
-		if patchErr != nil {
-			return newEvents, patchErr
-		}
-	}
-	if autoAction.command != "" {
-		origin := CommandOriginAgentAuto
-		if c.session.ApprovalMode == ApprovalModeDanger {
-			origin = CommandOriginAgentAuto
-		}
-		commandEvents, commandErr := c.submitShellCommand(ctx, autoAction.command, origin)
-		newEvents = append(newEvents, commandEvents...)
-		if commandErr != nil {
-			return newEvents, commandErr
-		}
-	}
+	logging.Trace("controller.agent_turn.complete", "event_kinds", eventKinds(newEvents))
 	return newEvents, nil
-}
-
-func (c *LocalController) repairInvalidPatchResponse(ctx context.Context, input AgentInput, response AgentResponse) (AgentResponse, bool, error) {
-	kind, target, patch, err := c.invalidPatchInResponse(ctx, response)
-	if err == nil {
-		return response, false, nil
-	}
-
-	repairPrompt := buildInvalidPatchRepairPrompt(kind, target, patch, err)
-	repairInput := input
-	repairInput.Prompt = repairPrompt
-
-	repairedResponse, repairErr := c.agent.Respond(ctx, repairInput)
-	if repairErr != nil {
-		return response, false, repairErr
-	}
-	repairedResponse = normalizeAgentResponse(repairedResponse)
-	if _, _, _, repairedErr := c.invalidPatchInResponse(ctx, repairedResponse); repairedErr != nil {
-		if strings.TrimSpace(repairedResponse.Message) == "" {
-			repairedResponse.Message = invalidPatchProposalNotice + " " + strings.TrimSpace(repairedErr.Error())
-		} else {
-			repairedResponse.Message = strings.TrimSpace(repairedResponse.Message) + "\n\n" + invalidPatchProposalNotice + " " + strings.TrimSpace(repairedErr.Error())
-		}
-		if repairedResponse.Proposal != nil && repairedResponse.Proposal.Kind == ProposalPatch {
-			repairedResponse.Proposal = nil
-		}
-		if repairedResponse.Approval != nil && repairedResponse.Approval.Kind == ApprovalPatch {
-			repairedResponse.Approval = nil
-		}
-		return repairedResponse, true, nil
-	}
-	return repairedResponse, true, nil
-}
-
-func (c *LocalController) invalidPatchInResponse(ctx context.Context, response AgentResponse) (string, PatchTarget, string, error) {
-	if response.Proposal != nil && response.Proposal.Kind == ProposalPatch && strings.TrimSpace(response.Proposal.Patch) != "" {
-		err := c.validatePatchPayload(ctx, response.Proposal.Patch, response.Proposal.PatchTarget)
-		return "proposal", response.Proposal.PatchTarget, response.Proposal.Patch, err
-	}
-	if response.Approval != nil && response.Approval.Kind == ApprovalPatch && strings.TrimSpace(response.Approval.Patch) != "" {
-		err := c.validatePatchPayload(ctx, response.Approval.Patch, response.Approval.PatchTarget)
-		return "approval", response.Approval.PatchTarget, response.Approval.Patch, err
-	}
-	return "", "", "", nil
 }
 
 func (c *LocalController) validatePatchPayload(ctx context.Context, patch string, target PatchTarget) error {
@@ -395,10 +171,7 @@ func buildInvalidPatchRepairPrompt(kind string, target PatchTarget, patch string
 	if guidance := patchValidationGuidance(err); guidance != "" {
 		lines = append(lines, "Patch-specific correction guidance: "+guidance)
 	}
-	lines = append(lines,
-		"Invalid patch payload:",
-		patch,
-	)
+	lines = append(lines, "Invalid patch payload:", patch)
 	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
@@ -553,7 +326,7 @@ func completionPlanFromContinuation(response AgentResponse, emitUserMessage bool
 	if response.Plan != nil || response.Proposal != nil || response.Approval != nil {
 		return nil
 	}
-	if !messageIndicatesPlanCompletion(response.Message) {
+	if !messageIndicatesPlanCompletion(response.Message) && !shouldTreatContinuationMessageAsFinalPlanStep(response.Message, *activePlan) {
 		return nil
 	}
 
@@ -591,6 +364,57 @@ func messageIndicatesPlanCompletion(message string) bool {
 		"no further action is needed",
 		"no further shell work is needed",
 		"task is complete",
+		"task is completed",
+		"all requested work is complete",
+		"all requested work is completed",
+		"everything is complete",
+		"everything is done",
+		"that completes the task",
+		"that completes the workflow",
+	)
+}
+
+func shouldTreatContinuationMessageAsFinalPlanStep(message string, plan ActivePlan) bool {
+	if strings.TrimSpace(message) == "" {
+		return false
+	}
+
+	remaining := remainingPlanSteps(plan)
+	if len(remaining) != 1 {
+		return false
+	}
+
+	return isInformationalPlanStep(remaining[0].Text)
+}
+
+func remainingPlanSteps(plan ActivePlan) []PlanStep {
+	remaining := make([]PlanStep, 0, len(plan.Steps))
+	for _, step := range plan.Steps {
+		if step.Status != PlanStepDone {
+			remaining = append(remaining, step)
+		}
+	}
+	return remaining
+}
+
+func isInformationalPlanStep(step string) bool {
+	step = strings.ToLower(strings.TrimSpace(step))
+	if step == "" {
+		return false
+	}
+
+	return containsAnySubstring(
+		step,
+		"report",
+		"summarize",
+		"summarise",
+		"tell the user",
+		"share the result",
+		"share results",
+		"present the result",
+		"present results",
+		"confirm completion",
+		"wrap up",
 	)
 }
 

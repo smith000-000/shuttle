@@ -67,7 +67,7 @@ func TestPlanEventUpdatesActivePlanCard(t *testing.T) {
 	if !strings.Contains(view, "[x] 1. Review the current files.") {
 		t.Fatalf("expected completed step in card, got %q", view)
 	}
-	if !strings.Contains(view, "Plan 2/3") {
+	if !strings.Contains(view, "Step 2 of 3 in progress (1 complete)") {
 		t.Fatalf("expected progress summary, got %q", view)
 	}
 	if !strings.Contains(view, "Informational only. Ctrl+G continues the plan.") {
@@ -75,6 +75,25 @@ func TestPlanEventUpdatesActivePlanCard(t *testing.T) {
 	}
 	if strings.Contains(view, "Y continue") {
 		t.Fatalf("did not expect approval-style Y affordance in plan card, got %q", view)
+	}
+}
+
+func TestPlanEventHighlightsContinueAfterLatestCommandResult(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.width = 100
+	model.height = 24
+	model.pendingContinueAfterCommand = true
+	model.activePlan = &controller.ActivePlan{
+		Summary: "Inspect and repair the workspace.",
+		Steps: []controller.PlanStep{
+			{Text: "Review the current files.", Status: controller.PlanStepDone},
+			{Text: "Apply the next patch.", Status: controller.PlanStepInProgress},
+		},
+	}
+
+	view := model.View()
+	if !strings.Contains(view, "Ready to continue from the latest command result. Press Ctrl+G.") {
+		t.Fatalf("expected highlighted continue-after-command prompt, got %q", view)
 	}
 }
 

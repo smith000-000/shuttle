@@ -101,7 +101,7 @@ What is still not done:
 
 Recent direction change that is now the baseline on `main`:
 - keep one persistent user shell pane as the continuity surface for cwd, `$>`, and recent manual shell history
-- let `F2` normally target that persistent shell, but temporarily follow an owned interactive execution pane when that pane is what needs direct user control
+- let `F2` normally target that persistent shell, but temporarily follow the active owned execution pane whenever that pane is where the command is really running
 - run approved agent shell commands in owned tmux execution panes by default
 - exception: when the tracked user shell is remote, keep agent shell execution in that tracked remote shell instead of opening a local owned pane
 - feed the agent structured recent manual commands/actions plus full command results, instead of forcing both concerns through one shared pane

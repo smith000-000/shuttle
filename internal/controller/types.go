@@ -2,169 +2,112 @@ package controller
 
 import (
 	"context"
-	"time"
 
+	"aiterm/internal/agentruntime"
 	"aiterm/internal/shell"
 )
 
-type Agent interface {
-	Respond(ctx context.Context, input AgentInput) (AgentResponse, error)
-}
-
-type AgentInput struct {
-	Session SessionContext
-	Task    TaskContext
-	Prompt  string
-}
-
-type TrackedShellTarget struct {
-	SessionName string
-	PaneID      string
-}
-
-type SessionContext struct {
-	SessionName          string
-	BottomPaneID         string
-	TrackedShell         TrackedShellTarget
-	WorkingDirectory     string
-	LocalWorkspaceRoot   string
-	StateDir             string
-	UserShellHistoryFile string
-	RecentShellOutput    string
-	RecentManualCommands []string
-	RecentManualActions  []string
-	ApprovalMode         ApprovalMode
-	CurrentShell         *shell.PromptContext
-	CurrentShellLocation *shell.ShellLocation
-	RemoteCapabilities   *RemoteCapabilitySummary
-}
-
-type TaskContext struct {
-	TaskID               string
-	CompactedSummary     string
-	PriorTranscript      []TranscriptEvent
-	PendingApproval      *ApprovalRequest
-	LastCommandResult    *CommandResultSummary
-	LastPatchApplyResult *PatchApplySummary
-	PatchRepairCount     int
-	ActivePlan           *ActivePlan
-	PrimaryExecutionID   string
-	ExecutionRegistry    []CommandExecution
-	CurrentExecution     *CommandExecution
-	RecoverySnapshot     string
-}
-
-type AgentResponse struct {
-	Message   string
-	Plan      *Plan
-	Proposal  *Proposal
-	Approval  *ApprovalRequest
-	ModelInfo *AgentModelInfo
-}
-
-type AgentModelInfo struct {
-	ProviderPreset  string
-	RequestedModel  string
-	ResponseModel   string
-	ResponseBaseURL string
-}
-
-type Plan struct {
-	Summary string
-	Steps   []string
-}
-
-type PlanStepStatus string
+type Agent = agentruntime.ModelAgent
+type AgentInput = agentruntime.AgentInput
+type TrackedShellTarget = agentruntime.TrackedShellTarget
+type SessionContext = agentruntime.SessionContext
+type TaskContext = agentruntime.TaskContext
+type AgentResponse = agentruntime.AgentResponse
+type AgentModelInfo = agentruntime.ModelInfo
+type Plan = agentruntime.Plan
+type PlanStepStatus = agentruntime.PlanStepStatus
+type PlanStep = agentruntime.PlanStep
+type ActivePlan = agentruntime.ActivePlan
+type Proposal = agentruntime.Proposal
+type ProposalKind = agentruntime.ProposalKind
+type EditOperation = agentruntime.EditOperation
+type EditIntent = agentruntime.EditIntent
+type ApprovalRequest = agentruntime.ApprovalRequest
+type PatchTarget = agentruntime.PatchTarget
+type ApprovalKind = agentruntime.ApprovalKind
+type RiskLevel = agentruntime.RiskLevel
+type ApprovalMode = agentruntime.ApprovalMode
+type TranscriptEvent = agentruntime.TranscriptEvent
+type TranscriptEventKind = agentruntime.TranscriptEventKind
+type PatchApplyFile = agentruntime.PatchApplyFile
+type PatchApplySummary = agentruntime.PatchApplySummary
+type PatchTransport = agentruntime.PatchTransport
+type RemoteCapabilitySummary = agentruntime.RemoteCapabilitySummary
+type CommandOrigin = agentruntime.CommandOrigin
+type CommandExecutionState = agentruntime.CommandExecutionState
+type CommandOwnershipMode = agentruntime.CommandOwnershipMode
+type CommandExecution = agentruntime.CommandExecution
+type CommandResultSummary = agentruntime.CommandResultSummary
 
 const (
-	PlanStepPending    PlanStepStatus = "pending"
-	PlanStepInProgress PlanStepStatus = "in_progress"
-	PlanStepDone       PlanStepStatus = "done"
-)
+	PlanStepPending    = agentruntime.PlanStepPending
+	PlanStepInProgress = agentruntime.PlanStepInProgress
+	PlanStepDone       = agentruntime.PlanStepDone
 
-type PlanStep struct {
-	Text   string
-	Status PlanStepStatus
-}
+	ProposalAnswer         = agentruntime.ProposalAnswer
+	ProposalCommand        = agentruntime.ProposalCommand
+	ProposalKeys           = agentruntime.ProposalKeys
+	ProposalPatch          = agentruntime.ProposalPatch
+	ProposalEdit           = agentruntime.ProposalEdit
+	ProposalInspectContext = agentruntime.ProposalInspectContext
 
-type ActivePlan struct {
-	Summary string
-	Steps   []PlanStep
-}
+	EditInsertBefore = agentruntime.EditInsertBefore
+	EditInsertAfter  = agentruntime.EditInsertAfter
+	EditReplaceExact = agentruntime.EditReplaceExact
+	EditReplaceRange = agentruntime.EditReplaceRange
 
-type Proposal struct {
-	Kind        ProposalKind
-	Command     string
-	Keys        string
-	Patch       string
-	PatchTarget PatchTarget
-	Edit        *EditIntent
-	Description string
-}
+	PatchTargetLocalWorkspace = agentruntime.PatchTargetLocalWorkspace
+	PatchTargetRemoteShell    = agentruntime.PatchTargetRemoteShell
 
-type ProposalKind string
+	ApprovalCommand = agentruntime.ApprovalCommand
+	ApprovalPatch   = agentruntime.ApprovalPatch
+	ApprovalPlan    = agentruntime.ApprovalPlan
 
-const (
-	ProposalAnswer         ProposalKind = "answer"
-	ProposalCommand        ProposalKind = "command"
-	ProposalKeys           ProposalKind = "keys"
-	ProposalPatch          ProposalKind = "patch"
-	ProposalEdit           ProposalKind = "edit"
-	ProposalInspectContext ProposalKind = "inspect_context"
-)
+	RiskLow    = agentruntime.RiskLow
+	RiskMedium = agentruntime.RiskMedium
+	RiskHigh   = agentruntime.RiskHigh
 
-type EditOperation string
+	ApprovalModeConfirm = agentruntime.ApprovalModeConfirm
+	ApprovalModeAuto    = agentruntime.ApprovalModeAuto
+	ApprovalModeDanger  = agentruntime.ApprovalModeDanger
 
-const (
-	EditInsertBefore EditOperation = "insert_before"
-	EditInsertAfter  EditOperation = "insert_after"
-	EditReplaceExact EditOperation = "replace_exact"
-	EditReplaceRange EditOperation = "replace_range"
-)
+	EventUserMessage      = agentruntime.EventUserMessage
+	EventAgentMessage     = agentruntime.EventAgentMessage
+	EventPlan             = agentruntime.EventPlan
+	EventProposal         = agentruntime.EventProposal
+	EventApproval         = agentruntime.EventApproval
+	EventCommandStart     = agentruntime.EventCommandStart
+	EventCommandResult    = agentruntime.EventCommandResult
+	EventPatchApplyResult = agentruntime.EventPatchApplyResult
+	EventModelInfo        = agentruntime.EventModelInfo
+	EventSystemNotice     = agentruntime.EventSystemNotice
+	EventError            = agentruntime.EventError
 
-type EditIntent struct {
-	Target     PatchTarget
-	Path       string
-	Operation  EditOperation
-	AnchorText string
-	OldText    string
-	NewText    string
-	StartLine  int
-	EndLine    int
-}
+	PatchTransportNone   = agentruntime.PatchTransportNone
+	PatchTransportGit    = agentruntime.PatchTransportGit
+	PatchTransportPython = agentruntime.PatchTransportPython
+	PatchTransportShell  = agentruntime.PatchTransportShell
 
-type ApprovalRequest struct {
-	ID          string
-	Kind        ApprovalKind
-	Title       string
-	Summary     string
-	Command     string
-	Patch       string
-	PatchTarget PatchTarget
-	Risk        RiskLevel
-}
+	CommandOriginUserShell     = agentruntime.CommandOriginUserShell
+	CommandOriginAgentProposal = agentruntime.CommandOriginAgentProposal
+	CommandOriginAgentApproval = agentruntime.CommandOriginAgentApproval
+	CommandOriginAgentAuto     = agentruntime.CommandOriginAgentAuto
+	CommandOriginAgentPlan     = agentruntime.CommandOriginAgentPlan
 
-type PatchTarget string
+	CommandExecutionQueued                = agentruntime.CommandExecutionQueued
+	CommandExecutionRunning               = agentruntime.CommandExecutionRunning
+	CommandExecutionAwaitingInput         = agentruntime.CommandExecutionAwaitingInput
+	CommandExecutionInteractiveFullscreen = agentruntime.CommandExecutionInteractiveFullscreen
+	CommandExecutionHandoffActive         = agentruntime.CommandExecutionHandoffActive
+	CommandExecutionBackgroundMonitor     = agentruntime.CommandExecutionBackgroundMonitor
+	CommandExecutionCompleted             = agentruntime.CommandExecutionCompleted
+	CommandExecutionFailed                = agentruntime.CommandExecutionFailed
+	CommandExecutionCanceled              = agentruntime.CommandExecutionCanceled
+	CommandExecutionLost                  = agentruntime.CommandExecutionLost
 
-const (
-	PatchTargetLocalWorkspace PatchTarget = "local_workspace"
-	PatchTargetRemoteShell    PatchTarget = "tracked_remote_shell"
-)
-
-type ApprovalKind string
-
-const (
-	ApprovalCommand ApprovalKind = "command"
-	ApprovalPatch   ApprovalKind = "patch"
-	ApprovalPlan    ApprovalKind = "plan"
-)
-
-type RiskLevel string
-
-const (
-	RiskLow    RiskLevel = "low"
-	RiskMedium RiskLevel = "medium"
-	RiskHigh   RiskLevel = "high"
+	CommandOwnershipExclusive      = agentruntime.CommandOwnershipExclusive
+	CommandOwnershipSharedObserver = agentruntime.CommandOwnershipSharedObserver
+	CommandOwnershipHandoff        = agentruntime.CommandOwnershipHandoff
 )
 
 type ApprovalDecision string
@@ -174,148 +117,6 @@ const (
 	DecisionReject  ApprovalDecision = "reject"
 	DecisionRefine  ApprovalDecision = "refine"
 )
-
-type ApprovalMode string
-
-const (
-	ApprovalModeConfirm ApprovalMode = "confirm"
-	ApprovalModeAuto    ApprovalMode = "auto"
-	ApprovalModeDanger  ApprovalMode = "dangerous"
-)
-
-type TranscriptEvent struct {
-	ID        string
-	Kind      TranscriptEventKind
-	Timestamp time.Time
-	Payload   any
-}
-
-type TranscriptEventKind string
-
-const (
-	EventUserMessage      TranscriptEventKind = "user_message"
-	EventAgentMessage     TranscriptEventKind = "agent_message"
-	EventPlan             TranscriptEventKind = "plan"
-	EventProposal         TranscriptEventKind = "proposal"
-	EventApproval         TranscriptEventKind = "approval"
-	EventCommandStart     TranscriptEventKind = "command_start"
-	EventCommandResult    TranscriptEventKind = "command_result"
-	EventPatchApplyResult TranscriptEventKind = "patch_apply_result"
-	EventModelInfo        TranscriptEventKind = "model_info"
-	EventSystemNotice     TranscriptEventKind = "system_notice"
-	EventError            TranscriptEventKind = "error"
-)
-
-type PatchApplyFile struct {
-	Operation string
-	OldPath   string
-	NewPath   string
-}
-
-type PatchApplySummary struct {
-	WorkspaceRoot    string
-	Validation       string
-	Applied          bool
-	Target           PatchTarget
-	TargetLabel      string
-	Transport        PatchTransport
-	CapabilitySource string
-	Created          int
-	Updated          int
-	Deleted          int
-	Renamed          int
-	Files            []PatchApplyFile
-	Error            string
-}
-
-type PatchTransport string
-
-const (
-	PatchTransportNone   PatchTransport = ""
-	PatchTransportGit    PatchTransport = "git"
-	PatchTransportPython PatchTransport = "python3"
-	PatchTransportShell  PatchTransport = "shell"
-)
-
-type RemoteCapabilitySummary struct {
-	Identity                string
-	System                  string
-	OSRelease               string
-	ShellFamily             string
-	Source                  string
-	LastSuccessfulTransport PatchTransport
-	Git                     bool
-	Python3                 bool
-	Base64                  bool
-	Mktemp                  bool
-}
-
-type CommandOrigin string
-
-const (
-	CommandOriginUserShell     CommandOrigin = "user_shell"
-	CommandOriginAgentProposal CommandOrigin = "agent_proposal"
-	CommandOriginAgentApproval CommandOrigin = "agent_approval"
-	CommandOriginAgentAuto     CommandOrigin = "agent_auto"
-	CommandOriginAgentPlan     CommandOrigin = "agent_plan"
-)
-
-type CommandExecutionState string
-
-const (
-	CommandExecutionQueued                CommandExecutionState = "queued"
-	CommandExecutionRunning               CommandExecutionState = "running"
-	CommandExecutionAwaitingInput         CommandExecutionState = "awaiting_input"
-	CommandExecutionInteractiveFullscreen CommandExecutionState = "interactive_fullscreen"
-	CommandExecutionHandoffActive         CommandExecutionState = "handoff_active"
-	CommandExecutionBackgroundMonitor     CommandExecutionState = "background_monitoring"
-	CommandExecutionCompleted             CommandExecutionState = "completed"
-	CommandExecutionFailed                CommandExecutionState = "failed"
-	CommandExecutionCanceled              CommandExecutionState = "canceled"
-	CommandExecutionLost                  CommandExecutionState = "lost"
-)
-
-type CommandOwnershipMode string
-
-const (
-	CommandOwnershipExclusive      CommandOwnershipMode = "exclusive"
-	CommandOwnershipSharedObserver CommandOwnershipMode = "shared_observer"
-	CommandOwnershipHandoff        CommandOwnershipMode = "handoff"
-)
-
-type CommandExecution struct {
-	ID                 string
-	Command            string
-	Origin             CommandOrigin
-	TrackedShell       TrackedShellTarget
-	OwnershipMode      CommandOwnershipMode
-	State              CommandExecutionState
-	StartedAt          time.Time
-	CompletedAt        *time.Time
-	ExitCode           *int
-	LatestOutputTail   string
-	ForegroundCommand  string
-	SemanticShell      bool
-	SemanticSource     string
-	Error              string
-	ShellContextBefore *shell.PromptContext
-	ShellContextAfter  *shell.PromptContext
-}
-
-type CommandResultSummary struct {
-	ExecutionID    string
-	CommandID      string
-	Command        string
-	Origin         CommandOrigin
-	State          CommandExecutionState
-	Cause          shell.CompletionCause
-	Confidence     shell.SignalConfidence
-	SemanticShell  bool
-	SemanticSource string
-	ExitCode       int
-	Summary        string
-	ShellContext   *shell.PromptContext
-}
 
 type ContextWindowUsage struct {
 	ApproxPromptTokens int

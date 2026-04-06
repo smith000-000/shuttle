@@ -361,14 +361,21 @@ func (m Model) activeExecutionUsesTrackedShell() bool {
 }
 
 func (m Model) takeControlTargetsActiveExecution() bool {
+	return strings.TrimSpace(m.activeExecutionTakeControlPaneID()) != ""
+}
+
+func (m Model) activeExecutionTakeControlPaneID() string {
 	if m.activeExecution == nil {
-		return false
+		return ""
 	}
 	executionPane := strings.TrimSpace(m.activeExecution.TrackedShell.PaneID)
 	if executionPane == "" {
-		return false
+		return ""
 	}
-	return executionPane == strings.TrimSpace(m.takeControl.TrackedPaneID)
+	if executionPane == m.persistentTrackedPaneID() {
+		return ""
+	}
+	return executionPane
 }
 
 func errString(err error) string {
@@ -461,6 +468,7 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 		m.lastCheckInAt = time.Time{}
 		m.interactiveCheckInCount = 0
 		m.interactiveCheckInPaused = false
+		m.pendingContinueAfterCommand = false
 		m.lastInterruptNoticeID = ""
 		m.handoffVisible = false
 		m.handoffPriorState = ""
@@ -484,6 +492,7 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 		m.lastCheckInAt = time.Time{}
 		m.interactiveCheckInCount = 0
 		m.interactiveCheckInPaused = false
+		m.pendingContinueAfterCommand = false
 		m.lastInterruptNoticeID = ""
 		m.handoffVisible = false
 		m.handoffPriorState = ""
@@ -517,6 +526,24 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 	if !executionNeedsUserDrivenResume(execution) {
 		m.interactiveCheckInCount = 0
 		m.interactiveCheckInPaused = false
+	}
+}
+
+func (m *Model) updatePendingContinueAfterCommand(events []controller.TranscriptEvent, autoContinue bool) {
+	if autoContinue || m.activePlan == nil {
+		m.pendingContinueAfterCommand = false
+		return
+	}
+	if containsEventKind(events, controller.EventProposal) || containsEventKind(events, controller.EventApproval) || containsEventKind(events, controller.EventPatchApplyResult) {
+		m.pendingContinueAfterCommand = false
+		return
+	}
+	if containsEventKind(events, controller.EventCommandStart) {
+		m.pendingContinueAfterCommand = false
+		return
+	}
+	if containsEventKind(events, controller.EventCommandResult) {
+		m.pendingContinueAfterCommand = true
 	}
 }
 
@@ -570,18 +597,8 @@ func (m *Model) syncTrackedShellTarget() {
 		m.takeControl.SessionName = sessionName
 	}
 	m.workspace.TopPane.ID = paneID
-	takeControlTarget := m.ctrl.TakeControlTarget()
-	takeControlSession := strings.TrimSpace(takeControlTarget.SessionName)
-	takeControlPaneID := strings.TrimSpace(takeControlTarget.PaneID)
-	if takeControlSession != "" {
-		m.takeControl.SessionName = takeControlSession
-	}
-	if takeControlPaneID != "" {
-		m.takeControl.TrackedPaneID = takeControlPaneID
-	} else {
-		m.takeControl.TrackedPaneID = paneID
-	}
-	m.takeControl.TemporaryPane = m.takeControl.TrackedPaneID != "" && m.takeControl.TrackedPaneID != paneID
+	m.takeControl.TrackedPaneID = paneID
+	m.takeControl.TemporaryPane = false
 
 	if previousSession != m.workspace.SessionName || previousPane != m.workspace.TopPane.ID {
 		logging.Trace(
@@ -719,8 +736,10 @@ func (m Model) planProgressSummary() string {
 	if done == len(m.activePlan.Steps) {
 		return fmt.Sprintf("Plan complete (%d/%d)", done, len(m.activePlan.Steps))
 	}
-
-	return fmt.Sprintf("Plan %d/%d", current, len(m.activePlan.Steps))
+	if done > 0 {
+		return fmt.Sprintf("Step %d of %d in progress (%d complete)", current, len(m.activePlan.Steps), done)
+	}
+	return fmt.Sprintf("Step %d of %d in progress", current, len(m.activePlan.Steps))
 }
 
 func planStepMarker(status controller.PlanStepStatus) string {

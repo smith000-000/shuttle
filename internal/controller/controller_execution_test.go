@@ -97,6 +97,32 @@ func TestLocalControllerTakeControlTargetUsesOwnedInteractivePane(t *testing.T) 
 	}
 }
 
+func TestLocalControllerTakeControlTargetUsesOwnedRunningPane(t *testing.T) {
+	controller := New(nil, nil, nil, SessionContext{
+		SessionName:  "shuttle-test",
+		TrackedShell: TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
+	})
+	setPrimaryExecutionForTest(controller, CommandExecution{
+		ID:        "cmd-1",
+		Command:   "for i in $(seq 1 15); do echo $i; sleep 1; done",
+		Origin:    CommandOriginAgentProposal,
+		State:     CommandExecutionRunning,
+		StartedAt: time.Now(),
+		TrackedShell: TrackedShellTarget{
+			SessionName: "shuttle-test",
+			PaneID:      "%9",
+		},
+	})
+
+	target := controller.TakeControlTarget()
+	if target.PaneID != "%9" {
+		t.Fatalf("expected take-control target pane %%9, got %#v", target)
+	}
+	if controller.TrackedShellTarget().PaneID != "%0" {
+		t.Fatalf("expected persistent tracked shell pane to remain %%0, got %#v", controller.TrackedShellTarget())
+	}
+}
+
 func TestLocalControllerSubmitShellCommandReturnsTrackedShellChangeNotice(t *testing.T) {
 	runner := &stubRunner{
 		result:         shell.TrackedExecution{CommandID: "cmd-1", Command: "ls", ExitCode: 0},
@@ -645,12 +671,46 @@ func TestLocalControllerSubmitProposedShellCommandUsesOwnedExecutionPane(t *test
 	if len(events) != 3 || events[0].Kind != EventSystemNotice || events[1].Kind != EventCommandStart || events[2].Kind != EventCommandResult {
 		t.Fatalf("expected owned-execution notice plus start/result, got %#v", events)
 	}
+	notice, ok := events[0].Payload.(TextPayload)
+	if !ok || strings.Contains(notice.Text, "%9") || !strings.Contains(notice.Text, "owned execution pane") {
+		t.Fatalf("expected generic owned execution notice, got %#v", events[0].Payload)
+	}
 	startPayload, ok := events[1].Payload.(CommandStartPayload)
 	if !ok {
 		t.Fatalf("expected command start payload, got %#v", events[1].Payload)
 	}
 	if startPayload.Execution.TrackedShell.PaneID != "%9" {
 		t.Fatalf("expected execution target pane %%9, got %#v", startPayload.Execution.TrackedShell)
+	}
+}
+
+func TestLocalControllerBlocksInternalTmuxPaneProposal(t *testing.T) {
+	controller := New(nil, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	setPrimaryExecutionForTest(controller, CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 15",
+		Origin:    CommandOriginAgentProposal,
+		State:     CommandExecutionRunning,
+		StartedAt: time.Now(),
+		TrackedShell: TrackedShellTarget{
+			SessionName: "shuttle-test",
+			PaneID:      "%9",
+		},
+	})
+
+	events, err := controller.SubmitProposedShellCommand(context.Background(), "tmux capture-pane -pt %9 -S -80")
+	if err != nil {
+		t.Fatalf("SubmitProposedShellCommand() error = %v", err)
+	}
+	if len(events) != 1 || events[0].Kind != EventSystemNotice {
+		t.Fatalf("expected internal tmux guard notice, got %#v", events)
+	}
+	notice, ok := events[0].Payload.(TextPayload)
+	if !ok || !strings.Contains(notice.Text, "Shuttle-managed tmux pane IDs") {
+		t.Fatalf("expected guard notice payload, got %#v", events[0].Payload)
+	}
+	if controller.ActiveExecution() == nil || controller.ActiveExecution().Command != "sleep 15" {
+		t.Fatalf("expected active execution to remain unchanged, got %#v", controller.ActiveExecution())
 	}
 }
 

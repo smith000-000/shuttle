@@ -434,7 +434,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.mouseOnShellTailLabel(msg.X, msg.Y) {
-		return m.takeControlNow()
+		return m.takeControlPersistentShellNow()
 	}
 	if action, ok := m.actionCardActionAtMouse(msg.X, msg.Y); ok {
 		return m.performActionCardAction(action)
@@ -648,7 +648,10 @@ func (m Model) performActionCardAction(action actionCardAction) (tea.Model, tea.
 		m.pendingFullscreen = nil
 		return m, nil
 	case actionCardTakeControl:
-		return m.takeControlNow()
+		if m.executionTakeControlConfig().enabled() {
+			return m.takeControlExecutionNow()
+		}
+		return m.takeControlPersistentShellNow()
 	case actionCardResumeInteractive:
 		return m.resumePausedInteractiveCheckIns()
 	case actionCardApprove:
@@ -740,7 +743,9 @@ func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyCtrlC:
 		return m, tea.Quit
 	case tea.KeyF2:
-		return m.takeControlNow()
+		return m.takeControlPersistentShellNow()
+	case tea.KeyF3:
+		return m.takeControlExecutionNow()
 	case tea.KeyEsc:
 		if strings.TrimSpace(m.detailFilter) != "" {
 			m.detailFilter = ""

@@ -242,10 +242,10 @@ func executionSupportsDirectTakeControl(execution *CommandExecution) bool {
 	}
 
 	switch execution.State {
-	case CommandExecutionAwaitingInput, CommandExecutionInteractiveFullscreen, CommandExecutionHandoffActive:
-		return true
-	default:
+	case CommandExecutionQueued, CommandExecutionCompleted, CommandExecutionFailed, CommandExecutionCanceled, CommandExecutionLost:
 		return false
+	default:
+		return true
 	}
 }
 

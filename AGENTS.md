@@ -73,6 +73,12 @@ This includes reviewing and updating:
 - test or harness docs when new test flows, scripts, or manual procedures are added
 - planning docs when they are intended to track the current implementation state
 
+Active slice tracking rules:
+- keep `BACKLOG.md` as the only planning file in the project root
+- track the current top-priority implementation slice in `inprocess/P0.md`
+- amend `inprocess/P0.md` in place for defects, regressions, and acceptance status instead of spawning extra scratch planning files
+- archive completed slice trackers under `completed/`
+
 Do not assume existing docs are still correct after code changes.
 
 ## PR Checklist

@@ -413,6 +413,62 @@ func TestLocalControllerContinueAfterCommandClearsPlanWhenAgentDeclaresChecklist
 	}
 }
 
+func TestLocalControllerContinueAfterCommandClearsInformationalFinalStepOnMessageOnlyResponse(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "Both counter loops finished successfully.",
+		},
+	}
+	controller := New(agent, &stubRunner{
+		result: shell.TrackedExecution{
+			CommandID: "cmd-1",
+			Command:   "for i in $(seq 1 15); do echo $i; sleep 1; done",
+			ExitCode:  0,
+			Captured:  "15",
+		},
+	}, &stubContextReader{
+		output: "15",
+	}, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	controller.task.ActivePlan = &ActivePlan{
+		Summary: "Run the counter loop twice and report the result.",
+		Steps: []PlanStep{
+			{Text: "Run the first counter loop.", Status: PlanStepDone},
+			{Text: "Report the result.", Status: PlanStepInProgress},
+		},
+	}
+
+	if _, err := controller.SubmitShellCommand(context.Background(), "for i in $(seq 1 15); do echo $i; sleep 1; done"); err != nil {
+		t.Fatalf("SubmitShellCommand() error = %v", err)
+	}
+
+	events, err := controller.ContinueAfterCommand(context.Background())
+	if err != nil {
+		t.Fatalf("ContinueAfterCommand() error = %v", err)
+	}
+
+	var completedPlan PlanPayload
+	foundCompletedPlan := false
+	for _, event := range events {
+		payload, ok := event.Payload.(PlanPayload)
+		if !ok {
+			continue
+		}
+		completedPlan = payload
+		foundCompletedPlan = true
+	}
+	if !foundCompletedPlan {
+		t.Fatalf("expected completed plan payload in %#v", events)
+	}
+	for _, step := range completedPlan.Steps {
+		if step.Status != PlanStepDone {
+			t.Fatalf("expected completed plan event, got %#v", completedPlan)
+		}
+	}
+	if controller.task.ActivePlan != nil {
+		t.Fatalf("expected active plan to clear after informational final step, got %#v", controller.task.ActivePlan)
+	}
+}
+
 func TestBuildActivePlanStripsModelStatusPrefixesFromStepText(t *testing.T) {
 	plan := buildActivePlan(Plan{
 		Summary: "Serial shell workflow",

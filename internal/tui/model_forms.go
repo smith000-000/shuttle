@@ -19,7 +19,9 @@ func (m Model) updateOnboarding(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyCtrlC:
 		return m, tea.Quit
 	case tea.KeyF2:
-		return m.takeControlNow()
+		return m.takeControlPersistentShellNow()
+	case tea.KeyF3:
+		return m.takeControlExecutionNow()
 	case tea.KeyEsc:
 		if m.onboardingStep == onboardingStepConfig {
 			m.onboardingStep = onboardingStepProviders
@@ -133,7 +135,9 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyCtrlC:
 		return m, tea.Quit
 	case tea.KeyF2:
-		return m.takeControlNow()
+		return m.takeControlPersistentShellNow()
+	case tea.KeyF3:
+		return m.takeControlExecutionNow()
 	case tea.KeyF10:
 		m.settingsOpen = false
 		m.settingsStep = settingsStepMenu

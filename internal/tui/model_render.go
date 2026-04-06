@@ -23,6 +23,35 @@ const (
 	keysComposerPrompt  = "⌨️"
 )
 
+func canExecutionTakeControl(m Model) bool {
+	return m.executionTakeControlConfig().enabled()
+}
+
+func interactiveTakeControlHint(hasExecutionTarget bool) string {
+	if hasExecutionTarget {
+		return "Use F3 for direct control of the active command pane, or S for KEYS> if a few explicit tmux key events are enough."
+	}
+	return "Use F2 for direct control of the persistent shell, or S for KEYS> if a few explicit tmux key events are enough."
+}
+
+func interactiveTakeControlLabel(hasExecutionTarget bool) string {
+	if hasExecutionTarget {
+		return "F3 take control"
+	}
+	return "F2 take control"
+}
+
+func activeExecutionTakeControlAffordance(targetsExecution bool, hasExecutionTarget bool) string {
+	switch {
+	case targetsExecution:
+		return "F3 take control"
+	case hasExecutionTarget:
+		return "F2 shell  F3 command"
+	default:
+		return "F2 take control"
+	}
+}
+
 func (m Model) renderMainView() string {
 	width := m.width
 	if width <= 0 {
@@ -269,12 +298,12 @@ func (m Model) currentActionCardSpec() *actionCardSpec {
 			body: []string{
 				fmt.Sprintf("Automatic agent check-ins are paused while this %s is active.", stateLabel),
 				"command: " + command,
-				"Use F2 for direct control, or S for KEYS> if a few explicit tmux key events are enough.",
+				interactiveTakeControlHint(m.executionTakeControlConfig().enabled()),
 			},
 			buttons: []actionCardButton{
 				{label: "Ctrl+G resume", action: actionCardResumeInteractive},
 				{label: "R tell agent", action: actionCardRefine},
-				{label: "F2 take control", action: actionCardTakeControl},
+				{label: interactiveTakeControlLabel(m.executionTakeControlConfig().enabled()), action: actionCardTakeControl},
 			},
 			borderColor: lipgloss.Color("214"),
 		}
@@ -396,12 +425,20 @@ func (m Model) renderPlanCard(width int) string {
 		body = append(body, fmt.Sprintf("... (%d more steps)", hiddenSteps))
 	}
 	body = append(body, m.planProgressSummary())
-	body = append(body, "Informational only. Ctrl+G continues the plan.")
+	footerLine := "Informational only. Ctrl+G continues the plan."
+	if m.pendingContinueAfterCommand {
+		footerLine = m.styles.statusConfirm.Render("Ready to continue from the latest command result. Press Ctrl+G.")
+	}
 
+	renderedBody := make([]string, 0, len(body)+1)
+	for _, line := range body {
+		renderedBody = append(renderedBody, m.styles.actionBody.Render(line))
+	}
+	renderedBody = append(renderedBody, footerLine)
 	content := lipgloss.JoinVertical(
 		lipgloss.Left,
 		m.styles.actionTitle.Render("Active Plan"),
-		m.styles.actionBody.Render(strings.Join(body, "\n")),
+		lipgloss.JoinVertical(lipgloss.Left, renderedBody...),
 	)
 	return m.styles.actionCard.BorderForeground(lipgloss.Color("63")).Width(width).Render(content)
 }
@@ -425,15 +462,15 @@ func (m Model) renderActiveExecutionCard(width int) string {
 			body = append(body, "last keys: "+previewFullscreenKeys(m.lastFullscreenKeys))
 		}
 		if takeControlTargetsExecution || usesTrackedShell {
-			body = append(body, "F2 take control  S send keys")
+			body = append(body, activeExecutionTakeControlAffordance(takeControlTargetsExecution, canExecutionTakeControl(m))+"  S send keys")
 			if usesTrackedShell {
-				body = append(body, "Exit or control the fullscreen app manually from the shell view.")
+				body = append(body, "Exit or control the fullscreen app manually from the shell view with F2.")
 			} else {
 				body = append(body, "Temporary Shuttle execution pane. It closes when the command finishes.")
 			}
 		} else {
 			body = append(body, "S send keys")
-			body = append(body, "This command is running in an owned execution pane. F2 opens the persistent user shell.")
+			body = append(body, "This command is running in an owned execution pane. F3 takes control of that pane.")
 		}
 	} else if strings.TrimSpace(m.activeExecution.LatestOutputTail) != "" {
 		lines := strings.Split(strings.TrimSpace(m.activeExecution.LatestOutputTail), "\n")
@@ -446,30 +483,30 @@ func (m Model) renderActiveExecutionCard(width int) string {
 		body = append(body, "tail: "+strings.Join(lines, " | "))
 		if m.activeExecution.State == controller.CommandExecutionAwaitingInput {
 			if takeControlTargetsExecution || usesTrackedShell {
-				body = append(body, "F2 take control  S send keys")
+				body = append(body, activeExecutionTakeControlAffordance(takeControlTargetsExecution, canExecutionTakeControl(m))+"  S send keys")
 				if takeControlTargetsExecution && !usesTrackedShell {
 					body = append(body, "Temporary Shuttle execution pane. It closes when the command finishes.")
 				}
 			} else {
 				body = append(body, "S send keys")
-				body = append(body, "This command is running in an owned execution pane. F2 opens the persistent user shell.")
+				body = append(body, "This command is running in an owned execution pane. F3 takes control of that pane.")
 			}
 		} else if takeControlTargetsExecution || usesTrackedShell {
-			body = append(body, "F2 take control")
+			body = append(body, activeExecutionTakeControlAffordance(takeControlTargetsExecution, canExecutionTakeControl(m)))
 			if takeControlTargetsExecution && !usesTrackedShell {
 				body = append(body, "Temporary Shuttle execution pane. It closes when the command finishes.")
 			}
 		} else {
-			body = append(body, "Running in owned execution pane. F2 opens the persistent user shell.")
+			body = append(body, "Running in owned execution pane. F3 takes control of that pane.")
 		}
 	} else {
 		if takeControlTargetsExecution || usesTrackedShell {
-			body = append(body, "F2 take control")
+			body = append(body, activeExecutionTakeControlAffordance(takeControlTargetsExecution, canExecutionTakeControl(m)))
 			if takeControlTargetsExecution && !usesTrackedShell {
 				body = append(body, "Temporary Shuttle execution pane. It closes when the command finishes.")
 			}
 		} else {
-			body = append(body, "Running in owned execution pane. F2 opens the persistent user shell.")
+			body = append(body, "Running in owned execution pane. F3 takes control of that pane.")
 		}
 	}
 
@@ -1207,7 +1244,8 @@ func helpContentLines(width int, mode Mode, canSendKeys bool) []string {
 		"",
 		"# Global Keys",
 		"F1: open or close this help view",
-		"F2: take control of the persistent shell, or the active temporary execution pane when an owned interactive command needs direct input",
+		"F2: take control of the persistent shell",
+		"F3: take control of the active tracked execution pane when Shuttle is running a separate owned command there",
 		"F10: open settings",
 		"Ctrl+C: quit Shuttle",
 		"Ctrl+G: continue an active plan, or resume paused interactive agent check-ins",
@@ -1405,7 +1443,9 @@ func (m Model) updateHelp(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyCtrlC:
 		return m, tea.Quit
 	case tea.KeyF2:
-		return m.takeControlNow()
+		return m.takeControlPersistentShellNow()
+	case tea.KeyF3:
+		return m.takeControlExecutionNow()
 	case tea.KeyEsc:
 		m.helpOpen = false
 		m.helpScroll = 0
@@ -1441,11 +1481,11 @@ func (m Model) updateHelp(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) renderHelpFooter(width int) string {
 	switch {
 	case width < 40:
-		return "[F1/Esc] close  [Up/Down]  [Pg]  [F2]  [Ctrl+C]"
+		return "[F1/Esc] close  [Up/Down]  [Pg]  [F2] [F3]  [Ctrl+C]"
 	case width < 64:
-		return "[F1/Esc] close  [Up/Down] scroll  [PgUp/PgDn] page  [F2] shell  [Ctrl+C] quit"
+		return "[F1/Esc] close  [Up/Down] scroll  [PgUp/PgDn] page  [F2] shell  [F3] cmd  [Ctrl+C] quit"
 	default:
-		return "[F1/Esc] close  [Up/Down] scroll  [PgUp/PgDn] page  [Home/End] bounds  [F2] shell  [Ctrl+C] quit"
+		return "[F1/Esc] close  [Up/Down] scroll  [PgUp/PgDn] page  [Home/End] bounds  [F2] shell  [F3] cmd  [Ctrl+C] quit"
 	}
 }
 

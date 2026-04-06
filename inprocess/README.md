@@ -2,7 +2,7 @@
 
 Shuttle is a tmux-backed AI terminal assistant.
 
-It runs a persistent real shell in the top tmux pane and a Bubble Tea TUI in the bottom pane. Agent-approved commands can also run in owned tmux execution panes for local work. The persistent shell remains the continuity surface for shell-command input, cwd, recent manual shell activity, and remote SSH continuity, while `F2` can temporarily hand off into an owned interactive execution pane when that pane is the thing waiting for input.
+It runs a persistent real shell in the top tmux pane and a Bubble Tea TUI in the bottom pane. Agent-approved commands can also run in owned tmux execution panes for local work. The persistent shell remains the continuity surface for shell-command input, cwd, recent manual shell activity, and remote SSH continuity, while `F2` can temporarily hand off into an owned execution pane when that pane is where the active command is actually running.
 
 ## Status
 
@@ -287,7 +287,7 @@ Core controls:
 - `Ctrl+Home` / `Ctrl+End`: jump the transcript to the top or bottom
 - `Insert`: toggle composer overwrite mode
 - `Esc`: clear composer or interrupt active work, depending on state
-- `F2`: take control of the live shell pane, or the active temporary execution pane when an owned interactive command is waiting for input
+- `F2`: take control of the live shell pane, or the active temporary execution pane when an owned command is currently running there
 - `Ctrl+G`: continue an active plan, or resume paused interactive agent check-ins after you handled a prompt/fullscreen app
 - `S`: enter `KEYS>` mode when the active terminal is waiting for input or a fullscreen app owns the pane
 - Shuttle also auto-enters `KEYS>` once when a fresh `awaiting_input` prompt is observed, such as a `sudo` password prompt

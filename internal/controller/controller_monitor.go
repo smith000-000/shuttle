@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"aiterm/internal/agentruntime"
 	"aiterm/internal/logging"
 	"aiterm/internal/shell"
 )
@@ -84,7 +85,7 @@ func (c *LocalController) attachForegroundExecution(ctx context.Context) ([]Tran
 }
 
 func (c *LocalController) CheckActiveExecution(ctx context.Context) ([]TranscriptEvent, error) {
-	if c.agent == nil {
+	if c.runtimeHost == nil {
 		return nil, nil
 	}
 
@@ -133,24 +134,19 @@ func (c *LocalController) CheckActiveExecution(ctx context.Context) ([]Transcrip
 	}
 	c.task.RecoverySnapshot = recoverySnapshot
 	c.syncTaskExecutionViewsLocked()
-	session = c.session
 	task = c.task
 	c.mu.Unlock()
-	if strings.TrimSpace(recentOutput) != "" {
-		session.RecentShellOutput = recentOutput
-	}
 
-	response, err := c.agent.Respond(ctx, AgentInput{
-		Session: session,
-		Task:    task,
-		Prompt:  buildActiveExecutionCheckInPrompt(task.CurrentExecution),
+	outcome, err := c.runtime.Handle(ctx, c.runtimeHost, agentruntime.Request{
+		Kind:   agentruntime.RequestExecutionCheckIn,
+		Prompt: buildActiveExecutionCheckInPrompt(task.CurrentExecution),
 	})
 	if err != nil {
 		logging.TraceError("controller.check_active_execution.error", err)
 		return nil, err
 	}
 
-	if strings.TrimSpace(response.Message) == "" {
+	if strings.TrimSpace(outcome.Message) == "" {
 		return prependTranscriptEvent(nil, trackedShellEvent), nil
 	}
 
@@ -160,12 +156,12 @@ func (c *LocalController) CheckActiveExecution(ctx context.Context) ([]Transcrip
 		return prependTranscriptEvent(nil, trackedShellEvent), nil
 	}
 
-	event := c.newEvent(EventAgentMessage, TextPayload{Text: response.Message})
+	event := c.newEvent(EventAgentMessage, TextPayload{Text: outcome.Message})
 	c.appendEvents(event)
 	logging.Trace(
 		"controller.check_active_execution.complete",
 		"event_kinds", eventKinds([]TranscriptEvent{event}),
-		"message_preview", logging.Preview(response.Message, 600),
+		"message_preview", logging.Preview(outcome.Message, 600),
 	)
 	return prependTranscriptEvent([]TranscriptEvent{event}, trackedShellEvent), nil
 }

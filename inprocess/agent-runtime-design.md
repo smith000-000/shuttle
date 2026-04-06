@@ -3,6 +3,13 @@
 ## Purpose
 Define how Shuttle should integrate with an agent runtime without turning the product itself into an agent framework.
 
+Current implementation note:
+- the first extraction seam now lives in `internal/agentruntime`
+- Shuttle still owns execution, approvals, patch application, and state mutation
+- the built-in runtime currently handles response normalization, patch-repair retry, structured-edit synthesis, and inspect-context recursion through a controller-owned host
+- the controller no longer stores a direct provider/model agent dependency; provider-backed response generation now sits behind the runtime host adapter
+- interchangeable external runtimes remain follow-on work after this seam stabilizes
+
 This document is the implementation-facing design note for Milestone 4 and Milestone 5:
 - Milestone 4: mock provider and controller-driven approval flow
 - Milestone 5: real provider or framework integration

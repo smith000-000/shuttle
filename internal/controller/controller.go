@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"aiterm/internal/agentruntime"
 	"aiterm/internal/patchapply"
 	"aiterm/internal/shell"
 )
@@ -117,7 +118,8 @@ type CommandStartPayload struct {
 }
 
 type LocalController struct {
-	agent        Agent
+	runtime      agentruntime.Runtime
+	runtimeHost  agentruntime.Host
 	runner       ShellRunner
 	reader       ShellContextReader
 	session      SessionContext
@@ -138,7 +140,7 @@ type LocalController struct {
 func New(agent Agent, runner ShellRunner, reader ShellContextReader, session SessionContext) *LocalController {
 	session = normalizeSessionContext(session)
 	controller := &LocalController{
-		agent:   agent,
+		runtime: agentruntime.NewBuiltin(),
 		runner:  runner,
 		reader:  reader,
 		session: session,
@@ -146,6 +148,7 @@ func New(agent Agent, runner ShellRunner, reader ShellContextReader, session Ses
 			TaskID: "task-1",
 		},
 	}
+	controller.runtimeHost = newBuiltinRuntimeHost(controller, agent)
 	controller.remoteCaps = newRemoteCapabilityStore(session.StateDir)
 	if session.LocalWorkspaceRoot != "" {
 		patches, err := patchapply.New(session.LocalWorkspaceRoot)
@@ -218,4 +221,20 @@ func trimStringSlice(values []string) []string {
 		return nil
 	}
 	return trimmed
+}
+
+func (c *LocalController) SetRuntime(runtime agentruntime.Runtime) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if runtime == nil {
+		c.runtime = agentruntime.NewBuiltin()
+		return
+	}
+	c.runtime = runtime
+}
+
+func (c *LocalController) SetRuntimeHost(host agentruntime.Host) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.runtimeHost = host
 }

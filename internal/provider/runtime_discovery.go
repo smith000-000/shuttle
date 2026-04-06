@@ -1,6 +1,21 @@
 package provider
 
-import "strings"
+import (
+	"os/exec"
+	"strings"
+
+	"aiterm/internal/agentruntime"
+)
+
+const (
+	RuntimeBuiltin   = agentruntime.RuntimeBuiltin
+	RuntimePi        = agentruntime.RuntimePi
+	RuntimeCodexSDK  = agentruntime.RuntimeCodexSDK
+	RuntimeAuto      = agentruntime.RuntimeAuto
+	defaultPiCommand = "pi"
+)
+
+var runtimeLookPath = exec.LookPath
 
 type RuntimeInstallCandidate struct {
 	Name      string

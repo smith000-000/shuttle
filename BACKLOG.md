@@ -17,7 +17,7 @@ The old implementation plans were useful to get here, but most of them now descr
 ## Active Backlog
 
 ### P0
-- External agent runtime integration seam: keep Shuttle’s shell/runtime layer custom, but replace the clunky controller-side plan/act loop with a cleaner planner/tool-caller boundary above the controller.
+- External agent runtime integration seam: keep Shuttle’s shell/runtime layer custom, but replace the clunky controller-side plan/act loop with a cleaner planner/tool-caller boundary above the controller. Active slice tracker: [inprocess/P0.md](inprocess/P0.md).
 - Provider onboarding detection and ranking: implement first-run provider discovery, candidate ranking, and better health-check explanations so new users can land on a working provider path without manual setup.
 - Runtime lifecycle hardening: move repo-local runtime artifacts out of `.shuttle/`, tighten managed socket/session recovery, and make crash/restart reconciliation release-grade.
 
@@ -25,6 +25,7 @@ The old implementation plans were useful to get here, but most of them now descr
 - Security and privacy hardening: finish trace-mode separation, explicit consent for sensitive traces, stronger runtime artifact permissions/retention, and more robust semantic-state serialization.
 - Shell lifecycle regression coverage: keep expanding non-interactive coverage for remote transitions and interactive recovery edge cases, and keep the manual checklist in sync with the real product behavior.
 - Provider extensibility cleanup: reduce provider registration wiring, expose richer provider capabilities, and keep the current built-in backends behind the same abstraction boundary.
+- Execution-pane visibility and handoff UX: add a controller-level overview of active tmux panes/executions, and use it to support a clearer tracked-command view flow such as an `F3` shortcut when a live owned execution pane exists.
 
 ### P2
 - Release and install polish: package-manager distribution, remaining platform packaging cleanup, and operator-facing install/runtime docs.

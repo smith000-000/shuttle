@@ -771,7 +771,7 @@ func TestF2DoesNotMarkOwnedExecutionAsHandoff(t *testing.T) {
 	}
 }
 
-func TestF2MarksOwnedInteractiveExecutionAsHandoff(t *testing.T) {
+func TestF3MarksOwnedInteractiveExecutionAsHandoff(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
 	model.activeExecution = &controller.CommandExecution{
 		ID:        "cmd-1",
@@ -787,7 +787,7 @@ func TestF2MarksOwnedInteractiveExecutionAsHandoff(t *testing.T) {
 	model.takeControl.TrackedPaneID = "%9"
 	model.takeControl.TemporaryPane = true
 
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF2})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF3})
 	next := updated.(Model)
 
 	if next.activeExecution == nil || next.activeExecution.State != controller.CommandExecutionHandoffActive {
@@ -795,6 +795,51 @@ func TestF2MarksOwnedInteractiveExecutionAsHandoff(t *testing.T) {
 	}
 	if !next.handoffVisible {
 		t.Fatal("expected owned interactive execution to show handoff state")
+	}
+}
+
+func TestExecutionTakeControlConfigUsesF3DetachKey(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 15",
+		Origin:    controller.CommandOriginAgentProposal,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+		TrackedShell: controller.TrackedShellTarget{
+			SessionName: "shuttle-test",
+			PaneID:      "%9",
+		},
+	}
+
+	config := model.executionTakeControlConfig()
+	if config.DetachKey != ExecutionTakeControlKey {
+		t.Fatalf("expected execution handoff detach key %q, got %q", ExecutionTakeControlKey, config.DetachKey)
+	}
+}
+
+func TestF2DoesNotMarkOwnedInteractiveExecutionAsHandoff(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sudo apt update",
+		Origin:    controller.CommandOriginAgentProposal,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now(),
+		TrackedShell: controller.TrackedShellTarget{
+			SessionName: "shuttle-test",
+			PaneID:      "%9",
+		},
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF2})
+	next := updated.(Model)
+
+	if next.activeExecution == nil || next.activeExecution.State != controller.CommandExecutionAwaitingInput {
+		t.Fatalf("expected owned interactive execution to remain awaiting input, got %#v", next.activeExecution)
+	}
+	if next.handoffVisible {
+		t.Fatal("expected F2 persistent-shell handoff not to mark owned execution as handoff-visible")
 	}
 }
 
@@ -1104,7 +1149,7 @@ func TestActiveExecutionCardShowsAwaitingInputKeyHints(t *testing.T) {
 	}
 }
 
-func TestActiveExecutionCardExplainsOwnedExecutionPane(t *testing.T) {
+func TestActiveExecutionCardOffersF3ForOwnedRunningPane(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
 	model.activeExecution = &controller.CommandExecution{
 		ID:        "cmd-1",
@@ -1118,17 +1163,19 @@ func TestActiveExecutionCardExplainsOwnedExecutionPane(t *testing.T) {
 		},
 		LatestOutputTail: "still running",
 	}
+	model.takeControl.TrackedPaneID = "%9"
+	model.takeControl.TemporaryPane = true
 
 	card := model.renderActiveExecutionCard(100)
-	if !strings.Contains(card, "owned execution pane") {
-		t.Fatalf("expected owned execution explanation, got %q", card)
+	if !strings.Contains(card, "F3 take control") {
+		t.Fatalf("expected owned execution card to advertise F3 takeover, got %q", card)
 	}
-	if strings.Contains(card, "F2 take control") {
-		t.Fatalf("expected owned execution card not to advertise F2 takeover, got %q", card)
+	if !strings.Contains(card, "Temporary Shuttle execution pane") {
+		t.Fatalf("expected owned execution card to explain temporary pane, got %q", card)
 	}
 }
 
-func TestActiveExecutionCardOffersTakeControlForOwnedInteractivePane(t *testing.T) {
+func TestActiveExecutionCardOffersF3ForOwnedInteractivePane(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
 	model.activeExecution = &controller.CommandExecution{
 		ID:        "cmd-1",
@@ -1146,8 +1193,8 @@ func TestActiveExecutionCardOffersTakeControlForOwnedInteractivePane(t *testing.
 	model.takeControl.TemporaryPane = true
 
 	card := model.renderActiveExecutionCard(100)
-	if !strings.Contains(card, "F2 take control") {
-		t.Fatalf("expected owned interactive card to advertise F2 takeover, got %q", card)
+	if !strings.Contains(card, "F3 take control") {
+		t.Fatalf("expected owned interactive card to advertise F3 takeover, got %q", card)
 	}
 	if !strings.Contains(card, "Temporary Shuttle execution pane") {
 		t.Fatalf("expected owned interactive card to explain temporary pane, got %q", card)
@@ -1822,6 +1869,47 @@ func TestCtrlGResumesPausedInteractiveCheckIns(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("expected Ctrl+G resume to schedule follow-up work")
+	}
+}
+
+func TestCtrlGContinuesAfterLatestCommandResultBeforeContinuingPlan(t *testing.T) {
+	ctrl := &fakeController{
+		continueEvents: []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventAgentMessage,
+				Payload: controller.TextPayload{Text: "Reviewed the canceled command and proposed the next step."},
+			},
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.activePlan = &controller.ActivePlan{
+		Summary: "Run the loop twice and report the result.",
+		Steps: []controller.PlanStep{
+			{Text: "Run the first loop.", Status: controller.PlanStepInProgress},
+			{Text: "Report the result.", Status: controller.PlanStepPending},
+		},
+	}
+	model.pendingContinueAfterCommand = true
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
+	next := updated.(Model)
+
+	if next.pendingContinueAfterCommand {
+		t.Fatal("expected Ctrl+G to clear the pending continue-after-command state")
+	}
+	if cmd == nil {
+		t.Fatal("expected Ctrl+G to schedule ContinueAfterCommand")
+	}
+	msg := controllerEventsFromCmd(t, cmd)
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+
+	if ctrl.continueCalls != 1 {
+		t.Fatalf("expected one continue-after-command call, got %d", ctrl.continueCalls)
+	}
+	last := next.entries[len(next.entries)-1]
+	if last.Title != "agent" {
+		t.Fatalf("expected trailing agent continuation, got %s", last.Title)
 	}
 }
 

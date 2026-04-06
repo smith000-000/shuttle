@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"aiterm/internal/agentruntime"
 )
 
 const (
@@ -43,22 +45,18 @@ func (c *LocalController) CompactTask(ctx context.Context) ([]TranscriptEvent, e
 		c.mu.Unlock()
 		return []TranscriptEvent{*blocked}, nil
 	}
-	if c.agent == nil {
+	if c.runtimeHost == nil {
 		errEvent := c.newEvent(EventError, TextPayload{Text: "agent runtime is not configured"})
 		c.appendEvents(errEvent)
 		c.mu.Unlock()
 		return []TranscriptEvent{errEvent}, nil
 	}
 
-	session := c.session
-	task := c.task
-	task.RecoverySnapshot = c.captureRecoverySnapshot(ctx, executionTarget(task.CurrentExecution, session.TrackedShell).PaneID, task.CurrentExecution)
 	c.mu.Unlock()
 
-	response, err := c.agent.Respond(ctx, AgentInput{
-		Session: session,
-		Task:    task,
-		Prompt:  compactTaskPrompt,
+	outcome, err := c.runtime.Handle(ctx, c.runtimeHost, agentruntime.Request{
+		Kind:   agentruntime.RequestCompactTask,
+		Prompt: compactTaskPrompt,
 	})
 	if err != nil {
 		if err == context.Canceled {
@@ -71,7 +69,7 @@ func (c *LocalController) CompactTask(ctx context.Context) ([]TranscriptEvent, e
 		return []TranscriptEvent{errEvent}, nil
 	}
 
-	summary := strings.TrimSpace(response.Message)
+	summary := strings.TrimSpace(outcome.Message)
 	if summary == "" {
 		c.mu.Lock()
 		defer c.mu.Unlock()

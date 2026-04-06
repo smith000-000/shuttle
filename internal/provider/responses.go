@@ -597,9 +597,6 @@ func buildTurnContext(input controller.AgentInput) string {
 	if input.Session.ApprovalMode != "" {
 		sessionLines = append(sessionLines, "approval_mode="+string(input.Session.ApprovalMode))
 	}
-	if input.Session.TrackedShell.PaneID != "" {
-		sessionLines = append(sessionLines, "tracked_pane="+input.Session.TrackedShell.PaneID)
-	}
 	if input.Session.BottomPaneID != "" {
 		sessionLines = append(sessionLines, "bottom_pane="+input.Session.BottomPaneID)
 	}
@@ -747,9 +744,6 @@ func buildTurnContext(input controller.AgentInput) string {
 		}
 		if current.TrackedShell.SessionName != "" {
 			lines = append(lines, "execution_session="+current.TrackedShell.SessionName)
-		}
-		if current.TrackedShell.PaneID != "" {
-			lines = append(lines, "execution_pane="+current.TrackedShell.PaneID)
 		}
 		if strings.TrimSpace(current.ForegroundCommand) != "" {
 			lines = append(lines, "foreground_command="+current.ForegroundCommand)

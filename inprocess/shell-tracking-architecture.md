@@ -20,7 +20,7 @@ The persistent user shell target is:
 
 Current design rule:
 - the persistent tracked shell is the continuity surface for `$>`, cwd, recent manual commands, and recent manual file-affecting actions
-- `F2` normally targets that persistent shell, but temporarily targets an owned execution pane when the active owned command is in `awaiting_input`, `interactive_fullscreen`, or an active handoff state
+- `F2` normally targets that persistent shell, but temporarily targets the active owned execution pane whenever the current command is running there
 - approved agent commands no longer need to run inside that persistent shell pane
 - agent-approved commands can run in detached owned tmux panes and are tracked through their own `CommandExecution.TrackedShell`
 - the TUI is not the source of truth for either target
@@ -250,7 +250,7 @@ Path:
 Important rule:
 - owned execution results belong to `LastCommandResult` and the execution record
 - they do not replace persistent user-shell cwd or prompt state
-- owned interactive prompts and fullscreen apps can take over `F2` temporarily, while noninteractive owned execution panes still keep `F2` on the persistent user shell
+- active owned execution panes can take over `F2` temporarily, including long-running noninteractive commands, interactive prompts, and fullscreen apps
 
 This makes agent command tracking dramatically more stable because command lifecycle no longer depends on inferring what is happening inside the shared user shell pane.
 

@@ -364,6 +364,7 @@ type Model struct {
 	lastCheckInAt                time.Time
 	interactiveCheckInCount      int
 	interactiveCheckInPaused     bool
+	pendingContinueAfterCommand  bool
 	lastInterruptNoticeID        string
 	activeProvider               provider.Profile
 	overwriteMode                bool
@@ -560,6 +561,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.pollShellTailCmd()
 		}
 		if autoContinue {
+			m.pendingContinueAfterCommand = false
 			m.busy = true
 			m.busyStartedAt = time.Now()
 			m.showShellTail = false
@@ -589,6 +591,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}, tickBusy(), m.pollShellTailCmd())
 		}
+		m.updatePendingContinueAfterCommand(msg.events, autoContinue)
 		m.syncTrackedShellTarget()
 		return m, m.pollShellTailCmd()
 	case takeControlFinishedMsg:
@@ -1049,7 +1052,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlC:
 			return m.handleComposerCtrlC()
 		case tea.KeyF2:
-			return m.takeControlNow()
+			return m.takeControlPersistentShellNow()
+		case tea.KeyF3:
+			return m.takeControlExecutionNow()
 		case tea.KeyF10:
 			return m.openSettings()
 		case tea.KeyEsc:
@@ -1224,6 +1229,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlG:
 			if m.pendingApproval == nil && m.pendingProposal == nil && m.interactiveCheckInPaused && executionNeedsUserDrivenResume(m.activeExecution) {
 				return m.resumePausedInteractiveCheckIns()
+			}
+			if m.pendingApproval == nil && m.pendingProposal == nil && m.pendingContinueAfterCommand {
+				return m.continueAfterLatestCommand()
 			}
 			if m.pendingApproval == nil && m.pendingProposal == nil && m.activePlan != nil {
 				return m.continueActivePlan()
@@ -1790,6 +1798,30 @@ func (m Model) resumePausedInteractiveCheckIns() (tea.Model, tea.Cmd) {
 	return m, tea.Batch(tickBusy(), m.pollActiveExecutionCmd(), m.pollShellTailCmd())
 }
 
+func (m Model) continueAfterLatestCommand() (tea.Model, tea.Cmd) {
+	if m.busy || m.ctrl == nil {
+		return m, nil
+	}
+
+	m.pendingContinueAfterCommand = false
+	m.busy = true
+	m.busyStartedAt = time.Now()
+	m.showShellTail = false
+	m.liveShellTail = ""
+	m.activeExecution = nil
+	ctx, cancel := context.WithTimeout(context.Background(), m.currentAgentTurnTimeout())
+	m.inFlightCancel = cancel
+	return m, tea.Batch(func() tea.Msg {
+		defer cancel()
+
+		events, err := m.ctrl.ContinueAfterCommand(ctx)
+		return controllerEventsMsg{
+			events: events,
+			err:    err,
+		}
+	}, tickBusy(), m.pollShellTailCmd(), m.pollActiveExecutionCmd())
+}
+
 func (m Model) focusAgentComposerForActiveExecution() (tea.Model, tea.Cmd) {
 	if m.activeExecution == nil {
 		return m, nil
@@ -1894,8 +1926,42 @@ func (m Model) continueActivePlan() (tea.Model, tea.Cmd) {
 	}, tickBusy(), m.pollShellTailCmd(), m.pollActiveExecutionCmd())
 }
 
-func (m Model) takeControlNow() (tea.Model, tea.Cmd) {
-	if !m.takeControl.enabled() {
+func (m Model) persistentTakeControlConfig() takeControlConfig {
+	config := m.takeControl
+	config.TrackedPaneID = m.persistentTrackedPaneID()
+	config.TemporaryPane = false
+	return config
+}
+
+func (m Model) executionTakeControlConfig() takeControlConfig {
+	if m.activeExecution == nil {
+		return takeControlConfig{}
+	}
+	paneID := m.activeExecutionTakeControlPaneID()
+	if strings.TrimSpace(paneID) == "" {
+		return takeControlConfig{}
+	}
+
+	config := m.takeControl
+	config.TrackedPaneID = paneID
+	config.TemporaryPane = true
+	config.DetachKey = ExecutionTakeControlKey
+	if strings.TrimSpace(m.activeExecution.TrackedShell.SessionName) != "" {
+		config.SessionName = strings.TrimSpace(m.activeExecution.TrackedShell.SessionName)
+	}
+	return config
+}
+
+func (m Model) takeControlPersistentShellNow() (tea.Model, tea.Cmd) {
+	return m.takeControlNow(m.persistentTakeControlConfig(), false)
+}
+
+func (m Model) takeControlExecutionNow() (tea.Model, tea.Cmd) {
+	return m.takeControlNow(m.executionTakeControlConfig(), true)
+}
+
+func (m Model) takeControlNow(config takeControlConfig, targetExecution bool) (tea.Model, tea.Cmd) {
+	if !config.enabled() {
 		return m, nil
 	}
 
@@ -1911,7 +1977,7 @@ func (m Model) takeControlNow() (tea.Model, tea.Cmd) {
 		m.inFlightCancel()
 		m.inFlightCancel = nil
 	}
-	if m.activeExecution != nil && (m.takeControlTargetsActiveExecution() || m.activeExecutionUsesTrackedShell()) {
+	if m.activeExecution != nil && (targetExecution || m.activeExecutionUsesTrackedShell()) {
 		updated := *m.activeExecution
 		m.handoffPriorState = updated.State
 		updated.State = controller.CommandExecutionHandoffActive
@@ -1931,7 +1997,7 @@ func (m Model) takeControlNow() (tea.Model, tea.Cmd) {
 		m.liveShellTail = ""
 	}
 
-	return m, newTakeControlCmd(m.takeControl)
+	return m, newTakeControlCmd(config)
 }
 
 func (m Model) interruptInFlight() (tea.Model, tea.Cmd) {

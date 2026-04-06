@@ -23,16 +23,10 @@ func NewFromConfig(cfg config.Config, options FactoryOptions) (controller.Agent,
 		return nil, Profile{}, err
 	}
 
-	baseAgent, err := NewFromProfile(profile, options)
+	agent, err := NewFromProfile(profile, options)
 	if err != nil {
 		return nil, Profile{}, err
 	}
-
-	agent, err := maybeWrapRuntimeAgent(baseAgent, profile, cfg.RuntimeType, cfg.RuntimeCommand)
-	if err != nil {
-		return nil, Profile{}, err
-	}
-
 	return agent, profile, nil
 }
 
