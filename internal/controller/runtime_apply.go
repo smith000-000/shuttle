@@ -95,6 +95,16 @@ func (c *LocalController) applyRuntimeOutcome(outcome agentruntime.Outcome, emit
 		c.task.ActivePlan = nil
 		events = append(events, c.newEvent(EventPlan, *completedPlan))
 	}
+	if len(response.PlanStatuses) > 0 && c.task.ActivePlan != nil {
+		if updatedPlan, ok := reconcilePlanStatuses(*c.task.ActivePlan, response.PlanStatuses); ok {
+			if isPlanComplete(updatedPlan) {
+				c.task.ActivePlan = nil
+			} else {
+				c.task.ActivePlan = &updatedPlan
+			}
+			events = append(events, c.newEvent(EventPlan, updatedPlan))
+		}
+	}
 	if response.Plan != nil {
 		activePlan := buildActivePlan(*response.Plan)
 		c.task.ActivePlan = &activePlan

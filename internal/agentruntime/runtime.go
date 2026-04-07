@@ -32,11 +32,12 @@ type Request struct {
 }
 
 type Outcome struct {
-	Message   string
-	Plan      *Plan
-	Proposal  *Proposal
-	Approval  *ApprovalRequest
-	ModelInfo *ModelInfo
+	Message      string
+	Plan         *Plan
+	PlanStatuses []PlanStepStatus
+	Proposal     *Proposal
+	Approval     *ApprovalRequest
+	ModelInfo    *ModelInfo
 }
 
 type Host interface {

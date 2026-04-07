@@ -55,11 +55,12 @@ type TaskContext struct {
 }
 
 type AgentResponse struct {
-	Message   string
-	Plan      *Plan
-	Proposal  *Proposal
-	Approval  *ApprovalRequest
-	ModelInfo *ModelInfo
+	Message      string
+	Plan         *Plan
+	PlanStatuses []PlanStepStatus
+	Proposal     *Proposal
+	Approval     *ApprovalRequest
+	ModelInfo    *ModelInfo
 }
 
 type ModelInfo struct {

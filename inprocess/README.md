@@ -22,6 +22,8 @@ What is working now:
 - bounded agent check-ins for interactive/fullscreen waits, with explicit `Ctrl+G` resume after Shuttle pauses automatic retries
 - partial semantic shell integration for local shells
 - serial agentic command loops with one proposal at a time and auto-continue after results
+- active checklist reconciliation on continuation turns, so plan cards can reflect explicit agent status updates instead of only command-completion guesses
+- fresh user prompts now supersede stale active checklists unless the user is explicitly asking to continue or resume the current plan
 - first-class shell-context inspection support so the model can refresh authoritative user@host/cwd state instead of guessing from stale prompt text
 - inspect-context and provider turn context now include cwd source/confidence metadata so prompt-derived remote directories like `~` are treated as approximate while probe-confirmed directories are treated as authoritative
 - ordinary agent turns refresh tracked-shell identity and manual shell history without blindly reusing whatever old scrollback is still visible in the top pane as fresh command output
@@ -59,6 +61,7 @@ What is still in progress:
 - provider registry/plugin architecture instead of static first-class wiring
 - any richer shell bootstrap/helper mode beyond those standards
 - transcript/UI cleanup and continued TUI/controller decomposition
+- stronger bounded-command guidance for event-stream listeners such as `xinput test`, `tail -f`, and similar monitors
 - multi-card or parallel execution UI
 - package-manager distribution and other post-archive release UX
 

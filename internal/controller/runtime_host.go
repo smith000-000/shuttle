@@ -99,6 +99,9 @@ func runtimeOutcomeFromController(response AgentResponse) agentruntime.Outcome {
 			Steps:   append([]string(nil), response.Plan.Steps...),
 		}
 	}
+	if len(response.PlanStatuses) > 0 {
+		outcome.PlanStatuses = append([]agentruntime.PlanStepStatus(nil), response.PlanStatuses...)
+	}
 	if response.Proposal != nil {
 		proposal := agentruntime.Proposal{
 			Kind:        response.Proposal.Kind,
@@ -154,6 +157,9 @@ func controllerOutcomeToRuntimeInput(outcome agentruntime.Outcome) AgentResponse
 			Summary: outcome.Plan.Summary,
 			Steps:   append([]string(nil), outcome.Plan.Steps...),
 		}
+	}
+	if len(outcome.PlanStatuses) > 0 {
+		response.PlanStatuses = append([]PlanStepStatus(nil), outcome.PlanStatuses...)
 	}
 	if outcome.Proposal != nil {
 		proposal := Proposal{

@@ -51,6 +51,42 @@ func TestLocalControllerContinueAfterCommandUsesLastResultWithoutUserEvent(t *te
 	}
 }
 
+func TestLocalControllerContinueAfterCommandAppendsPlanStatusCheckPrompt(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "Continuing the active plan.",
+		},
+	}
+	controller := New(agent, &stubRunner{
+		result: shell.TrackedExecution{
+			CommandID: "cmd-1",
+			Command:   "ls",
+			ExitCode:  0,
+			Captured:  "file.txt",
+		},
+	}, &stubContextReader{
+		output: "file.txt",
+	}, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	controller.task.ActivePlan = &ActivePlan{
+		Summary: "Inspect and repair the workspace.",
+		Steps: []PlanStep{
+			{Text: "Review the current files.", Status: PlanStepInProgress},
+			{Text: "Apply the next patch.", Status: PlanStepPending},
+		},
+	}
+
+	if _, err := controller.SubmitShellCommand(context.Background(), "ls"); err != nil {
+		t.Fatalf("SubmitShellCommand() error = %v", err)
+	}
+	if _, err := controller.ContinueAfterCommand(context.Background()); err != nil {
+		t.Fatalf("ContinueAfterCommand() error = %v", err)
+	}
+
+	if !strings.Contains(agent.lastInput.Prompt, activePlanStatusCheckPromptSuffix) {
+		t.Fatalf("expected active plan status-check guidance, got %q", agent.lastInput.Prompt)
+	}
+}
+
 func TestLocalControllerContinueAfterCommandPrefersSerialFollowUpPrompt(t *testing.T) {
 	agent := &stubAgent{
 		response: AgentResponse{
@@ -188,14 +224,8 @@ func TestBuildAutoContinuePromptForcesPatchRebaseAfterInspection(t *testing.T) {
 func TestLocalControllerContinueAfterCommandAdvancesActivePlan(t *testing.T) {
 	agent := &stubAgent{
 		response: AgentResponse{
-			Message: "Continuing the plan.",
-			Plan: &Plan{
-				Summary: "Stale replacement plan.",
-				Steps: []string{
-					"Start over from the beginning.",
-					"Redo the same shell work.",
-				},
-			},
+			Message:      "Continuing the plan.",
+			PlanStatuses: []PlanStepStatus{PlanStepDone, PlanStepInProgress},
 		},
 	}
 	controller := New(agent, &stubRunner{
@@ -230,18 +260,61 @@ func TestLocalControllerContinueAfterCommandAdvancesActivePlan(t *testing.T) {
 	}
 
 	if len(events) != 2 {
-		t.Fatalf("expected plan progress event plus continuation without replacement plan, got %#v", events)
+		t.Fatalf("expected agent message plus plan status update, got %#v", events)
 	}
-
-	planEvent, ok := events[0].Payload.(PlanPayload)
+	if events[0].Kind != EventAgentMessage {
+		t.Fatalf("expected agent message first, got %#v", events)
+	}
+	planEvent, ok := events[1].Payload.(PlanPayload)
 	if !ok {
-		t.Fatalf("expected leading plan payload, got %#v", events[0].Payload)
+		t.Fatalf("expected trailing plan payload, got %#v", events[1].Payload)
 	}
 	if planEvent.Steps[0].Status != PlanStepDone || planEvent.Steps[1].Status != PlanStepInProgress {
 		t.Fatalf("expected plan advancement, got %#v", planEvent.Steps)
 	}
 	if controller.task.ActivePlan == nil || controller.task.ActivePlan.Summary != "Inspect and repair the workspace." {
 		t.Fatalf("expected existing active plan to be preserved, got %#v", controller.task.ActivePlan)
+	}
+}
+
+func TestLocalControllerContinueAfterCommandIgnoresMismatchedPlanStatusUpdate(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message:      "Continuing the plan.",
+			PlanStatuses: []PlanStepStatus{PlanStepDone},
+		},
+	}
+	controller := New(agent, &stubRunner{
+		result: shell.TrackedExecution{
+			CommandID: "cmd-1",
+			Command:   "ls",
+			ExitCode:  0,
+			Captured:  "file.txt",
+		},
+	}, &stubContextReader{
+		output: "file.txt",
+	}, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	controller.task.ActivePlan = &ActivePlan{
+		Summary: "Inspect and repair the workspace.",
+		Steps: []PlanStep{
+			{Text: "Review the current files.", Status: PlanStepInProgress},
+			{Text: "Apply the next patch.", Status: PlanStepPending},
+		},
+	}
+
+	if _, err := controller.SubmitShellCommand(context.Background(), "ls"); err != nil {
+		t.Fatalf("SubmitShellCommand() error = %v", err)
+	}
+	events, err := controller.ContinueAfterCommand(context.Background())
+	if err != nil {
+		t.Fatalf("ContinueAfterCommand() error = %v", err)
+	}
+
+	if len(events) != 1 || events[0].Kind != EventAgentMessage {
+		t.Fatalf("expected only agent message when plan status update mismatches, got %#v", events)
+	}
+	if controller.task.ActivePlan == nil || controller.task.ActivePlan.Steps[0].Status != PlanStepInProgress {
+		t.Fatalf("expected active plan to remain unchanged, got %#v", controller.task.ActivePlan)
 	}
 }
 
@@ -277,8 +350,11 @@ func TestLocalControllerContinueActivePlanUsesActivePlanContext(t *testing.T) {
 	if agent.lastInput.Task.ActivePlan == nil || agent.lastInput.Task.ActivePlan.Steps[0].Status != PlanStepInProgress {
 		t.Fatalf("expected active plan in agent input, got %#v", agent.lastInput.Task.ActivePlan)
 	}
-	if agent.lastInput.Prompt != continuePlanPrompt {
+	if !strings.Contains(agent.lastInput.Prompt, continuePlanPrompt) {
 		t.Fatalf("expected continue-plan prompt, got %q", agent.lastInput.Prompt)
+	}
+	if !strings.Contains(agent.lastInput.Prompt, activePlanStatusCheckPromptSuffix) {
+		t.Fatalf("expected active plan status-check guidance, got %q", agent.lastInput.Prompt)
 	}
 	if controller.task.ActivePlan == nil || controller.task.ActivePlan.Summary != "Inspect and repair the workspace." {
 		t.Fatalf("expected existing active plan to survive continuation, got %#v", controller.task.ActivePlan)
@@ -482,10 +558,19 @@ func TestBuildActivePlanStripsModelStatusPrefixesFromStepText(t *testing.T) {
 	if plan.Steps[0].Text != "List all Markdown files." {
 		t.Fatalf("expected normalized first step text, got %#v", plan.Steps[0])
 	}
+	if plan.Steps[0].Status != PlanStepDone {
+		t.Fatalf("expected done status on first step, got %#v", plan.Steps[0])
+	}
 	if plan.Steps[1].Text != "Review the file list output." {
 		t.Fatalf("expected normalized second step text, got %#v", plan.Steps[1])
 	}
+	if plan.Steps[1].Status != PlanStepInProgress {
+		t.Fatalf("expected in-progress status on second step, got %#v", plan.Steps[1])
+	}
 	if plan.Steps[2].Text != "Select one Markdown file at random." {
 		t.Fatalf("expected normalized third step text, got %#v", plan.Steps[2])
+	}
+	if plan.Steps[2].Status != PlanStepPending {
+		t.Fatalf("expected pending status on third step, got %#v", plan.Steps[2])
 	}
 }

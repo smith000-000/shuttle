@@ -131,6 +131,60 @@ func TestLocalControllerSubmitAgentPromptCreatesActivePlan(t *testing.T) {
 	}
 }
 
+func TestLocalControllerSubmitAgentPromptClearsSupersededActivePlan(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "Starting the new task.",
+		},
+	}
+	controller := New(agent, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	controller.task.ActivePlan = &ActivePlan{
+		Summary: "Old task plan",
+		Steps: []PlanStep{
+			{Text: "Do the old thing.", Status: PlanStepInProgress},
+			{Text: "Report back.", Status: PlanStepPending},
+		},
+	}
+
+	if _, err := controller.SubmitAgentPrompt(context.Background(), "inspect the current repo status instead"); err != nil {
+		t.Fatalf("SubmitAgentPrompt() error = %v", err)
+	}
+
+	if agent.lastInput.Task.ActivePlan != nil {
+		t.Fatalf("expected old active plan to be cleared for new prompt, got %#v", agent.lastInput.Task.ActivePlan)
+	}
+	if controller.task.ActivePlan != nil {
+		t.Fatalf("expected controller active plan to clear for new prompt, got %#v", controller.task.ActivePlan)
+	}
+}
+
+func TestLocalControllerSubmitAgentPromptPreservesActivePlanForContinuationPrompt(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "Continuing the current task.",
+		},
+	}
+	controller := New(agent, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	controller.task.ActivePlan = &ActivePlan{
+		Summary: "Current task plan",
+		Steps: []PlanStep{
+			{Text: "Do the current thing.", Status: PlanStepInProgress},
+			{Text: "Report back.", Status: PlanStepPending},
+		},
+	}
+
+	if _, err := controller.SubmitAgentPrompt(context.Background(), "continue"); err != nil {
+		t.Fatalf("SubmitAgentPrompt() error = %v", err)
+	}
+
+	if agent.lastInput.Task.ActivePlan == nil {
+		t.Fatal("expected active plan to remain available for continuation prompt")
+	}
+	if controller.task.ActivePlan == nil {
+		t.Fatal("expected controller active plan to remain set for continuation prompt")
+	}
+}
+
 func TestLocalControllerSubmitAgentPromptAddsChecklistGuidanceForOrderedWorkflow(t *testing.T) {
 	agent := &stubAgent{
 		response: AgentResponse{

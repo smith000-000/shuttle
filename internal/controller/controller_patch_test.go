@@ -134,7 +134,7 @@ func TestLocalControllerContinueAfterPatchApply(t *testing.T) {
 	if len(events) != 1 || events[0].Kind != EventAgentMessage {
 		t.Fatalf("expected agent message, got %#v", events)
 	}
-	if agent.lastInput.Prompt != continueAfterPatchApplyPrompt(PatchTargetLocalWorkspace, "") {
+	if !strings.Contains(agent.lastInput.Prompt, continueAfterPatchApplyPrompt(PatchTargetLocalWorkspace, "")) {
 		t.Fatalf("expected patch continuation prompt, got %q", agent.lastInput.Prompt)
 	}
 	if !strings.Contains(agent.lastInput.Prompt, "Do not propose extra verification or follow-up edits") {
@@ -173,11 +173,14 @@ func TestLocalControllerContinueAfterFailedPatchApply(t *testing.T) {
 	if len(events) != 1 || events[0].Kind != EventAgentMessage {
 		t.Fatalf("expected agent message, got %#v", events)
 	}
-	if agent.lastInput.Prompt != continueAfterPatchFailurePrompt(PatchTargetLocalWorkspace, "", "parse patch: gitdiff: invalid line operation", false) {
+	if !strings.Contains(agent.lastInput.Prompt, continueAfterPatchFailurePrompt(PatchTargetLocalWorkspace, "", "parse patch: gitdiff: invalid line operation", false)) {
 		t.Fatalf("expected failed patch continuation prompt, got %q", agent.lastInput.Prompt)
 	}
 	if !strings.Contains(agent.lastInput.Prompt, "Do not emit a shell command that invokes apply_patch") {
 		t.Fatalf("expected shell patch tool prohibition, got %q", agent.lastInput.Prompt)
+	}
+	if !strings.Contains(agent.lastInput.Prompt, activePlanStatusCheckPromptSuffix) {
+		t.Fatalf("expected active plan status-check guidance, got %q", agent.lastInput.Prompt)
 	}
 	if controller.task.ActivePlan == nil || controller.task.ActivePlan.Steps[0].Status != PlanStepInProgress {
 		t.Fatalf("expected active plan to remain unchanged after failed patch, got %#v", controller.task.ActivePlan)

@@ -242,6 +242,12 @@ func TestStructuredResponsesRequestIncludesSerialContinuationGuidance(t *testing
 	if !strings.Contains(systemPrompt, "ordered multi-step workflow") || !strings.Contains(systemPrompt, "do not stop at diagnosis") {
 		t.Fatalf("expected workflow checklist and unresolved-inspection guidance in system prompt, got %q", systemPrompt)
 	}
+	if !strings.Contains(systemPrompt, "\"plan_step_statuses\"") || !strings.Contains(systemPrompt, "always return \"plan_step_statuses\"") {
+		t.Fatalf("expected active plan status-update guidance in system prompt, got %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "xinput test") || !strings.Contains(systemPrompt, "bounded form using \"timeout\"") {
+		t.Fatalf("expected monitor timeout guidance in system prompt, got %q", systemPrompt)
+	}
 	if !strings.Contains(systemPrompt, "git-style unified diff text") || !strings.Contains(systemPrompt, "Do not emit the non-standard \"*** Begin Patch\" format.") {
 		t.Fatalf("expected patch format guidance in system prompt, got %q", systemPrompt)
 	}
@@ -259,6 +265,24 @@ func TestStructuredResponsesRequestIncludesSerialContinuationGuidance(t *testing
 	}
 	if !strings.Contains(systemPrompt, "approval_mode=dangerous") || !strings.Contains(systemPrompt, "auto-apply agent patches without confirmation") {
 		t.Fatalf("expected approval dangerous-mode guidance in system prompt, got %q", systemPrompt)
+	}
+}
+
+func TestToAgentResponseParsesPlanStepStatuses(t *testing.T) {
+	agent := &ResponsesAgent{}
+
+	response, err := agent.toAgentResponse(shuttleStructuredResponse{
+		Message:          "Plan status updated.",
+		PlanStepStatuses: []string{"done", "in_progress", "pending"},
+	})
+	if err != nil {
+		t.Fatalf("toAgentResponse() error = %v", err)
+	}
+	if len(response.PlanStatuses) != 3 {
+		t.Fatalf("expected three plan statuses, got %#v", response.PlanStatuses)
+	}
+	if response.PlanStatuses[0] != controller.PlanStepDone || response.PlanStatuses[1] != controller.PlanStepInProgress || response.PlanStatuses[2] != controller.PlanStepPending {
+		t.Fatalf("unexpected plan statuses %#v", response.PlanStatuses)
 	}
 }
 

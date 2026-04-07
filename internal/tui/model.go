@@ -300,9 +300,10 @@ const (
 )
 
 var (
-	ansiCSIPattern = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
-	ansiOSCPattern = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
-	ansiEscPattern = regexp.MustCompile(`\x1b[@-_]`)
+	ansiCSIPattern     = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+	ansiOSCPattern     = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
+	ansiEscPattern     = regexp.MustCompile(`\x1b[@-_]`)
+	mouseReportPattern = regexp.MustCompile(`(?:\x1b\[)?<\d+;\d+;\d+[mM]`)
 )
 
 type Model struct {
@@ -1366,6 +1367,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				inserted := string(msg.Runes)
 				if msg.Paste {
 					inserted = sanitizePastedText(inserted)
+				} else {
+					inserted = sanitizeComposerInsertText(inserted)
 				}
 				if inserted == "" {
 					return m, nil
@@ -1381,6 +1384,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) composerLocked() bool {
 	return (m.startupNotice != nil || m.pendingDangerousConfirm != nil || m.pendingFullscreen != nil || m.pendingProposal != nil || m.pendingApproval != nil) && m.editingProposal == nil && m.refiningProposal == nil && m.refiningApproval == nil
+}
+
+func shouldReplaceDisplayedActivePlan(activePlan *controller.ActivePlan, prompt string) bool {
+	if activePlan == nil {
+		return false
+	}
+
+	prompt = strings.ToLower(strings.TrimSpace(prompt))
+	if prompt == "" {
+		return false
+	}
+
+	for _, marker := range []string{
+		"continue",
+		"resume",
+		"keep going",
+		"go on",
+		"what next",
+		"what's next",
+		"whats next",
+		"next step",
+		"next steps",
+		"current plan",
+		"active plan",
+		"current checklist",
+		"active checklist",
+	} {
+		if strings.Contains(prompt, marker) {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (m Model) handleActionCardKey(msg tea.KeyMsg) (tea.Model, bool, tea.Cmd) {
@@ -1498,6 +1534,10 @@ func (m Model) submitWithOptions(appendEnterToFullscreenKeys bool) (tea.Model, t
 
 	if handled, next, cmd := m.handleComposerCommand(text); handled {
 		return next, cmd
+	}
+
+	if m.mode == AgentMode && shouldReplaceDisplayedActivePlan(m.activePlan, text) {
+		m.activePlan = nil
 	}
 
 	m.setInput("")

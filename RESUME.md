@@ -5,12 +5,18 @@
 - Shared runtime/model contract types now live under `internal/agentruntime`; controller re-exports aliases only for compatibility.
 - The obsolete provider-side runtime wrapper scaffold is removed.
 - The current built-in runtime is still the only runtime implementation, but alternate runtimes can now be added above Shuttle’s shell/runtime substrate without reopening controller orchestration.
+- Active checklist reconciliation is now explicit in the runtime/provider contract:
+  - agent turns with an active plan are prompted to perform a checklist status check
+  - responses can now return per-step `plan_step_statuses`
+  - controller-side blind advancement after command/patch completion was removed
+- Fresh user prompts now supersede stale active plans unless the prompt is clearly asking to continue or resume the current checklist.
 
 ## Handoff Model
 - `F2` is always the persistent tracked shell handoff.
 - This includes remote shells: if the user is on SSH, `F2` remains the correct shell target.
 - `F3` is the separate owned local execution-pane handoff when Shuttle is running a distinct agent command pane.
 - `F3` now detaches on `F3`, so the execution-pane handoff behaves like a real toggle instead of requiring `F2` to get back.
+- For long-running tracked commands, `F3` remains the operator escape hatch even if the model fails to bound or stop a listener cleanly.
 
 ## Recent Fixes
 - Fixed the take-control regression where long-running owned execution panes were not reachable directly.
@@ -21,27 +27,21 @@
 - Fixed the provider/runtime contract leak where Shuttle exposed `tracked_pane` and `execution_pane` to the model.
 - Fixed owned execution transcript notices so they no longer print raw pane IDs.
 - Added a controller-side guard that blocks agent proposals like `tmux capture-pane -pt %3 ...` when they target Shuttle-managed pane IDs.
+- Fixed checklist drift by moving status updates onto the agent turn instead of the controller guessing from command completion alone.
+- Fixed the stale-plan bug where a later unrelated user request could continue an old active checklist.
+- Fixed terminal mouse-report fragments such as `<64;85;43M` leaking into the composer while scrolling.
+- Added provider guidance to prefer bounded forms for event-stream listeners such as `xinput test`, `tail -f`, `watch`, and similar monitor commands.
 
 ## Verified
-- `go test ./internal/controller ./internal/provider ./internal/app ./internal/tui -count=1`
 - `go test ./internal/... -count=1`
 
 ## Current Problem
-- There is still a continuation-policy bug after interrupted planned commands.
-- Repro shape:
-  1. Start a planned multi-step command in an owned pane.
-  2. Use `F3`, interrupt it with `Ctrl+C`, return, then press `Ctrl+G`.
-  3. Shuttle now avoids the pane-ID leak, but the plan can still desync and choose the wrong next step.
-- In practice, the agent may continue from stale plan assumptions instead of cleanly folding the interrupted command result into the active checklist state.
+- The controller-side optimistic plan advancement bug is removed, but the UX is still not ideal.
+- `Ctrl+G` remains a weak resume affordance because it does not explain enough about what Shuttle thinks it is resuming.
+- The model is now told to bound listener commands, but compliance still depends on the provider following instructions.
 
 ## Next Steps
-1. Fix post-interrupt plan continuation so `Ctrl+G` after an interrupted owned-pane command advances from the actual `LastCommandResult` and updates the active plan consistently.
-2. Add targeted controller/TUI regression coverage for:
-   - interrupted planned command in owned pane
-   - `F3` handoff + `Ctrl+C` + `Ctrl+G`
-   - rerun/completion path after interruption
-3. Re-run the manual local shell checklist for:
-   - interrupting long-running owned commands
-   - resuming planned work after interruption
-   - remote shell handoff sanity with `F2`
-4. After that, archive `inprocess/P0.md` and start the next active slice.
+1. Replace the generic `Ctrl+G` resume path with a more explicit tracked-command resume UI that says what Shuttle is resuming and why.
+2. Add a clearer active-command card affordance for `F3` takeover when a monitor/listener is still running.
+3. Consider a controller-level fallback for runaway listener commands, such as a suggested `keys` interrupt proposal on check-in when a command is obviously just waiting for an external event stream.
+4. After the checklist/resume UX is clean, archive `inprocess/P0.md` and start the next active slice.

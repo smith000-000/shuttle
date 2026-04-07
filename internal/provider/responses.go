@@ -91,6 +91,7 @@ type shuttleStructuredResponse struct {
 	Message                string   `json:"message"`
 	PlanSummary            string   `json:"plan_summary"`
 	PlanSteps              []string `json:"plan_steps"`
+	PlanStepStatuses       []string `json:"plan_step_statuses"`
 	ProposalKind           string   `json:"proposal_kind"`
 	ProposalCommand        string   `json:"proposal_command"`
 	ProposalKeys           string   `json:"proposal_keys"`
@@ -267,6 +268,20 @@ func (a *ResponsesAgent) CheckHealth(ctx context.Context) error {
 func (a *ResponsesAgent) toAgentResponse(input shuttleStructuredResponse) (controller.AgentResponse, error) {
 	response := controller.AgentResponse{
 		Message: strings.TrimSpace(input.Message),
+	}
+	if len(input.PlanStepStatuses) > 0 {
+		statuses := make([]controller.PlanStepStatus, 0, len(input.PlanStepStatuses))
+		for _, status := range input.PlanStepStatuses {
+			switch controller.PlanStepStatus(strings.TrimSpace(status)) {
+			case controller.PlanStepPending, controller.PlanStepInProgress, controller.PlanStepDone:
+				statuses = append(statuses, controller.PlanStepStatus(strings.TrimSpace(status)))
+			case "":
+				return controller.AgentResponse{}, fmt.Errorf("unsupported empty plan status")
+			default:
+				return controller.AgentResponse{}, fmt.Errorf("unsupported plan status %q", status)
+			}
+		}
+		response.PlanStatuses = statuses
 	}
 
 	planSummary := strings.TrimSpace(input.PlanSummary)
@@ -1017,6 +1032,7 @@ func shuttleAgentResponseSchema() map[string]any {
 			"message",
 			"plan_summary",
 			"plan_steps",
+			"plan_step_statuses",
 			"proposal_kind",
 			"proposal_command",
 			"proposal_keys",
@@ -1049,6 +1065,13 @@ func shuttleAgentResponseSchema() map[string]any {
 				"type": "array",
 				"items": map[string]any{
 					"type": "string",
+				},
+			},
+			"plan_step_statuses": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type": "string",
+					"enum": []string{"pending", "in_progress", "done"},
 				},
 			},
 			"proposal_kind": map[string]any{
@@ -1131,6 +1154,8 @@ Rules:
 - If the user asks for an ordered multi-step workflow, reversible edit-and-restore flow, or checklist-like execution, emit a concise plan/checklist that matches that requested sequence and keep the next action aligned to it.
 - Do not emit a plan for simple descriptive, factual, or status-summary requests.
 - If an active plan is present in context, prefer continuing it from the current in-progress or pending step instead of inventing a new unrelated plan.
+- If an active plan is present in context, always return "plan_step_statuses" with exactly one status per existing step after checking the latest command result, shell state, patch result, or recovery snapshot. Use only "pending", "in_progress", or "done".
+- When returning "plan_step_statuses", keep "plan_summary" and "plan_steps" empty unless you are intentionally creating a new checklist or materially replacing the old one because the task scope changed.
 - For requests to inspect the current directory, repository, files, environment, or system state, prefer a "proposal_command" over answering from stale context.
 - When certainty about the active shell identity or location matters, such as current user@host, cwd, remote/local state, or active remote target, prefer "proposal_kind":"inspect_context" instead of guessing or relying on stale context text.
 - Only answer directly from shell state when the current turn already includes the necessary command result, or when the user is explicitly asking for a summary of a result that is already in context.
@@ -1195,6 +1220,7 @@ Rules:
 - For approvals, set "approval_kind" to "command", "patch", or "plan" and set "approval_risk" to "low", "medium", or "high". If "approval_kind" is "patch", also set "approval_patch_target".
 - If the task is a refinement of a pending approval, preserve the original command or patch unless the context clearly requires changing it.
 - If the current turn says an active command is still running, use "message" for a brief status update. Do not emit a plan, proposal, or approval unless the shell is clearly waiting for user intervention.
+- For event-stream or monitor commands such as "tail -f", "watch", "xinput test", "evtest", or similar listeners, prefer a bounded form using "timeout", an explicit exit condition, or another finite wrapper unless the user explicitly wants the command left running.
 - If the current active command state is "awaiting_input", explain what input is likely needed from the shell output or recovery snapshot and tell the user to press F2 to take control. If a small raw keystroke sequence would likely help, you may propose it with "proposal_kind":"keys" and "proposal_keys".
 - If the current active command state is "interactive_fullscreen", explain that a fullscreen terminal app currently owns the pane and tell the user to press F2 to take control. Do not suggest unrelated shell commands while that app is active.
 - If the current active command state is "lost", explain that tracking confidence is low, use the recovery snapshot to infer what likely happened, and avoid claiming completion unless the context clearly proves it.

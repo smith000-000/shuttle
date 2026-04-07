@@ -77,9 +77,7 @@ func (m *Model) insertTextAtCursor(value string) {
 }
 
 func sanitizePastedText(value string) string {
-	sanitized := ansiOSCPattern.ReplaceAllString(value, "")
-	sanitized = ansiCSIPattern.ReplaceAllString(sanitized, "")
-	sanitized = ansiEscPattern.ReplaceAllString(sanitized, "")
+	sanitized := sanitizeComposerInsertText(value)
 
 	filtered := strings.Builder{}
 	filtered.Grow(len(sanitized))
@@ -97,6 +95,14 @@ func sanitizePastedText(value string) string {
 	}
 
 	return filtered.String()
+}
+
+func sanitizeComposerInsertText(value string) string {
+	sanitized := ansiOSCPattern.ReplaceAllString(value, "")
+	sanitized = ansiCSIPattern.ReplaceAllString(sanitized, "")
+	sanitized = ansiEscPattern.ReplaceAllString(sanitized, "")
+	sanitized = mouseReportPattern.ReplaceAllString(sanitized, "")
+	return sanitized
 }
 
 func (m *Model) backspaceAtCursor() {

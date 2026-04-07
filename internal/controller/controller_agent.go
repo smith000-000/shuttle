@@ -9,6 +9,11 @@ import (
 )
 
 func (c *LocalController) SubmitAgentPrompt(ctx context.Context, prompt string) ([]TranscriptEvent, error) {
+	c.mu.Lock()
+	if shouldReplaceActivePlanForUserPrompt(c.task.ActivePlan, prompt) {
+		c.task.ActivePlan = nil
+	}
+	c.mu.Unlock()
 	logging.Trace("controller.submit_agent_prompt", "prompt", prompt)
 	return c.submitAgentTurn(ctx, prompt, buildInitialAgentPrompt(prompt), nil, true)
 }
@@ -52,19 +57,11 @@ func (c *LocalController) ContinueAfterCommand(ctx context.Context) ([]Transcrip
 		c.mu.Unlock()
 		return []TranscriptEvent{errEvent}, nil
 	}
-	planEvent := c.advanceActivePlanLocked()
-	if planEvent != nil {
-		c.appendEvents(*planEvent)
-	}
 	c.mu.Unlock()
 
 	prompt := buildAutoContinuePrompt(c.task)
 	logging.Trace("controller.continue_after_command")
-	events, err := c.submitAgentTurn(ctx, "", prompt, nil, false)
-	if planEvent != nil {
-		events = append([]TranscriptEvent{*planEvent}, events...)
-	}
-	return events, err
+	return c.submitAgentTurn(ctx, "", prompt, nil, false)
 }
 
 func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string, agentPrompt string, refinement *ApprovalRequest, emitUserMessage bool) ([]TranscriptEvent, error) {
@@ -72,6 +69,10 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 }
 
 func (c *LocalController) submitAgentTurnWithInspectBudget(ctx context.Context, userPrompt string, agentPrompt string, refinement *ApprovalRequest, emitUserMessage bool, inspectBudget int) ([]TranscriptEvent, error) {
+	c.mu.Lock()
+	task := c.task
+	c.mu.Unlock()
+	agentPrompt = decorateAgentPrompt(task, agentPrompt)
 	logging.Trace(
 		"controller.agent_turn.start",
 		"user_prompt", userPrompt,
@@ -105,6 +106,53 @@ func (c *LocalController) submitAgentTurnWithInspectBudget(ctx context.Context, 
 	}
 	logging.Trace("controller.agent_turn.complete", "event_kinds", eventKinds(newEvents))
 	return newEvents, nil
+}
+
+func decorateAgentPrompt(task TaskContext, prompt string) string {
+	prompt = strings.TrimSpace(prompt)
+	if task.ActivePlan == nil {
+		return prompt
+	}
+	if strings.Contains(prompt, activePlanStatusCheckPromptSuffix) {
+		return prompt
+	}
+	if prompt == "" {
+		return activePlanStatusCheckPromptSuffix
+	}
+	return prompt + "\n\n" + activePlanStatusCheckPromptSuffix
+}
+
+func shouldReplaceActivePlanForUserPrompt(activePlan *ActivePlan, prompt string) bool {
+	if activePlan == nil {
+		return false
+	}
+
+	prompt = strings.ToLower(strings.TrimSpace(prompt))
+	if prompt == "" {
+		return false
+	}
+
+	for _, marker := range []string{
+		"continue",
+		"resume",
+		"keep going",
+		"go on",
+		"what next",
+		"what's next",
+		"whats next",
+		"next step",
+		"next steps",
+		"current plan",
+		"active plan",
+		"current checklist",
+		"active checklist",
+	} {
+		if strings.Contains(prompt, marker) {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (c *LocalController) validatePatchPayload(ctx context.Context, patch string, target PatchTarget) error {

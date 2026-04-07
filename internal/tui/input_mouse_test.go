@@ -91,6 +91,37 @@ func TestTabInsertsTabIntoComposer(t *testing.T) {
 	}
 }
 
+func TestMouseReportRunesDoNotLeakIntoComposer(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("<64;85;43M<64;85;43M")})
+	next := updated.(Model)
+
+	if next.input != "" {
+		t.Fatalf("expected mouse report fragments to be ignored, got %q", next.input)
+	}
+}
+
+func TestAgentSubmitClearsDisplayedSupersededPlan(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.mode = AgentMode
+	model.activePlan = &controller.ActivePlan{
+		Summary: "Old task plan",
+		Steps: []controller.PlanStep{
+			{Text: "Do the old thing.", Status: controller.PlanStepInProgress},
+		},
+	}
+	model.input = "inspect the current repo status instead"
+	model.cursor = len([]rune(model.input))
+
+	updated, _ := model.submit()
+	next := updated.(Model)
+
+	if next.activePlan != nil {
+		t.Fatalf("expected superseded displayed plan to clear, got %#v", next.activePlan)
+	}
+}
+
 func TestSlashCompletionAcceptsGhostWithRightArrow(t *testing.T) {
 	model := NewModel(fakeWorkspace(), nil)
 	model.mode = AgentMode
