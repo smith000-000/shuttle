@@ -366,6 +366,7 @@ type Model struct {
 	interactiveCheckInCount      int
 	interactiveCheckInPaused     bool
 	pendingContinueAfterCommand  bool
+	lastCommandResult            *controller.CommandResultSummary
 	lastInterruptNoticeID        string
 	activeProvider               provider.Profile
 	overwriteMode                bool

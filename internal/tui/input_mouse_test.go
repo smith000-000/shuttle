@@ -102,6 +102,33 @@ func TestMouseReportRunesDoNotLeakIntoComposer(t *testing.T) {
 	}
 }
 
+func TestShiftMousePressDoesNotTriggerTUIClickActions(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.width = 80
+	model.height = 24
+	model.entries = []Entry{
+		{Title: "agent", Body: "first"},
+		{Title: "agent", Body: "second"},
+	}
+	model.selectedEntry = 0
+
+	updated, _ := model.Update(tea.MouseMsg{
+		X:      3,
+		Y:      0,
+		Shift:  true,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	next := updated.(Model)
+
+	if next.selectedEntry != 0 {
+		t.Fatalf("expected shift-click to leave selection unchanged, got %d", next.selectedEntry)
+	}
+	if next.detailOpen {
+		t.Fatal("expected shift-click not to open detail view")
+	}
+}
+
 func TestAgentSubmitClearsDisplayedSupersededPlan(t *testing.T) {
 	model := NewModel(fakeWorkspace(), nil)
 	model.mode = AgentMode

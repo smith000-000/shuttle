@@ -201,6 +201,72 @@ func TestLocalControllerSubmitAgentPromptAddsChecklistGuidanceForOrderedWorkflow
 	if !strings.Contains(agent.lastInput.Prompt, initialChecklistPromptSuffix) {
 		t.Fatalf("expected ordered-workflow checklist guidance, got %q", agent.lastInput.Prompt)
 	}
+	if !strings.Contains(agent.lastInput.Prompt, stateAuthorityPromptSuffix) {
+		t.Fatalf("expected state-authority guidance, got %q", agent.lastInput.Prompt)
+	}
+}
+
+func TestLocalControllerSubmitAgentPromptAddsRerunGuidanceForExplicitRetry(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "I will rerun it.",
+		},
+	}
+	controller := New(agent, nil, &stubContextReader{
+		context: shell.PromptContext{
+			User:         "localuser",
+			Host:         "workstation",
+			Directory:    "/workspace/project",
+			PromptSymbol: "%",
+			RawLine:      "localuser@workstation /workspace/project %",
+		},
+	}, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+
+	if _, err := controller.SubmitAgentPrompt(context.Background(), "run the test again on this host"); err != nil {
+		t.Fatalf("SubmitAgentPrompt() error = %v", err)
+	}
+
+	if !strings.Contains(agent.lastInput.Prompt, rerunOrContextShiftPromptSuffix) {
+		t.Fatalf("expected rerun guidance, got %q", agent.lastInput.Prompt)
+	}
+}
+
+func TestLocalControllerSubmitAgentPromptAddsContextShiftGuidanceWhenShellIdentityChanged(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "I will reassess it on the current shell.",
+		},
+	}
+	controller := New(agent, nil, &stubContextReader{
+		context: shell.PromptContext{
+			User:         "deploy",
+			Host:         "prod",
+			Directory:    "~/app",
+			PromptSymbol: "$",
+			RawLine:      "deploy@prod ~/app $",
+			Remote:       true,
+		},
+	}, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	controller.task.LastCommandResult = &CommandResultSummary{
+		Command: "go test ./...",
+		State:   CommandExecutionCompleted,
+		Summary: "ok",
+		ShellContext: &shell.PromptContext{
+			User:         "localuser",
+			Host:         "workstation",
+			Directory:    "/workspace/project",
+			PromptSymbol: "%",
+			RawLine:      "localuser@workstation /workspace/project %",
+		},
+	}
+
+	if _, err := controller.SubmitAgentPrompt(context.Background(), "run the test"); err != nil {
+		t.Fatalf("SubmitAgentPrompt() error = %v", err)
+	}
+
+	if !strings.Contains(agent.lastInput.Prompt, rerunOrContextShiftPromptSuffix) {
+		t.Fatalf("expected context-shift guidance, got %q", agent.lastInput.Prompt)
+	}
 }
 
 func TestLocalControllerSubmitAgentPromptIgnoresAnswerProposal(t *testing.T) {
@@ -782,7 +848,10 @@ func TestLocalControllerSubmitRefinementIncludesApprovalContext(t *testing.T) {
 		t.Fatalf("expected pending approval in agent input, got %#v", agent.lastInput.Task.PendingApproval)
 	}
 
-	if agent.lastInput.Prompt != "Use a safer option." {
+	if !strings.Contains(agent.lastInput.Prompt, "Use a safer option.") {
 		t.Fatalf("expected note prompt, got %q", agent.lastInput.Prompt)
+	}
+	if !strings.Contains(agent.lastInput.Prompt, stateAuthorityPromptSuffix) {
+		t.Fatalf("expected state-authority guidance, got %q", agent.lastInput.Prompt)
 	}
 }

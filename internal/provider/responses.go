@@ -601,6 +601,18 @@ func buildTurnContext(input controller.AgentInput) string {
 	if input.Session.WorkingDirectory != "" && !remoteShellActive {
 		sessionLines = append(sessionLines, "cwd="+input.Session.WorkingDirectory)
 	}
+	if input.Session.LocalWorkingDirectory != "" {
+		sessionLines = append(sessionLines, "local_cwd="+input.Session.LocalWorkingDirectory)
+	}
+	if input.Session.LocalHomeDirectory != "" {
+		sessionLines = append(sessionLines, "local_home="+input.Session.LocalHomeDirectory)
+	}
+	if input.Session.LocalUsername != "" {
+		sessionLines = append(sessionLines, "local_user="+input.Session.LocalUsername)
+	}
+	if input.Session.LocalHostname != "" {
+		sessionLines = append(sessionLines, "local_host="+input.Session.LocalHostname)
+	}
 	if input.Session.LocalWorkspaceRoot != "" {
 		if remoteShellActive {
 			sessionLines = append(sessionLines, "local_workspace_root="+input.Session.LocalWorkspaceRoot)

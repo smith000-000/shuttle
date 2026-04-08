@@ -136,6 +136,9 @@ Responsibilities:
 
 Important state:
 - `SessionContext.TrackedShell`
+- `SessionContext.WorkingDirectory`
+- `SessionContext.LocalWorkingDirectory`
+- `SessionContext.LocalWorkspaceRoot`
 - `SessionContext.RecentManualCommands`
 - `SessionContext.RecentManualActions`
 - `SessionContext.CurrentShellLocation`
@@ -148,6 +151,8 @@ Current rule:
 - `TrackedShellTarget` is the explicit ownership field
 - `SessionContext` describes the persistent user shell
 - `SessionContext.CurrentShellLocation` is the controller's normalized view of whether that shell is local, remote, containerized, or nested, plus how trustworthy the tracked cwd is
+- `SessionContext.WorkingDirectory` is the tracked shell cwd, not the controller host cwd
+- controller-owned local host probe fields such as `LocalWorkingDirectory` and `LocalHomeDirectory` describe where Shuttle itself is running on the host machine and must remain distinct from tracked-shell state
 - `CommandExecution.TrackedShell` describes where the active command is actually running
 - owned execution results do not overwrite persistent user-shell cwd or prompt context
 - controller and provider policy should key remote-sensitive decisions from `CurrentShellLocation`, not from `PromptContext.Remote`

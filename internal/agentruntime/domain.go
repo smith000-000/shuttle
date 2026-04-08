@@ -23,20 +23,24 @@ type TrackedShellTarget struct {
 }
 
 type SessionContext struct {
-	SessionName          string
-	BottomPaneID         string
-	TrackedShell         TrackedShellTarget
-	WorkingDirectory     string
-	LocalWorkspaceRoot   string
-	StateDir             string
-	UserShellHistoryFile string
-	RecentShellOutput    string
-	RecentManualCommands []string
-	RecentManualActions  []string
-	ApprovalMode         ApprovalMode
-	CurrentShell         *shell.PromptContext
-	CurrentShellLocation *shell.ShellLocation
-	RemoteCapabilities   *RemoteCapabilitySummary
+	SessionName           string
+	BottomPaneID          string
+	TrackedShell          TrackedShellTarget
+	WorkingDirectory      string
+	LocalWorkingDirectory string
+	LocalHomeDirectory    string
+	LocalUsername         string
+	LocalHostname         string
+	LocalWorkspaceRoot    string
+	StateDir              string
+	UserShellHistoryFile  string
+	RecentShellOutput     string
+	RecentManualCommands  []string
+	RecentManualActions   []string
+	ApprovalMode          ApprovalMode
+	CurrentShell          *shell.PromptContext
+	CurrentShellLocation  *shell.ShellLocation
+	RemoteCapabilities    *RemoteCapabilitySummary
 }
 
 type TaskContext struct {

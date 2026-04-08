@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"aiterm/internal/shell"
@@ -76,5 +78,52 @@ func TestApplyObservedShellStatePreservesProbeAuthoritativeRemoteDirectory(t *te
 	}
 	if controller.session.CurrentShell == nil || controller.session.CurrentShell.Directory != "~" {
 		t.Fatalf("expected prompt context to remain prompt-shaped, got %#v", controller.session.CurrentShell)
+	}
+}
+
+func TestNormalizeSessionContextPrefersLocalWorkingDirectoryForWorkspaceRoot(t *testing.T) {
+	session := normalizeSessionContext(SessionContext{
+		WorkingDirectory:      "/remote/home/jsmith",
+		LocalWorkingDirectory: "/local/workspace",
+		CurrentShellLocation: &shell.ShellLocation{
+			Kind: shell.ShellLocationRemote,
+		},
+	})
+
+	if session.LocalWorkspaceRoot != session.LocalWorkingDirectory {
+		t.Fatalf("expected local workspace root from local cwd, got %#v", session)
+	}
+	if session.LocalWorkspaceRoot == session.WorkingDirectory {
+		t.Fatalf("expected local workspace root to stay distinct from tracked shell cwd, got %#v", session)
+	}
+}
+
+func TestRefreshLocalHostContextUpdatesWorkingDirectory(t *testing.T) {
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+	temp := t.TempDir()
+	if err := os.Chdir(temp); err != nil {
+		t.Fatalf("Chdir(%q) error = %v", temp, err)
+	}
+	current, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() after chdir error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(previous)
+	})
+
+	controller := New(nil, nil, nil, SessionContext{
+		LocalWorkingDirectory: filepath.Join(previous, "stale"),
+	})
+
+	localHost := controller.refreshLocalHostContext()
+	if localHost.WorkingDirectory != current {
+		t.Fatalf("expected refreshed local cwd %q, got %#v", current, localHost)
+	}
+	if controller.session.LocalWorkingDirectory != current {
+		t.Fatalf("expected controller session local cwd %q, got %#v", current, controller.session)
 	}
 }

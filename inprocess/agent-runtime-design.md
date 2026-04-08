@@ -113,6 +113,11 @@ type SessionContext struct {
     BottomPaneID         string
     TrackedShell         TrackedShellTarget
     WorkingDirectory     string
+    LocalWorkingDirectory string
+    LocalHomeDirectory   string
+    LocalUsername        string
+    LocalHostname        string
+    LocalWorkspaceRoot   string
     UserShellHistoryFile string
     RecentShellOutput    string
     RecentManualCommands []string

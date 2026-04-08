@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -298,6 +299,12 @@ func TestLocalControllerResumeAfterTakeControlReconcilesOwnedInteractivePane(t *
 	if controller.task.LastCommandResult == nil || controller.task.LastCommandResult.State != CommandExecutionCompleted {
 		t.Fatalf("expected completed last command result, got %#v", controller.task.LastCommandResult)
 	}
+	if !strings.Contains(agent.lastInput.Prompt, resumeAfterTakeControlPrompt) {
+		t.Fatalf("expected resume-after-take-control prompt, got %q", agent.lastInput.Prompt)
+	}
+	if !strings.Contains(agent.lastInput.Prompt, stateAuthorityPromptSuffix) {
+		t.Fatalf("expected state-authority guidance, got %q", agent.lastInput.Prompt)
+	}
 }
 
 func TestLocalControllerResumeAfterTakeControlInfersCanceledWhenPromptReturnedWithoutExitCode(t *testing.T) {
@@ -579,8 +586,11 @@ func TestLocalControllerAgentOwnedLostTriggersRecoveryInference(t *testing.T) {
 		t.Fatalf("unexpected event kinds: %#v", events)
 	}
 
-	if agent.lastInput.Prompt != lostTrackingCheckInPrompt {
+	if !strings.Contains(agent.lastInput.Prompt, lostTrackingCheckInPrompt) {
 		t.Fatalf("expected lost recovery prompt, got %q", agent.lastInput.Prompt)
+	}
+	if !strings.Contains(agent.lastInput.Prompt, stateAuthorityPromptSuffix) {
+		t.Fatalf("expected state-authority guidance, got %q", agent.lastInput.Prompt)
 	}
 	if agent.lastInput.Task.CurrentExecution == nil || agent.lastInput.Task.CurrentExecution.State != CommandExecutionLost {
 		t.Fatalf("expected lost current execution in agent input, got %#v", agent.lastInput.Task.CurrentExecution)
@@ -1074,6 +1084,11 @@ func TestLocalControllerSubmitProposedShellCommandUsesTrackedShellWhenFreshPromp
 }
 
 func TestSubmitProposedShellCommandRepairsRemoteLocalPathProposal(t *testing.T) {
+	homeDirectory, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir() error = %v", err)
+	}
+
 	agent := &stubAgent{
 		response: AgentResponse{
 			Message: "Use a remote-relative inspection command instead.",
@@ -1086,7 +1101,8 @@ func TestSubmitProposedShellCommandRepairsRemoteLocalPathProposal(t *testing.T) 
 	}
 	controller := New(agent, nil, nil, SessionContext{
 		TrackedShell:       TrackedShellTarget{PaneID: "%0"},
-		LocalWorkspaceRoot: "/home/jsmith/source/repos/aiterm",
+		LocalHomeDirectory: filepath.Join(homeDirectory, "..", "stale-home"),
+		LocalWorkspaceRoot: filepath.Join(homeDirectory, "source", "repos", "aiterm"),
 		CurrentShell: &shell.PromptContext{
 			User:         "openclaw",
 			Host:         "openclaw",
@@ -1097,7 +1113,7 @@ func TestSubmitProposedShellCommandRepairsRemoteLocalPathProposal(t *testing.T) 
 		},
 	})
 
-	events, err := controller.SubmitProposedShellCommand(context.Background(), `find /home/jsmith -name foo.txt -type f -print`)
+	events, err := controller.SubmitProposedShellCommand(context.Background(), fmt.Sprintf("find %s -name foo.txt -type f -print", homeDirectory))
 	if err != nil {
 		t.Fatalf("SubmitProposedShellCommand() error = %v", err)
 	}
@@ -1223,8 +1239,11 @@ func TestLocalControllerCheckActiveExecutionUsesAgentContext(t *testing.T) {
 	if len(events) != 1 || events[0].Kind != EventAgentMessage {
 		t.Fatalf("unexpected check-in events: %#v", events)
 	}
-	if agent.lastInput.Prompt != activeExecutionCheckInPrompt {
+	if !strings.Contains(agent.lastInput.Prompt, activeExecutionCheckInPrompt) {
 		t.Fatalf("expected running check-in prompt, got %q", agent.lastInput.Prompt)
+	}
+	if !strings.Contains(agent.lastInput.Prompt, stateAuthorityPromptSuffix) {
+		t.Fatalf("expected state-authority guidance, got %q", agent.lastInput.Prompt)
 	}
 	if agent.lastInput.Task.CurrentExecution == nil || agent.lastInput.Task.CurrentExecution.State != CommandExecutionBackgroundMonitor {
 		t.Fatalf("expected background monitoring state, got %#v", agent.lastInput.Task.CurrentExecution)
@@ -1280,8 +1299,11 @@ func TestLocalControllerCheckActiveExecutionPreservesAwaitingInputState(t *testi
 	if err != nil {
 		t.Fatalf("CheckActiveExecution() error = %v", err)
 	}
-	if agent.lastInput.Prompt != awaitingInputCheckInPrompt {
+	if !strings.Contains(agent.lastInput.Prompt, awaitingInputCheckInPrompt) {
 		t.Fatalf("expected awaiting-input prompt, got %q", agent.lastInput.Prompt)
+	}
+	if !strings.Contains(agent.lastInput.Prompt, stateAuthorityPromptSuffix) {
+		t.Fatalf("expected state-authority guidance, got %q", agent.lastInput.Prompt)
 	}
 	if agent.lastInput.Task.CurrentExecution == nil || agent.lastInput.Task.CurrentExecution.State != CommandExecutionAwaitingInput {
 		t.Fatalf("expected awaiting_input state to be preserved, got %#v", agent.lastInput.Task.CurrentExecution)
@@ -1311,8 +1333,11 @@ func TestLocalControllerCheckActiveExecutionPreservesInteractiveFullscreenState(
 	if err != nil {
 		t.Fatalf("CheckActiveExecution() error = %v", err)
 	}
-	if agent.lastInput.Prompt != fullscreenCheckInPrompt {
+	if !strings.Contains(agent.lastInput.Prompt, fullscreenCheckInPrompt) {
 		t.Fatalf("expected fullscreen prompt, got %q", agent.lastInput.Prompt)
+	}
+	if !strings.Contains(agent.lastInput.Prompt, stateAuthorityPromptSuffix) {
+		t.Fatalf("expected state-authority guidance, got %q", agent.lastInput.Prompt)
 	}
 	if agent.lastInput.Task.CurrentExecution == nil || agent.lastInput.Task.CurrentExecution.State != CommandExecutionInteractiveFullscreen {
 		t.Fatalf("expected interactive_fullscreen state to be preserved, got %#v", agent.lastInput.Task.CurrentExecution)
@@ -1342,8 +1367,11 @@ func TestLocalControllerCheckActiveExecutionUsesLostPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckActiveExecution() error = %v", err)
 	}
-	if agent.lastInput.Prompt != lostTrackingCheckInPrompt {
+	if !strings.Contains(agent.lastInput.Prompt, lostTrackingCheckInPrompt) {
 		t.Fatalf("expected lost prompt, got %q", agent.lastInput.Prompt)
+	}
+	if !strings.Contains(agent.lastInput.Prompt, stateAuthorityPromptSuffix) {
+		t.Fatalf("expected state-authority guidance, got %q", agent.lastInput.Prompt)
 	}
 	if agent.lastInput.Task.RecoverySnapshot != "recovery lines" {
 		t.Fatalf("expected recovery snapshot, got %q", agent.lastInput.Task.RecoverySnapshot)

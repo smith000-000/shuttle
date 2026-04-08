@@ -660,6 +660,9 @@ func (m *Model) syncActionState(events []controller.TranscriptEvent) {
 	if shellContext := latestShellContext(events); shellContext != nil {
 		m.shellContext = *shellContext
 	}
+	if result := latestCommandResult(events); result != nil {
+		m.lastCommandResult = result
+	}
 	if modelInfo := latestModelInfo(events); modelInfo != nil {
 		m.lastModelInfo = modelInfo
 	}
@@ -831,6 +834,24 @@ func latestShellContext(events []controller.TranscriptEvent) *shell.PromptContex
 
 		context := *payload.ShellContext
 		return &context
+	}
+
+	return nil
+}
+
+func latestCommandResult(events []controller.TranscriptEvent) *controller.CommandResultSummary {
+	for index := len(events) - 1; index >= 0; index-- {
+		if events[index].Kind != controller.EventCommandResult {
+			continue
+		}
+
+		payload, ok := events[index].Payload.(controller.CommandResultSummary)
+		if !ok {
+			continue
+		}
+
+		result := payload
+		return &result
 	}
 
 	return nil

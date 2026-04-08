@@ -42,8 +42,11 @@ func TestLocalControllerContinueAfterCommandUsesLastResultWithoutUserEvent(t *te
 		t.Fatalf("expected agent message, got %#v", events)
 	}
 
-	if agent.lastInput.Prompt != buildAutoContinuePrompt(controller.task) {
+	if !strings.Contains(agent.lastInput.Prompt, buildAutoContinuePrompt(controller.task)) {
 		t.Fatalf("expected auto-continue prompt, got %q", agent.lastInput.Prompt)
+	}
+	if !strings.Contains(agent.lastInput.Prompt, stateAuthorityPromptSuffix) {
+		t.Fatalf("expected state-authority guidance, got %q", agent.lastInput.Prompt)
 	}
 
 	if agent.lastInput.Task.LastCommandResult == nil || agent.lastInput.Task.LastCommandResult.Command != "ls" {
@@ -352,6 +355,9 @@ func TestLocalControllerContinueActivePlanUsesActivePlanContext(t *testing.T) {
 	}
 	if !strings.Contains(agent.lastInput.Prompt, continuePlanPrompt) {
 		t.Fatalf("expected continue-plan prompt, got %q", agent.lastInput.Prompt)
+	}
+	if !strings.Contains(agent.lastInput.Prompt, stateAuthorityPromptSuffix) {
+		t.Fatalf("expected state-authority guidance, got %q", agent.lastInput.Prompt)
 	}
 	if !strings.Contains(agent.lastInput.Prompt, activePlanStatusCheckPromptSuffix) {
 		t.Fatalf("expected active plan status-check guidance, got %q", agent.lastInput.Prompt)

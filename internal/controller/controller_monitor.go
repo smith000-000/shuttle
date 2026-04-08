@@ -167,20 +167,20 @@ func (c *LocalController) CheckActiveExecution(ctx context.Context) ([]Transcrip
 }
 
 func buildActiveExecutionCheckInPrompt(execution *CommandExecution) string {
+	basePrompt := activeExecutionCheckInPrompt
 	if execution == nil {
-		return activeExecutionCheckInPrompt
+		return appendPromptSuffix(basePrompt, stateAuthorityPromptSuffix)
 	}
 
 	switch execution.State {
 	case CommandExecutionAwaitingInput:
-		return awaitingInputCheckInPrompt
+		basePrompt = awaitingInputCheckInPrompt
 	case CommandExecutionInteractiveFullscreen, CommandExecutionHandoffActive:
-		return fullscreenCheckInPrompt
+		basePrompt = fullscreenCheckInPrompt
 	case CommandExecutionLost:
-		return lostTrackingCheckInPrompt
-	default:
-		return activeExecutionCheckInPrompt
+		basePrompt = lostTrackingCheckInPrompt
 	}
+	return appendPromptSuffix(basePrompt, stateAuthorityPromptSuffix)
 }
 
 func (c *LocalController) runTrackedCommand(ctx context.Context, executionID string, command string) (shell.TrackedExecution, error) {

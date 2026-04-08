@@ -3,6 +3,7 @@ package protocol
 import (
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -11,6 +12,8 @@ const (
 	endMarker   = "__SHUTTLE_E__:"
 )
 
+var markerCounter atomic.Uint64
+
 type Markers struct {
 	CommandID string
 	BeginLine string
@@ -18,7 +21,7 @@ type Markers struct {
 }
 
 func NewMarkers() Markers {
-	commandID := shortCommandID(time.Now().UnixNano())
+	commandID := shortCommandID(time.Now().UnixNano(), markerCounter.Add(1))
 
 	return Markers{
 		CommandID: commandID,
@@ -63,6 +66,6 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
-func shortCommandID(value int64) string {
-	return strings.ToLower(strconv.FormatInt(value, 36))
+func shortCommandID(value int64, counter uint64) string {
+	return strings.ToLower(strconv.FormatInt(value, 36) + strconv.FormatUint(counter, 36))
 }

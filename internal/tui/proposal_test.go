@@ -83,6 +83,10 @@ func TestPlanEventHighlightsContinueAfterLatestCommandResult(t *testing.T) {
 	model.width = 100
 	model.height = 24
 	model.pendingContinueAfterCommand = true
+	model.lastCommandResult = &controller.CommandResultSummary{
+		Command: "make test",
+		State:   controller.CommandExecutionCanceled,
+	}
 	model.activePlan = &controller.ActivePlan{
 		Summary: "Inspect and repair the workspace.",
 		Steps: []controller.PlanStep{
@@ -92,8 +96,20 @@ func TestPlanEventHighlightsContinueAfterLatestCommandResult(t *testing.T) {
 	}
 
 	view := model.View()
-	if !strings.Contains(view, "Ready to continue from the latest command result. Press Ctrl+G.") {
-		t.Fatalf("expected highlighted continue-after-command prompt, got %q", view)
+	if !strings.Contains(view, "Command Ready For Follow-Up") {
+		t.Fatalf("expected dedicated continue-after-command card, got %q", view)
+	}
+	if !strings.Contains(view, "command: make test") {
+		t.Fatalf("expected continued command summary, got %q", view)
+	}
+	if !strings.Contains(view, "Ctrl+G continue from result") {
+		t.Fatalf("expected explicit continue affordance, got %q", view)
+	}
+	if !strings.Contains(view, "Informational only. Ctrl+G continues the plan.") {
+		t.Fatalf("expected plan card to remain informational, got %q", view)
+	}
+	if strings.Index(view, "Command Ready For Follow-Up") > strings.Index(view, "Active Plan") {
+		t.Fatalf("expected continue-after-command card above plan card, got %q", view)
 	}
 }
 

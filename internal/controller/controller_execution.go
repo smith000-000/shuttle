@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -119,6 +118,7 @@ func (c *LocalController) handleRemoteLocalPathProposal(ctx context.Context, com
 	c.mu.Lock()
 	currentShell := c.session.CurrentShell
 	currentLocation := c.session.CurrentShellLocation
+	localWorkingDirectory := c.session.LocalWorkingDirectory
 	localWorkspaceRoot := c.session.LocalWorkspaceRoot
 	agentAvailable := c.runtimeHost != nil
 	c.mu.Unlock()
@@ -127,7 +127,11 @@ func (c *LocalController) handleRemoteLocalPathProposal(ctx context.Context, com
 		return false, nil, nil
 	}
 
-	localPaths := localOnlyPathsForRemoteGuard(localWorkspaceRoot)
+	localHost := c.refreshLocalHostContext()
+	if strings.TrimSpace(localWorkingDirectory) == "" {
+		localWorkingDirectory = localHost.WorkingDirectory
+	}
+	localPaths := localOnlyPathsForRemoteGuard(localWorkspaceRoot, localWorkingDirectory, localHost.HomeDirectory)
 	if len(localPaths) == 0 || !referencesAnyLocalOnlyPath(command, localPaths) {
 		return false, nil, nil
 	}
@@ -291,7 +295,14 @@ func (c *LocalController) blockInternalTmuxPaneProposal(command string) []Transc
 	return []TranscriptEvent{event}
 }
 
-func localOnlyPathsForRemoteGuard(localWorkspaceRoot string) []string {
+type localHostContext struct {
+	WorkingDirectory string
+	HomeDirectory    string
+	Username         string
+	Hostname         string
+}
+
+func localOnlyPathsForRemoteGuard(localWorkspaceRoot string, localWorkingDirectory string, localHomeDirectory string) []string {
 	seen := map[string]struct{}{}
 	paths := []string{}
 	appendPath := func(value string) {
@@ -306,9 +317,8 @@ func localOnlyPathsForRemoteGuard(localWorkspaceRoot string) []string {
 		paths = append(paths, value)
 	}
 	appendPath(localWorkspaceRoot)
-	if home, err := os.UserHomeDir(); err == nil {
-		appendPath(home)
-	}
+	appendPath(localWorkingDirectory)
+	appendPath(localHomeDirectory)
 	return paths
 }
 
@@ -752,7 +762,7 @@ func (c *LocalController) submitLostExecutionRecovery(ctx context.Context, execu
 
 	outcome, err := c.runtime.Handle(ctx, c.runtimeHost, agentruntime.Request{
 		Kind:   agentruntime.RequestLostExecutionRecovery,
-		Prompt: lostTrackingCheckInPrompt,
+		Prompt: appendPromptSuffix(lostTrackingCheckInPrompt, stateAuthorityPromptSuffix),
 	})
 	if err != nil {
 		logging.TraceError(

@@ -19,11 +19,13 @@ What is working now:
 - approval and refine flow
 - local and remote handoff with `F2`
 - `KEYS>` mode for sending raw terminal input
-- bounded agent check-ins for interactive/fullscreen waits, with explicit `Ctrl+G` resume after Shuttle pauses automatic retries
+- bounded agent check-ins for interactive/fullscreen waits, with explicit `Ctrl+G` continuation cards after Shuttle pauses automatic retries or needs confirmation to continue from the latest command result
 - partial semantic shell integration for local shells
 - serial agentic command loops with one proposal at a time and auto-continue after results
 - active checklist reconciliation on continuation turns, so plan cards can reflect explicit agent status updates instead of only command-completion guesses
 - fresh user prompts now supersede stale active checklists unless the user is explicitly asking to continue or resume the current plan
+- fresh user prompts and continuation turns now explicitly treat rerun/retry requests and shell-target shifts as reasons to distrust earlier completion and reassess the work in the current shell context
+- agent prompt decoration now explicitly classifies requests by execution surface and treats controller session state, not matching path strings, as the source of truth for shell identity and target context
 - first-class shell-context inspection support so the model can refresh authoritative user@host/cwd state instead of guessing from stale prompt text
 - inspect-context and provider turn context now include cwd source/confidence metadata so prompt-derived remote directories like `~` are treated as approximate while probe-confirmed directories are treated as authoritative
 - ordinary agent turns refresh tracked-shell identity and manual shell history without blindly reusing whatever old scrollback is still visible in the top pane as fresh command output

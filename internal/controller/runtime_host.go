@@ -25,6 +25,7 @@ func (h builtinRuntimeHost) Respond(ctx context.Context, req agentruntime.Reques
 	if _, err := c.RefreshShellContext(ctx); err != nil && req.Kind != agentruntime.RequestExecutionCheckIn && req.Kind != agentruntime.RequestLostExecutionRecovery {
 		return agentruntime.Outcome{}, err
 	}
+	c.refreshLocalHostContext()
 	if req.Kind != agentruntime.RequestExecutionCheckIn && req.Kind != agentruntime.RequestLostExecutionRecovery {
 		c.refreshUserShellContext(ctx, false)
 	}

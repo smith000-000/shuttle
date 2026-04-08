@@ -41,6 +41,38 @@ func interactiveTakeControlLabel(hasExecutionTarget bool) string {
 	return "F2 take control"
 }
 
+func continueAfterCommandReason(result *controller.CommandResultSummary) string {
+	if result == nil {
+		return "Shuttle is waiting to continue from the latest command result."
+	}
+
+	switch result.State {
+	case controller.CommandExecutionCanceled:
+		return "Shuttle is waiting for confirmation to continue after the command was interrupted."
+	case controller.CommandExecutionFailed:
+		return "Shuttle is waiting to continue after the command failed."
+	case controller.CommandExecutionCompleted:
+		return "Shuttle is waiting to continue after the command completed."
+	case controller.CommandExecutionLost:
+		return "Shuttle is waiting to continue after command tracking was lost."
+	default:
+		return "Shuttle is waiting to continue from the latest command result."
+	}
+}
+
+func continueAfterCommandPlanHint(plan *controller.ActivePlan) string {
+	if plan == nil || len(plan.Steps) == 0 {
+		return ""
+	}
+
+	for index, step := range plan.Steps {
+		if step.Status == controller.PlanStepInProgress {
+			return fmt.Sprintf("The agent will reassess plan step %d before continuing.", index+1)
+		}
+	}
+	return "The agent will reassess the active plan before continuing."
+}
+
 func activeExecutionTakeControlAffordance(targetsExecution bool, hasExecutionTarget bool) string {
 	switch {
 	case targetsExecution:
@@ -61,7 +93,7 @@ func (m Model) renderMainView() string {
 	transcriptWidth := screenWidth
 	actionWidth := m.contentWidthFor(screenWidth, m.styles.actionCard)
 	statusWidth := m.contentWidthFor(screenWidth, m.styles.status)
-	composerWidth := m.contentWidthFor(screenWidth, m.activeComposerStyle())
+	composerWidth := screenWidth
 	footerWidth := screenWidth
 
 	actionCard := m.renderActionCard(actionWidth)
@@ -309,6 +341,32 @@ func (m Model) currentActionCardSpec() *actionCardSpec {
 		}
 	}
 
+	if m.pendingApproval == nil && m.pendingProposal == nil && m.pendingContinueAfterCommand {
+		body := []string{
+			continueAfterCommandReason(m.lastCommandResult),
+		}
+		if m.lastCommandResult != nil {
+			if strings.TrimSpace(m.lastCommandResult.Command) != "" {
+				body = append(body, "command: "+m.lastCommandResult.Command)
+			}
+			body = append(body, "result: "+humanizeExecutionState(m.lastCommandResult.State))
+		} else {
+			body = append(body, "latest result is ready for follow-up.")
+		}
+		if hint := continueAfterCommandPlanHint(m.activePlan); hint != "" {
+			body = append(body, hint)
+		}
+		return &actionCardSpec{
+			title: "Command Ready For Follow-Up",
+			body:  body,
+			buttons: []actionCardButton{
+				{label: "Ctrl+G continue from result", action: actionCardResumeInteractive},
+				{label: "R tell agent", action: actionCardRefine},
+			},
+			borderColor: lipgloss.Color("63"),
+		}
+	}
+
 	if m.pendingApproval != nil {
 		body := []string{
 			m.pendingApproval.Title,
@@ -426,9 +484,6 @@ func (m Model) renderPlanCard(width int) string {
 	}
 	body = append(body, m.planProgressSummary())
 	footerLine := "Informational only. Ctrl+G continues the plan."
-	if m.pendingContinueAfterCommand {
-		footerLine = m.styles.statusConfirm.Render("Ready to continue from the latest command result. Press Ctrl+G.")
-	}
 
 	renderedBody := make([]string, 0, len(body)+1)
 	for _, line := range body {
@@ -960,7 +1015,7 @@ func (m Model) footerParts(width int) []string {
 	} else if m.pendingProposal != nil && m.pendingProposal.Command != "" {
 		parts = append(parts, "[Y] continue", "[N] reject", "[R] ask agent", "[E] tweak command")
 	} else if m.interactiveCheckInPaused && executionNeedsUserDrivenResume(m.activeExecution) {
-		parts = append(parts, "[Ctrl+G] resume", "[R] tell agent")
+		parts = append(parts, "[Ctrl+G] continue", "[R] tell agent")
 	}
 	parts = append(parts, "[Ctrl+C] quit")
 	return parts
@@ -1248,7 +1303,7 @@ func helpContentLines(width int, mode Mode, canSendKeys bool) []string {
 		"F3: take control of the active tracked execution pane when Shuttle is running a separate owned command there",
 		"F10: open settings",
 		"Ctrl+C: quit Shuttle",
-		"Ctrl+G: continue an active plan, or resume paused interactive agent check-ins",
+		"Ctrl+G: continue from the latest command result for an active plan, or resume paused interactive agent check-ins",
 		"Shift-Tab: toggle between agent and shell mode",
 		"Ctrl+O: open the selected transcript entry in the full detail view",
 		"PgUp/PgDn: scroll transcript",

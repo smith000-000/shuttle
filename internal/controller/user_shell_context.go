@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 
@@ -196,6 +197,70 @@ func normalizeWorkingDirectory(directory string) string {
 	}
 
 	return filepath.Clean(directory)
+}
+
+func resolveLocalHomeDirectory(directory string) string {
+	directory = normalizeWorkingDirectory(directory)
+	if homeDirectory, err := os.UserHomeDir(); err == nil {
+		if normalized := normalizeWorkingDirectory(homeDirectory); normalized != "" {
+			return normalized
+		}
+	}
+	return directory
+}
+
+func resolveLocalWorkingDirectory(directory string) string {
+	directory = normalizeWorkingDirectory(directory)
+	if workingDirectory, err := os.Getwd(); err == nil {
+		if normalized := normalizeWorkingDirectory(workingDirectory); normalized != "" {
+			return normalized
+		}
+	}
+	return directory
+}
+
+func resolveLocalUsername(username string) string {
+	username = strings.TrimSpace(username)
+	if currentUser, err := user.Current(); err == nil {
+		if resolved := strings.TrimSpace(currentUser.Username); resolved != "" {
+			return resolved
+		}
+		if resolved := strings.TrimSpace(currentUser.Name); resolved != "" {
+			return resolved
+		}
+	}
+	return username
+}
+
+func resolveLocalHostname(hostname string) string {
+	hostname = strings.TrimSpace(hostname)
+	if resolved, err := os.Hostname(); err == nil {
+		resolved = strings.TrimSpace(resolved)
+		if resolved != "" {
+			return resolved
+		}
+	}
+	return hostname
+}
+
+func (c *LocalController) refreshLocalHostContext() localHostContext {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	context := localHostContext{
+		WorkingDirectory: resolveLocalWorkingDirectory(c.session.LocalWorkingDirectory),
+		HomeDirectory:    resolveLocalHomeDirectory(c.session.LocalHomeDirectory),
+		Username:         resolveLocalUsername(c.session.LocalUsername),
+		Hostname:         resolveLocalHostname(c.session.LocalHostname),
+	}
+	c.session.LocalWorkingDirectory = context.WorkingDirectory
+	c.session.LocalHomeDirectory = context.HomeDirectory
+	c.session.LocalUsername = context.Username
+	c.session.LocalHostname = context.Hostname
+	if strings.TrimSpace(c.session.LocalWorkspaceRoot) == "" {
+		c.session.LocalWorkspaceRoot = context.WorkingDirectory
+	}
+	return context
 }
 
 func normalizeShellWorkingDirectory(directory string, location *shell.ShellLocation) string {

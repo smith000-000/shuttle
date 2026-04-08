@@ -320,7 +320,7 @@ func (m Model) currentTranscriptHeight() int {
 	activeExecutionCard := m.renderActiveExecutionCard(m.contentWidthFor(width, m.styles.actionCard))
 	statusLine := m.renderStatusLine(m.contentWidthFor(width, m.styles.status))
 	shellTail := m.renderShellTail(m.contentWidthFor(width, m.styles.tail))
-	composer := m.renderComposer(m.contentWidthFor(width, m.activeComposerStyle()))
+	composer := m.renderComposer(width)
 	footer := m.renderFooter(width)
 
 	screenHeight := m.height
@@ -400,7 +400,7 @@ func (m Model) rawTranscriptViewportHeight() int {
 	activeExecutionCard := m.renderActiveExecutionCard(m.contentWidthFor(width, m.styles.actionCard))
 	statusLine := m.renderStatusLine(m.contentWidthFor(width, m.styles.status))
 	shellTail := m.renderShellTail(m.contentWidthFor(width, m.styles.tail))
-	composer := m.renderComposer(m.contentWidthFor(width, m.activeComposerStyle()))
+	composer := m.renderComposer(width)
 	footer := m.renderFooter(width)
 
 	screenHeight := m.height
@@ -420,6 +420,10 @@ func (m Model) resultCommandThreshold(width int) int {
 }
 
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if msg.Shift {
+		return m, nil
+	}
+
 	switch msg.Button {
 	case tea.MouseButtonWheelUp:
 		m.scrollTranscriptBy(-3)
@@ -653,6 +657,9 @@ func (m Model) performActionCardAction(action actionCardAction) (tea.Model, tea.
 		}
 		return m.takeControlPersistentShellNow()
 	case actionCardResumeInteractive:
+		if m.pendingApproval == nil && m.pendingProposal == nil && m.pendingContinueAfterCommand {
+			return m.continueAfterLatestCommand()
+		}
 		return m.resumePausedInteractiveCheckIns()
 	case actionCardApprove:
 		return m.primaryAction()
@@ -664,6 +671,9 @@ func (m Model) performActionCardAction(action actionCardAction) (tea.Model, tea.
 	case actionCardRefine:
 		if m.pendingProposal != nil {
 			return m.refineProposal()
+		}
+		if m.pendingApproval == nil && m.pendingProposal == nil && m.pendingContinueAfterCommand {
+			return m.focusAgentComposerForActiveExecution()
 		}
 		if m.pendingApproval == nil && m.interactiveCheckInPaused && executionNeedsUserDrivenResume(m.activeExecution) {
 			return m.focusAgentComposerForActiveExecution()

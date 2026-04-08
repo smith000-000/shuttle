@@ -147,14 +147,15 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			"auth_source", providerLogAuthSource(profile),
 		)
 		ctrl := controller.New(agent, observer, observer, controller.SessionContext{
-			SessionName:          workspace.SessionName,
-			BottomPaneID:         workspace.BottomPane.ID,
-			TrackedShell:         controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
-			WorkingDirectory:     runtimeCfg.StartDir,
-			LocalWorkspaceRoot:   runtimeCfg.StartDir,
-			StateDir:             runtimeCfg.StateDir,
-			UserShellHistoryFile: historyFile,
-			CurrentShell:         initialShellContextPtr(initialShellContext),
+			SessionName:           workspace.SessionName,
+			BottomPaneID:          workspace.BottomPane.ID,
+			TrackedShell:          controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
+			WorkingDirectory:      runtimeCfg.StartDir,
+			LocalWorkingDirectory: runtimeCfg.StartDir,
+			LocalWorkspaceRoot:    runtimeCfg.StartDir,
+			StateDir:              runtimeCfg.StateDir,
+			UserShellHistoryFile:  historyFile,
+			CurrentShell:          initialShellContextPtr(initialShellContext),
 		})
 		ctrl.SetRuntime(buildConfiguredRuntime(runtimeCfg, profile))
 		agentCtx, cancel := context.WithTimeout(ctx, agentPromptTimeout)
@@ -204,14 +205,15 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			"auth_source", providerLogAuthSource(profile),
 		)
 		ctrl := controller.New(agent, observer, observer, controller.SessionContext{
-			SessionName:          workspace.SessionName,
-			BottomPaneID:         workspace.BottomPane.ID,
-			TrackedShell:         controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
-			WorkingDirectory:     runtimeCfg.StartDir,
-			LocalWorkspaceRoot:   runtimeCfg.StartDir,
-			StateDir:             runtimeCfg.StateDir,
-			UserShellHistoryFile: historyFile,
-			CurrentShell:         initialShellContextPtr(initialShellContext),
+			SessionName:           workspace.SessionName,
+			BottomPaneID:          workspace.BottomPane.ID,
+			TrackedShell:          controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
+			WorkingDirectory:      runtimeCfg.StartDir,
+			LocalWorkingDirectory: runtimeCfg.StartDir,
+			LocalWorkspaceRoot:    runtimeCfg.StartDir,
+			StateDir:              runtimeCfg.StateDir,
+			UserShellHistoryFile:  historyFile,
+			CurrentShell:          initialShellContextPtr(initialShellContext),
 		})
 		ctrl.SetRuntime(buildConfiguredRuntime(runtimeCfg, profile))
 		switchProvider := func(profile provider.Profile, shellContext *shell.PromptContext) (controller.Controller, provider.Profile, error) {
@@ -221,14 +223,15 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			}
 
 			ctrl := controller.New(agent, observer, observer, controller.SessionContext{
-				SessionName:          workspace.SessionName,
-				BottomPaneID:         workspace.BottomPane.ID,
-				TrackedShell:         controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
-				WorkingDirectory:     runtimeCfg.StartDir,
-				LocalWorkspaceRoot:   runtimeCfg.StartDir,
-				StateDir:             runtimeCfg.StateDir,
-				UserShellHistoryFile: historyFile,
-				CurrentShell:         shellContext,
+				SessionName:           workspace.SessionName,
+				BottomPaneID:          workspace.BottomPane.ID,
+				TrackedShell:          controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
+				WorkingDirectory:      runtimeCfg.StartDir,
+				LocalWorkingDirectory: runtimeCfg.StartDir,
+				LocalWorkspaceRoot:    runtimeCfg.StartDir,
+				StateDir:              runtimeCfg.StateDir,
+				UserShellHistoryFile:  historyFile,
+				CurrentShell:          shellContext,
 			})
 			ctrl.SetRuntime(buildConfiguredRuntime(runtimeCfg, profile))
 			return ctrl, profile, nil

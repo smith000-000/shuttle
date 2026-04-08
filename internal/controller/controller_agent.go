@@ -2,10 +2,12 @@ package controller
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 
 	"aiterm/internal/agentruntime"
 	"aiterm/internal/logging"
+	"aiterm/internal/shell"
 )
 
 func (c *LocalController) SubmitAgentPrompt(ctx context.Context, prompt string) ([]TranscriptEvent, error) {
@@ -69,10 +71,15 @@ func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string
 }
 
 func (c *LocalController) submitAgentTurnWithInspectBudget(ctx context.Context, userPrompt string, agentPrompt string, refinement *ApprovalRequest, emitUserMessage bool, inspectBudget int) ([]TranscriptEvent, error) {
+	if _, err := c.RefreshShellContext(ctx); err == nil {
+		c.refreshLocalHostContext()
+		c.refreshUserShellContext(ctx, false)
+	}
 	c.mu.Lock()
 	task := c.task
+	session := c.session
 	c.mu.Unlock()
-	agentPrompt = decorateAgentPrompt(task, agentPrompt)
+	agentPrompt = decorateAgentPrompt(session, task, agentPrompt)
 	logging.Trace(
 		"controller.agent_turn.start",
 		"user_prompt", userPrompt,
@@ -108,8 +115,12 @@ func (c *LocalController) submitAgentTurnWithInspectBudget(ctx context.Context, 
 	return newEvents, nil
 }
 
-func decorateAgentPrompt(task TaskContext, prompt string) string {
+func decorateAgentPrompt(session SessionContext, task TaskContext, prompt string) string {
 	prompt = strings.TrimSpace(prompt)
+	prompt = appendPromptSuffix(prompt, stateAuthorityPromptSuffix)
+	if shouldAddRerunOrContextShiftGuidance(session, task, prompt) {
+		prompt = appendPromptSuffix(prompt, rerunOrContextShiftPromptSuffix)
+	}
 	if task.ActivePlan == nil {
 		return prompt
 	}
@@ -120,6 +131,94 @@ func decorateAgentPrompt(task TaskContext, prompt string) string {
 		return activePlanStatusCheckPromptSuffix
 	}
 	return prompt + "\n\n" + activePlanStatusCheckPromptSuffix
+}
+
+func appendPromptSuffix(prompt string, suffix string) string {
+	prompt = strings.TrimSpace(prompt)
+	suffix = strings.TrimSpace(suffix)
+	if suffix == "" || strings.Contains(prompt, suffix) {
+		return prompt
+	}
+	if prompt == "" {
+		return suffix
+	}
+	return prompt + "\n\n" + suffix
+}
+
+func shouldAddRerunOrContextShiftGuidance(session SessionContext, task TaskContext, prompt string) bool {
+	return promptExplicitlyRequestsRerun(prompt) || shellContextMateriallyChangedSinceLastResult(session, task.LastCommandResult)
+}
+
+func promptExplicitlyRequestsRerun(prompt string) bool {
+	prompt = strings.ToLower(strings.TrimSpace(prompt))
+	if prompt == "" {
+		return false
+	}
+
+	return containsAnySubstring(
+		prompt,
+		"rerun",
+		"re-run",
+		"run again",
+		"try again",
+		"retry",
+		"repeat",
+		"do it again",
+		"check again",
+		"recheck",
+		"re-check",
+		"test again",
+		"rerun the test",
+		"run the test again",
+	)
+}
+
+func shellContextMateriallyChangedSinceLastResult(session SessionContext, lastResult *CommandResultSummary) bool {
+	if lastResult == nil || lastResult.ShellContext == nil {
+		return false
+	}
+	currentPrompt := session.CurrentShell
+	if currentPrompt == nil {
+		return false
+	}
+
+	currentLocation := effectiveShellLocation(session.CurrentShellLocation, currentPrompt)
+	previousLocation := shell.InferShellLocation(*lastResult.ShellContext, "")
+
+	if currentLocation.Kind != previousLocation.Kind {
+		return true
+	}
+	if !strings.EqualFold(strings.TrimSpace(currentLocation.User), strings.TrimSpace(previousLocation.User)) {
+		return true
+	}
+	if !strings.EqualFold(strings.TrimSpace(currentLocation.Host), strings.TrimSpace(previousLocation.Host)) {
+		return true
+	}
+
+	currentDirectory := normalizeComparableShellDirectory(currentPrompt.Directory, currentLocation)
+	previousDirectory := normalizeComparableShellDirectory(lastResult.ShellContext.Directory, previousLocation)
+	if currentDirectory != previousDirectory {
+		return true
+	}
+
+	return false
+}
+
+func normalizeComparableShellDirectory(directory string, location shell.ShellLocation) string {
+	directory = strings.TrimSpace(directory)
+	if directory == "" {
+		return ""
+	}
+	if location.Kind == shell.ShellLocationRemote {
+		if directory == "~" {
+			return "~"
+		}
+		if strings.HasPrefix(directory, "~/") {
+			return "~/" + strings.TrimPrefix(filepath.Clean(strings.TrimPrefix(directory, "~/")), "./")
+		}
+		return filepath.Clean(directory)
+	}
+	return normalizeWorkingDirectory(directory)
 }
 
 func shouldReplaceActivePlanForUserPrompt(activePlan *ActivePlan, prompt string) bool {
