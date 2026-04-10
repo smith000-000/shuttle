@@ -58,6 +58,18 @@ func (t *contextTransitionTracker) Observe(observation transitionObservation) tr
 		return transitionTrackerDecision{State: t.state, AwaitingInput: true}
 	}
 
+	if shouldSettleTopLevelExitReturn(t.command, t.baseline, observation) {
+		t.state = contextTransitionSettled
+		t.candidateSeen = true
+		t.candidatePrompt = observation.Candidate
+		return transitionTrackerDecision{
+			State:         t.state,
+			Settled:       true,
+			PromptContext: observation.Candidate,
+			PromptCapture: observation.Capture,
+		}
+	}
+
 	if !observation.HasPrompt || !promptReturnedAfterTransition(t.beforeCapture, t.baseline, observation.Candidate, observation.Capture, observation.Delta) {
 		return transitionTrackerDecision{State: t.state}
 	}
@@ -96,4 +108,23 @@ func (t *contextTransitionTracker) ObserveVerification(observation transitionObs
 		t.candidateSeen = false
 		return transitionTrackerDecision{State: contextTransitionCandidatePromptSeen}
 	}
+}
+
+func shouldSettleTopLevelExitReturn(command string, baseline PromptContext, observation transitionObservation) bool {
+	fields := transitionCommandFields(command)
+	if len(fields) == 0 {
+		return false
+	}
+	switch fields[0] {
+	case "exit", "logout":
+	default:
+		return false
+	}
+	if baseline.PromptLine() == "" || baseline.Remote || baseline.Root {
+		return false
+	}
+	if !observation.HasPrompt || strings.TrimSpace(observation.Delta) != "" {
+		return false
+	}
+	return promptContextsEquivalent(baseline, observation.Candidate)
 }

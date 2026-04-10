@@ -130,3 +130,17 @@ func TestTransitionTrackerSettlesSudoRootShellAndExitBackToUserShell(t *testing.
 		t.Fatalf("exit transition should settle back to user shell: %+v", userVerify)
 	}
 }
+
+func TestContextTransitionTrackerSettlesTopLevelExitOnImmediatePromptReturn(t *testing.T) {
+	userPrompt := shellTestProjectPrompt(t) + "\n"
+	userContext, _ := ParsePromptContextFromCapture(userPrompt)
+
+	tracker := newContextTransitionTracker("exit", userPrompt, userContext)
+	decision := tracker.Observe(newTransitionObservation(userPrompt, "exit\n"+userPrompt, "exit"))
+	if !decision.Settled {
+		t.Fatalf("top-level exit should settle on immediate prompt return: %+v", decision)
+	}
+	if decision.PromptContext.Directory != userContext.Directory {
+		t.Fatalf("expected settled prompt context to remain on the local prompt, got %+v", decision.PromptContext)
+	}
+}

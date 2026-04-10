@@ -807,6 +807,18 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, monitor *tra
 		observation := newTransitionObservation(beforeCapture, captured, command)
 		decision := tracker.Observe(observation)
 		publishContextTransitionObservation(monitor, observation, decision)
+		if decision.Settled {
+			promptCapture = decision.PromptCapture
+			promptContext = decision.PromptContext
+			logging.Trace(
+				"shell.context_transition.prompt_returned",
+				"pane", paneID,
+				"command", command,
+				"prompt", promptContext.PromptLine(),
+				"capture_preview", logging.Preview(promptCapture, 1200),
+			)
+			goto probe
+		}
 		if decision.NeedsVerify {
 			verifyCapture, verifyErr := o.capturePane(ctx, paneID, -200)
 			if verifyErr != nil {
