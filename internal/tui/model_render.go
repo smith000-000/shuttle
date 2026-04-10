@@ -527,8 +527,8 @@ func (m Model) renderActiveExecutionCard(width int) string {
 			body = append(body, "S send keys")
 			body = append(body, "This command is running in an owned execution pane. F3 takes control of that pane.")
 		}
-	} else if strings.TrimSpace(m.activeExecution.LatestOutputTail) != "" {
-		lines := strings.Split(strings.TrimSpace(m.activeExecution.LatestOutputTail), "\n")
+	} else if displayTail := strings.TrimSpace(executionDisplayTail(m.activeExecution)); displayTail != "" {
+		lines := strings.Split(displayTail, "\n")
 		if len(lines) > 2 {
 			lines = lines[len(lines)-2:]
 		}

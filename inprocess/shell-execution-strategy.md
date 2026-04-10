@@ -89,6 +89,8 @@ Shuttle now has a usable first pass of the redesigned execution stack on `main`:
 - plan cards demoted to informational state instead of approval-like control flow, with continuation turns now suppressing stale replacement plans and emitting explicit plan-complete state when needed
 - quiet commands like `sleep 20` no longer reconcile as completed from stale prompt scrollback after `F2`
 - transcript result entries now reflect exit status instead of always presenting a green success result
+- transcript and active-execution views now preserve ANSI-colored shell output for display while keeping sanitized plain-text summaries for controller state and prompt reconciliation
+- prompt-inference transport commands such as `ssh` now distinguish the outer transport from the inner remote command, surface auth waits as `awaiting_input`, and settle more reliably after `F2` return
 
 What is still not done:
 - fullscreen/interactive detection still needs stronger terminal-behavior signals beyond current tmux metadata heuristics

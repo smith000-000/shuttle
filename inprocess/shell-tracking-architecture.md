@@ -64,6 +64,7 @@ The observer is the low-level shell integration layer.
 
 Responsibilities:
 - capture pane output
+- preserve an ANSI-bearing display capture separately from the sanitized control capture
 - capture prompt context
 - send commands into the tracked pane
 - run tracked command monitors
@@ -84,6 +85,7 @@ Current transition rule:
 Current implementation note:
 - monitor loops now build an `ObservedShellState` snapshot that bundles prompt parse, pane metadata, semantic state, remembered transition kind, and inferred shell location
 - tracked-command and attached-foreground monitors now share the same prompt-return evaluator for semantic completion, inferred prompt-return completion, and tail normalization; the launch-mode-specific code only owns start detection, attach gating, and capture windowing
+- display-oriented transcript/output surfaces now use ANSI-preserving capture while command parsing, prompt reconciliation, and execution-state inference continue to use sanitized plain-text capture
 - `ShellLocation` now also carries cwd source/confidence metadata so the controller can distinguish prompt-derived directories, probe-confirmed directories, and low-confidence carried-forward cwd
 - context-transition polling now routes through a dedicated transition tracker state machine with states such as `submitted`, `candidate_prompt_seen`, `awaiting_interactive_input`, and `probe_verifying`
 - this is intended as an internal cleanup seam so later remote-shell reliability work can replace scattered boolean checks without redesigning the shell product model again
@@ -154,6 +156,7 @@ Current rule:
 - `SessionContext.WorkingDirectory` is the tracked shell cwd, not the controller host cwd
 - controller-owned local host probe fields such as `LocalWorkingDirectory` and `LocalHomeDirectory` describe where Shuttle itself is running on the host machine and must remain distinct from tracked-shell state
 - `CommandExecution.TrackedShell` describes where the active command is actually running
+- `CommandExecution.LatestOutputTail` is the sanitized control tail; `LatestDisplayTail` is the display-oriented tail that may retain ANSI styling
 - owned execution results do not overwrite persistent user-shell cwd or prompt context
 - controller and provider policy should key remote-sensitive decisions from `CurrentShellLocation`, not from `PromptContext.Remote`
 
@@ -193,6 +196,7 @@ Important rule:
 Current fallback ladder:
 - use the controller's currently tracked execution when one exists
 - on `F2` return, reconcile prompt state against the controller-selected take-control target for the active execution
+- when the post-handoff prompt text is not parseable, handoff reconciliation may still settle from observed shell-wrapper state plus semantic exit metadata or explicit interrupt evidence such as `^C`
 - if no execution reconciles, ask the controller to attach to a manually started foreground command
 - if neither applies, treat the shell as having no active tracked command
 
@@ -275,6 +279,8 @@ This path is weaker than fully tracked transport because the command was not lau
 Additional guardrail:
 - attached foreground monitors now require a current prompt before completing from prompt-return semantics
 - stale prompt scrollback is ignored the same way it is for the primary handoff-reconciliation path
+- prompt-inference transport panes such as `ssh` now distinguish the outer transport from the inner remote command, so Shuttle can settle the transport once the remote prompt is reused and avoid leaving later remote commands mislabeled as stuck `awaiting_input`
+- attached foreground fallback cleanup strips echoed commands according to the active transport context, so prompt-inference panes do not leave `ssh`/wrapper labels stuck onto later remote output
 
 ## 3.5 Context-Transition Commands
 
@@ -291,6 +297,8 @@ These are treated specially because they are more like shell ownership transitio
 Current behavior:
 - detect likely transition kind
 - suppress inappropriate local semantic assumptions when control moved elsewhere
+- surface interim `awaiting_input` state from the transition tracker when prompts like passwords or host-key confirmations appear, so tracked `ssh`/`sudo -i` transitions do not look like generic running commands
+- after `F2` return, reconcile active executions from observed shell state, semantic exit evidence, and explicit interrupt evidence such as `^C` even when a final prompt line is incomplete or unparseable
 - bootstrap local nested shells conservatively after prompt settlement
 - remain heuristic-only for remote/container cases unless later bootstrap work expands coverage
 
@@ -445,9 +453,9 @@ This fixed a class of bugs where:
 2. Observer ensures local semantic integration if needed.
 3. Observer injects tracked transport into the tracked pane.
 4. Monitor reads pane output, pane metadata, and semantic state.
-5. Controller converts monitor snapshots into `CommandExecution`.
+5. Controller converts monitor snapshots into `CommandExecution`, keeping separate control and display tails.
 6. Controller emits transcript events and updates `LastCommandResult`.
-7. TUI renders the result and mirrors any updated tracked shell target.
+7. TUI renders the display summary/tail while controller logic continues to reason over sanitized output and any updated tracked shell target.
 
 ## 7.2 Handoff and Resume Path
 

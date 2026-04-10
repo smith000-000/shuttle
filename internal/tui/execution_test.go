@@ -901,6 +901,135 @@ func TestTakeControlFinishedResumesControllerWithoutLocalExecution(t *testing.T)
 	}
 }
 
+func TestTakeControlFinishedRetriesEmptyResumeAfterTakeControl(t *testing.T) {
+	ctrl := &fakeController{
+		resumeEventsQueue: [][]controller.TranscriptEvent{
+			nil,
+			{
+				{
+					Kind: controller.EventCommandResult,
+					Payload: controller.CommandResultSummary{
+						ExecutionID: "cmd-1",
+						Command:     "tail -f AGENTS.md",
+						Origin:      controller.CommandOriginUserShell,
+						State:       controller.CommandExecutionCanceled,
+						ExitCode:    shell.InterruptedExitCode,
+						Summary:     "^C",
+					},
+				},
+			},
+		},
+		activeExecution: &controller.CommandExecution{
+			ID:        "cmd-1",
+			Command:   "tail -f AGENTS.md",
+			Origin:    controller.CommandOriginUserShell,
+			State:     controller.CommandExecutionRunning,
+			StartedAt: time.Now(),
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "tail -f AGENTS.md",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionHandoffActive,
+		StartedAt: time.Now(),
+	}
+	model.handoffVisible = true
+	model.handoffPriorState = controller.CommandExecutionRunning
+
+	updated, cmd := model.Update(takeControlFinishedMsg{})
+	next := updated.(Model)
+
+	msg := controllerEventsFromCmd(t, cmd)
+	updated, retryCmd := next.Update(msg)
+	next = updated.(Model)
+
+	if retryCmd == nil {
+		t.Fatal("expected retry command after empty handoff reconciliation")
+	}
+	if next.handoffResumeRetryBudget != 2 {
+		t.Fatalf("expected retry budget to decrement, got %d", next.handoffResumeRetryBudget)
+	}
+
+	msg = controllerEventsFromCmd(t, retryCmd)
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+
+	if next.activeExecution != nil {
+		t.Fatalf("expected retry to clear active execution after canceled result, got %#v", next.activeExecution)
+	}
+}
+
+func TestTakeControlFinishedClearsExecutionWhenControllerAlreadySettledDuringHandoff(t *testing.T) {
+	ctrl := &fakeController{
+		resumeEventsQueue: [][]controller.TranscriptEvent{
+			nil,
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 15",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionHandoffActive,
+		StartedAt: time.Now(),
+	}
+	model.handoffVisible = true
+	model.handoffPriorState = controller.CommandExecutionRunning
+
+	updated, cmd := model.Update(takeControlFinishedMsg{})
+	next := updated.(Model)
+
+	msg := controllerEventsFromCmd(t, cmd)
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+
+	if next.activeExecution != nil {
+		t.Fatalf("expected settled controller state to clear stale handoff execution, got %#v", next.activeExecution)
+	}
+	if next.handoffResumeRetryBudget != 0 {
+		t.Fatalf("expected retry budget to clear once controller reported no active execution, got %d", next.handoffResumeRetryBudget)
+	}
+}
+
+func TestTakeControlFinishedIgnoresStalePreHandoffExecutionPoll(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 15",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+	}
+
+	staleEpoch := model.activeExecutionPollEpoch
+	updated, _ := model.takeControlPersistentShellNow()
+	model = updated.(Model)
+	updated, _ = model.Update(takeControlFinishedMsg{})
+	model = updated.(Model)
+
+	updated, _ = model.Update(activeExecutionMsg{
+		epoch: staleEpoch,
+		execution: &controller.CommandExecution{
+			ID:        "cmd-1",
+			Command:   "sleep 15",
+			Origin:    controller.CommandOriginUserShell,
+			State:     controller.CommandExecutionRunning,
+			StartedAt: time.Now(),
+		},
+	})
+	next := updated.(Model)
+
+	if next.activeExecution == nil || next.activeExecution.State == controller.CommandExecutionHandoffActive {
+		t.Fatalf("expected handoff return state to stay intact, got %#v", next.activeExecution)
+	}
+	if next.activeExecution.Command != "sleep 15" {
+		t.Fatalf("expected existing execution to remain, got %#v", next.activeExecution)
+	}
+}
+
 func TestActiveExecutionReattachPreservesObservedStartTimeAcrossHandoff(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
 	startedAt := time.Now().Add(-12 * time.Second)
@@ -1660,7 +1789,7 @@ func TestTakeControlFinishedPreservesExecutionAcrossTransientNilPoll(t *testing.
 	updated, _ := model.Update(takeControlFinishedMsg{})
 	model = updated.(Model)
 
-	updated, cmd := model.Update(activeExecutionMsg{execution: nil})
+	updated, cmd := model.Update(activeExecutionMsg{epoch: model.activeExecutionPollEpoch, execution: nil})
 	next := updated.(Model)
 
 	if next.activeExecution == nil {
@@ -2071,6 +2200,54 @@ func TestCommandResultDoesNotReuseLiveShellTailWhenSummaryEmpty(t *testing.T) {
 	}
 	if strings.Contains(last.Body, "file-c") {
 		t.Fatalf("expected stale shell tail not to be reused in result body, got %q", last.Body)
+	}
+}
+
+func TestStaleActiveExecutionPollIgnoredAfterCommandResult(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.showShellTail = true
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "ls",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+	}
+
+	updated, _ := model.Update(controllerEventsMsg{
+		events: []controller.TranscriptEvent{
+			{
+				Kind: controller.EventCommandResult,
+				Payload: controller.CommandResultSummary{
+					ExecutionID: "cmd-1",
+					Command:     "ls",
+					Origin:      controller.CommandOriginUserShell,
+					ExitCode:    0,
+					Summary:     "file-a",
+				},
+			},
+		},
+	})
+	next := updated.(Model)
+
+	if next.activeExecution != nil {
+		t.Fatalf("expected active execution cleared after result, got %#v", next.activeExecution)
+	}
+
+	updated, _ = next.Update(activeExecutionMsg{
+		epoch: next.activeExecutionPollEpoch - 1,
+		execution: &controller.CommandExecution{
+			ID:        "cmd-1",
+			Command:   "ls",
+			Origin:    controller.CommandOriginUserShell,
+			State:     controller.CommandExecutionRunning,
+			StartedAt: time.Now(),
+		},
+	})
+	next = updated.(Model)
+
+	if next.activeExecution != nil {
+		t.Fatalf("expected stale active execution poll to be ignored, got %#v", next.activeExecution)
 	}
 }
 

@@ -65,6 +65,11 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 		return prependTranscriptEvent(nil, trackedShellEvent), false, false, nil
 	}
 	execution := *executionPtr
+	var fallbackPrompt *shell.PromptContext
+	if c.session.CurrentShell != nil {
+		contextCopy := *c.session.CurrentShell
+		fallbackPrompt = &contextCopy
+	}
 	c.mu.Unlock()
 	handoffTarget := takeControlTargetForExecution(&execution, trackedShell)
 	if strings.TrimSpace(handoffTarget.PaneID) == "" {
@@ -74,30 +79,51 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 		return prependTranscriptEvent(nil, trackedShellEvent), false, false, nil
 	}
 
-	promptContext, err := c.reader.CaptureShellContext(ctx, handoffTarget.PaneID)
+	observed, err := c.reader.CaptureObservedShellState(ctx, handoffTarget.PaneID)
 	if err != nil {
 		return nil, false, false, err
 	}
-	if promptContext.PromptLine() == "" || promptContext.LastExitCode == nil {
-		if promptContext.PromptLine() == "" {
-			return prependTranscriptEvent(nil, trackedShellEvent), false, false, nil
-		}
-	}
 
 	recentOutput := ""
+	recentDisplayOutput := ""
 	if execution.OwnershipMode == CommandOwnershipSharedObserver {
 		recentOutput = strings.TrimSpace(execution.LatestOutputTail)
+		recentDisplayOutput = strings.TrimSpace(execution.LatestDisplayTail)
 	}
 	if recentOutput == "" {
 		if captured, captureErr := c.reader.CaptureRecentOutput(ctx, handoffTarget.PaneID, 120); captureErr == nil {
 			recentOutput = strings.TrimSpace(captured)
 		}
 	}
+	if recentDisplayOutput == "" {
+		if captured, captureErr := c.reader.CaptureRecentOutputDisplay(ctx, handoffTarget.PaneID, 120); captureErr == nil {
+			recentDisplayOutput = strings.TrimSpace(captured)
+		}
+	}
 	if recentOutput == "" {
 		recentOutput = strings.TrimSpace(execution.LatestOutputTail)
 	}
+	if recentDisplayOutput == "" {
+		recentDisplayOutput = strings.TrimSpace(execution.LatestDisplayTail)
+	}
+	reconcileReason := handoffPromptReturnReason(observed, recentOutput, fallbackPrompt)
+	if reconcileReason == "" {
+		logging.Trace(
+			"controller.resume_after_take_control.unreconciled",
+			"execution_id", execution.ID,
+			"command", execution.Command,
+			"pane_command", strings.TrimSpace(observed.CurrentPaneCommand),
+			"has_prompt_context", observed.HasPromptContext,
+			"semantic_exit_known", observed.SemanticState.ExitCode != nil,
+			"tail_preview", logging.Preview(recentOutput, 800),
+		)
+		return prependTranscriptEvent(nil, trackedShellEvent), false, false, nil
+	}
+
+	promptContext := handoffPromptContext(observed, fallbackPrompt)
 	if promptContext.PromptLine() != "" {
 		recentOutput = shell.TrimTrailingPromptLine(recentOutput, promptContext)
+		recentDisplayOutput = shell.TrimTrailingPromptLine(recentDisplayOutput, promptContext)
 	}
 
 	exitCode, state, confidence, semanticShell, semanticSource, inferred := inferHandoffPromptReturnResult(promptContext, execution, recentOutput)
@@ -114,9 +140,12 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 		SemanticSource: semanticSource,
 		ExitCode:       exitCode,
 		Summary:        recentOutput,
+		DisplaySummary: recentDisplayOutput,
 	}
 	contextCopy := promptContext
-	summary.ShellContext = &contextCopy
+	if contextCopy.PromptLine() != "" || contextCopy.LastExitCode != nil {
+		summary.ShellContext = &contextCopy
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -124,8 +153,14 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 	if current == nil {
 		return prependTranscriptEvent(nil, trackedShellEvent), false, false, nil
 	}
-	c.applyPromptContextLocked(&contextCopy)
+	if contextCopy.PromptLine() != "" {
+		c.applyPromptContextLocked(&contextCopy)
+	} else if observed.Location.Kind != "" {
+		c.applyShellLocationLocked(observed.Location)
+	}
 	c.session.RecentShellOutput = recentOutput
+	current.LatestOutputTail = recentOutput
+	current.LatestDisplayTail = recentDisplayOutput
 	c.task.LastCommandResult = &summary
 	cleanup := c.removeExecutionLocked(execution.ID)
 	resultEvent := c.newEvent(EventCommandResult, summary)
@@ -141,9 +176,81 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 		"confidence", confidence,
 		"semantic_shell", semanticShell,
 		"semantic_source", semanticSource,
+		"reconcile_reason", reconcileReason,
 		"tail_preview", logging.Preview(recentOutput, 1000),
 	)
 	return prependTranscriptEvent([]TranscriptEvent{resultEvent}, trackedShellEvent), isAgentOwnedExecution(execution.Origin), true, nil
+}
+
+func handoffPromptReturnReason(observed shell.ObservedShellState, recentOutput string, fallbackPrompt *shell.PromptContext) string {
+	if observed.HasPromptContext && observed.PromptContext.PromptLine() != "" {
+		return "prompt_context"
+	}
+	if shell.TailSuggestsAwaitingInput(recentOutput) {
+		return ""
+	}
+	if !handoffPaneCommandAllowsPromptInference(observed.CurrentPaneCommand) {
+		return ""
+	}
+	if observed.SemanticState.ExitCode != nil {
+		return "semantic_exit"
+	}
+	if strings.Contains(recentOutput, "^C") {
+		return "interrupt_tail"
+	}
+	if fallbackPrompt != nil && fallbackPrompt.PromptLine() != "" && shell.TailSuggestsPromptReturn(recentOutput, *fallbackPrompt) {
+		return "fallback_prompt_tail"
+	}
+	return ""
+}
+
+func handoffPromptContext(observed shell.ObservedShellState, fallbackPrompt *shell.PromptContext) shell.PromptContext {
+	if observed.HasPromptContext && observed.PromptContext.PromptLine() != "" {
+		return observed.PromptContext
+	}
+
+	context := shell.PromptContext{}
+	if fallbackPrompt != nil {
+		context = *fallbackPrompt
+	}
+	if context.User == "" {
+		context.User = strings.TrimSpace(observed.Location.User)
+	}
+	if context.Host == "" {
+		context.Host = strings.TrimSpace(observed.Location.Host)
+	}
+	if context.Directory == "" {
+		if directory := strings.TrimSpace(observed.Location.Directory); directory != "" {
+			context.Directory = directory
+		}
+	}
+	if context.Directory == "" {
+		context.Directory = strings.TrimSpace(observed.SemanticState.Directory)
+	}
+	if context.PromptSymbol == "" && (context.User != "" || context.Host != "" || context.Directory != "") {
+		if context.Root {
+			context.PromptSymbol = "#"
+		} else {
+			context.PromptSymbol = "$"
+		}
+	}
+	if observed.SemanticState.ExitCode != nil {
+		exitCode := *observed.SemanticState.ExitCode
+		context.LastExitCode = &exitCode
+	}
+	if context.RawLine == "" {
+		context.RawLine = context.PromptLine()
+	}
+	return context
+}
+
+func handoffPaneCommandAllowsPromptInference(command string) bool {
+	switch strings.TrimSpace(strings.ToLower(command)) {
+	case "", "bash", "zsh", "sh", "fish", "dash", "ash", "ksh", "csh", "tcsh", "ssh", "mosh-client", "mosh":
+		return true
+	default:
+		return false
+	}
 }
 
 func inferHandoffPromptReturnResult(promptContext shell.PromptContext, execution CommandExecution, recentOutput string) (int, CommandExecutionState, shell.SignalConfidence, bool, string, bool) {
@@ -224,7 +331,7 @@ func (c *LocalController) PeekShellTail(ctx context.Context, lines int) (string,
 		return "", nil
 	}
 
-	return c.reader.CaptureRecentOutput(ctx, target.PaneID, lines)
+	return c.reader.CaptureRecentOutputDisplay(ctx, target.PaneID, lines)
 }
 
 func (c *LocalController) captureRecoverySnapshot(ctx context.Context, paneID string, execution *CommandExecution) string {

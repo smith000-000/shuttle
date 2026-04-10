@@ -66,13 +66,14 @@ func (m Model) pollActiveExecutionCmd() tea.Cmd {
 	if m.ctrl == nil {
 		return nil
 	}
+	epoch := m.activeExecutionPollEpoch
 
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
 		events, execution, err := m.ctrl.RefreshActiveExecution(ctx)
-		return activeExecutionMsg{execution: execution, events: events, err: err}
+		return activeExecutionMsg{execution: execution, events: events, err: err, epoch: epoch}
 	}
 }
 
@@ -80,13 +81,35 @@ func (m Model) pollActiveExecutionAfter(delay time.Duration) tea.Cmd {
 	if m.ctrl == nil {
 		return nil
 	}
+	epoch := m.activeExecutionPollEpoch
 
 	return tea.Tick(delay, func(time.Time) tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
 		events, execution, err := m.ctrl.RefreshActiveExecution(ctx)
-		return activeExecutionMsg{execution: execution, events: events, err: err}
+		return activeExecutionMsg{execution: execution, events: events, err: err, epoch: epoch}
+	})
+}
+
+func (m *Model) invalidateActiveExecutionPolls() {
+	m.activeExecutionPollEpoch++
+}
+
+func (m Model) resumeAfterTakeControlAfter(delay time.Duration) tea.Cmd {
+	if m.ctrl == nil {
+		return nil
+	}
+
+	return tea.Tick(delay, func(time.Time) tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), m.currentAgentTurnTimeout())
+		defer cancel()
+
+		events, err := m.ctrl.ResumeAfterTakeControl(ctx)
+		return controllerEventsMsg{
+			events: events,
+			err:    err,
+		}
 	})
 }
 
@@ -284,10 +307,30 @@ func (m *Model) abandonControllerExecution(reason string) *controller.CommandExe
 	}
 
 	execution := m.ctrl.AbandonActiveExecution(reason)
-	if execution != nil && strings.TrimSpace(execution.LatestOutputTail) != "" {
-		m.liveShellTail = execution.LatestOutputTail
+	if displayTail := executionDisplayTail(execution); strings.TrimSpace(displayTail) != "" {
+		m.liveShellTail = displayTail
 	}
 	return execution
+}
+
+func executionDisplayTail(execution *controller.CommandExecution) string {
+	if execution == nil {
+		return ""
+	}
+	if strings.TrimSpace(execution.LatestDisplayTail) != "" {
+		return execution.LatestDisplayTail
+	}
+	return execution.LatestOutputTail
+}
+
+func commandResultDisplaySummary(result *controller.CommandResultSummary) string {
+	if result == nil {
+		return ""
+	}
+	if strings.TrimSpace(result.DisplaySummary) != "" {
+		return result.DisplaySummary
+	}
+	return result.Summary
 }
 
 func interruptedExecutionEntry(execution *controller.CommandExecution, summary string) Entry {
@@ -299,8 +342,9 @@ func interruptedExecutionEntry(execution *controller.CommandExecution, summary s
 	}
 
 	bodyLines := []string{"status=canceled"}
-	if strings.TrimSpace(execution.LatestOutputTail) != "" {
-		bodyLines = append(bodyLines, compactResultPreview(strings.TrimSpace(execution.LatestOutputTail), 6))
+	displayTail := executionDisplayTail(execution)
+	if strings.TrimSpace(displayTail) != "" {
+		bodyLines = append(bodyLines, compactResultPreview(strings.TrimSpace(displayTail), 6))
 	} else {
 		bodyLines = append(bodyLines, "(no output)")
 	}
@@ -315,8 +359,8 @@ func interruptedExecutionEntry(execution *controller.CommandExecution, summary s
 	if strings.TrimSpace(summary) != "" {
 		detail = append(detail, "", "summary:", summary)
 	}
-	if strings.TrimSpace(execution.LatestOutputTail) != "" {
-		detail = append(detail, "", "output so far:", strings.TrimSpace(execution.LatestOutputTail))
+	if strings.TrimSpace(displayTail) != "" {
+		detail = append(detail, "", "output so far:", strings.TrimSpace(displayTail))
 	}
 
 	return Entry{
@@ -453,6 +497,7 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 	}
 
 	if execution == nil {
+		m.invalidateActiveExecutionPolls()
 		m.handoffReturnGraceUntil = time.Time{}
 		m.activeExecutionMissingSince = time.Time{}
 		m.activeExecution = nil

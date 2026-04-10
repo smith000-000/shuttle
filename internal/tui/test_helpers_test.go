@@ -91,6 +91,7 @@ func makeMultilineBody(count int) string {
 type fakeController struct {
 	agentEvents              []controller.TranscriptEvent
 	continueEvents           []controller.TranscriptEvent
+	resumeEventsQueue        [][]controller.TranscriptEvent
 	continueAfterPatchEvents []controller.TranscriptEvent
 	checkInEvents            []controller.TranscriptEvent
 	shellEvents              []controller.TranscriptEvent
@@ -171,6 +172,11 @@ func (f *fakeController) ContinueAfterPatchApply(_ context.Context) ([]controlle
 
 func (f *fakeController) ResumeAfterTakeControl(_ context.Context) ([]controller.TranscriptEvent, error) {
 	f.continueCalls++
+	if len(f.resumeEventsQueue) > 0 {
+		events := append([]controller.TranscriptEvent(nil), f.resumeEventsQueue[0]...)
+		f.resumeEventsQueue = f.resumeEventsQueue[1:]
+		return events, nil
+	}
 	if len(f.continueEvents) == 0 {
 		return []controller.TranscriptEvent{
 			{
@@ -317,7 +323,7 @@ func (f *fakeController) InspectProposedContext(_ context.Context) ([]controller
 				Command:  "inspect current shell context",
 				State:    controller.CommandExecutionCompleted,
 				ExitCode: 0,
-				Summary: "user_host=localuser@workstation\ncwd=/workspace/project\nremote=false",
+				Summary:  "user_host=localuser@workstation\ncwd=/workspace/project\nremote=false",
 			},
 		}}, nil
 	}

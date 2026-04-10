@@ -352,6 +352,108 @@ func TestLocalControllerResumeAfterTakeControlInfersCanceledWhenPromptReturnedWi
 	}
 }
 
+func TestLocalControllerResumeAfterTakeControlReconcilesCtrlCWithUnparseableLocalPrompt(t *testing.T) {
+	reader := &stubContextReader{
+		snapshot: "^C\n➜ shuttle git:(uitweaks) ✗",
+		observed: shell.ObservedShellState{
+			CurrentPaneCommand: "zsh",
+		},
+	}
+	controller := New(nil, nil, reader, SessionContext{
+		TrackedShell: TrackedShellTarget{PaneID: "%0"},
+		CurrentShell: &shell.PromptContext{
+			User:         "localuser",
+			Host:         "workstation",
+			Directory:    "/workspace/project",
+			GitBranch:    "uitweaks",
+			PromptSymbol: "%",
+			RawLine:      "localuser@workstation /workspace/project git:(uitweaks) %",
+		},
+	})
+	setPrimaryExecutionForTest(controller, CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 15",
+		Origin:    CommandOriginUserShell,
+		State:     CommandExecutionRunning,
+		StartedAt: time.Now().Add(-10 * time.Second),
+	})
+
+	events, err := controller.ResumeAfterTakeControl(context.Background())
+	if err != nil {
+		t.Fatalf("ResumeAfterTakeControl() error = %v", err)
+	}
+	if len(events) != 1 || events[0].Kind != EventCommandResult {
+		t.Fatalf("expected command result only, got %#v", events)
+	}
+	result, ok := events[0].Payload.(CommandResultSummary)
+	if !ok {
+		t.Fatalf("expected command result payload, got %#v", events[0].Payload)
+	}
+	if result.State != CommandExecutionCanceled || result.ExitCode != shell.InterruptedExitCode {
+		t.Fatalf("expected canceled handoff reconcile, got %#v", result)
+	}
+	if controller.ActiveExecution() != nil {
+		t.Fatal("expected active execution to clear after local ctrl-c reconcile")
+	}
+}
+
+func TestLocalControllerResumeAfterTakeControlReconcilesCtrlCInRemoteShellWrapper(t *testing.T) {
+	reader := &stubContextReader{
+		snapshot: "^C\nopenclaw@openclaw [~] custom-prompt",
+		observed: shell.ObservedShellState{
+			CurrentPaneCommand: "ssh",
+			Location: shell.ShellLocation{
+				Kind:      shell.ShellLocationRemote,
+				User:      "openclaw",
+				Host:      "openclaw",
+				Directory: "/home/openclaw",
+			},
+		},
+	}
+	controller := New(nil, nil, reader, SessionContext{
+		TrackedShell: TrackedShellTarget{PaneID: "%0"},
+		CurrentShell: &shell.PromptContext{
+			User:         "openclaw",
+			Host:         "openclaw",
+			Directory:    "/home/openclaw",
+			PromptSymbol: "$",
+			Remote:       true,
+			RawLine:      "openclaw@openclaw /home/openclaw $",
+		},
+		CurrentShellLocation: &shell.ShellLocation{
+			Kind:      shell.ShellLocationRemote,
+			User:      "openclaw",
+			Host:      "openclaw",
+			Directory: "/home/openclaw",
+		},
+	})
+	setPrimaryExecutionForTest(controller, CommandExecution{
+		ID:        "cmd-1",
+		Command:   "tail -f AGENTS.md",
+		Origin:    CommandOriginUserShell,
+		State:     CommandExecutionRunning,
+		StartedAt: time.Now().Add(-10 * time.Second),
+	})
+
+	events, err := controller.ResumeAfterTakeControl(context.Background())
+	if err != nil {
+		t.Fatalf("ResumeAfterTakeControl() error = %v", err)
+	}
+	if len(events) != 1 || events[0].Kind != EventCommandResult {
+		t.Fatalf("expected command result only, got %#v", events)
+	}
+	result, ok := events[0].Payload.(CommandResultSummary)
+	if !ok {
+		t.Fatalf("expected command result payload, got %#v", events[0].Payload)
+	}
+	if result.State != CommandExecutionCanceled || result.ExitCode != shell.InterruptedExitCode {
+		t.Fatalf("expected canceled remote handoff reconcile, got %#v", result)
+	}
+	if controller.ActiveExecution() != nil {
+		t.Fatal("expected active execution to clear after remote ctrl-c reconcile")
+	}
+}
+
 func TestLocalControllerResumeAfterTakeControlDoesNotReconcileWithoutCurrentPrompt(t *testing.T) {
 	reader := &stubContextReader{
 		snapshot: "localuser@workstation ~/workspace/project %\n. '/run/user/1000/shuttle/shell-integration/zsh-pane0.sh'\nsleep 20",

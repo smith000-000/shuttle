@@ -89,6 +89,7 @@ type TrackedPaneResolver interface {
 
 type ShellContextReader interface {
 	CaptureRecentOutput(ctx context.Context, paneID string, lines int) (string, error)
+	CaptureRecentOutputDisplay(ctx context.Context, paneID string, lines int) (string, error)
 	CaptureObservedShellState(ctx context.Context, paneID string) (shell.ObservedShellState, error)
 	CaptureShellContext(ctx context.Context, paneID string) (shell.PromptContext, error)
 }

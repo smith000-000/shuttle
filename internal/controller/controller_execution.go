@@ -23,6 +23,22 @@ func finalExecutionSummaryOutput(result shell.TrackedExecution, current *Command
 	return result.Captured
 }
 
+func finalExecutionDisplayOutput(result shell.TrackedExecution, current *CommandExecution) string {
+	if strings.TrimSpace(result.DisplayCaptured) != "" {
+		return result.DisplayCaptured
+	}
+	if current != nil && strings.TrimSpace(current.LatestDisplayTail) != "" {
+		return current.LatestDisplayTail
+	}
+	if current != nil && strings.TrimSpace(current.LatestOutputTail) != "" {
+		return current.LatestOutputTail
+	}
+	if strings.TrimSpace(result.Captured) != "" {
+		return result.Captured
+	}
+	return result.DisplayCaptured
+}
+
 func (c *LocalController) SubmitProposedShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error) {
 	logging.Trace("controller.submit_proposed_shell_command", "command", command)
 	if handled, events, err := c.handleInternalTmuxPaneProposal(ctx, command); handled {
@@ -552,6 +568,11 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 			} else {
 				lostExecution.LatestOutputTail = c.bestEffortRecentOutputLocked()
 			}
+			if strings.TrimSpace(result.DisplayCaptured) != "" {
+				lostExecution.LatestDisplayTail = result.DisplayCaptured
+			} else {
+				lostExecution.LatestDisplayTail = lostExecution.LatestOutputTail
+			}
 			completedAt := time.Now()
 			lostExecution.CompletedAt = &completedAt
 			if result.ShellContext.PromptLine() != "" {
@@ -575,6 +596,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 				SemanticSource: result.SemanticSource,
 				ExitCode:       result.ExitCode,
 				Summary:        lostExecution.LatestOutputTail,
+				DisplaySummary: lostExecution.LatestDisplayTail,
 			}
 			if result.ShellContext.PromptLine() != "" {
 				shellContext := result.ShellContext
@@ -618,6 +640,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 		failedExecution.State = CommandExecutionFailed
 		failedExecution.Error = err.Error()
 		failedExecution.LatestOutputTail = c.bestEffortRecentOutputForExecutionLocked(current)
+		failedExecution.LatestDisplayTail = failedExecution.LatestOutputTail
 		completedAt := time.Now()
 		failedExecution.CompletedAt = &completedAt
 		cleanup := c.removeExecutionLocked(execution.ID)
@@ -640,7 +663,9 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 		canceledExecution := *current
 		canceledExecution.State = CommandExecutionCanceled
 		finalOutput := finalExecutionSummaryOutput(result, current)
+		finalDisplayOutput := finalExecutionDisplayOutput(result, current)
 		canceledExecution.LatestOutputTail = finalOutput
+		canceledExecution.LatestDisplayTail = finalDisplayOutput
 		completedAt := time.Now()
 		canceledExecution.CompletedAt = &completedAt
 		exitCode := result.ExitCode
@@ -658,6 +683,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 			SemanticSource: result.SemanticSource,
 			ExitCode:       result.ExitCode,
 			Summary:        finalOutput,
+			DisplaySummary: finalDisplayOutput,
 		}
 		if result.ShellContext.PromptLine() != "" {
 			shellContext := result.ShellContext
@@ -694,7 +720,9 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 	completedExecution := *current
 	completedExecution.State = CommandExecutionCompleted
 	finalOutput := finalExecutionSummaryOutput(result, current)
+	finalDisplayOutput := finalExecutionDisplayOutput(result, current)
 	completedExecution.LatestOutputTail = finalOutput
+	completedExecution.LatestDisplayTail = finalDisplayOutput
 	completedAt := time.Now()
 	completedExecution.CompletedAt = &completedAt
 	exitCode := result.ExitCode
@@ -712,6 +740,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 		SemanticSource: result.SemanticSource,
 		ExitCode:       result.ExitCode,
 		Summary:        finalOutput,
+		DisplaySummary: finalDisplayOutput,
 	}
 	if result.ShellContext.PromptLine() != "" {
 		shellContext := result.ShellContext
@@ -908,6 +937,11 @@ func (c *LocalController) AbandonActiveExecution(reason string) *CommandExecutio
 	executionCopy.State = CommandExecutionCanceled
 	executionCopy.Error = strings.TrimSpace(reason)
 	executionCopy.LatestOutputTail = c.bestEffortRecentOutputForExecutionLocked(execution)
+	if strings.TrimSpace(execution.LatestDisplayTail) != "" {
+		executionCopy.LatestDisplayTail = execution.LatestDisplayTail
+	} else {
+		executionCopy.LatestDisplayTail = executionCopy.LatestOutputTail
+	}
 	completedAt := time.Now()
 	executionCopy.CompletedAt = &completedAt
 	cleanup := c.removeExecutionLocked(execution.ID)

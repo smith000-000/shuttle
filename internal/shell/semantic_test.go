@@ -182,7 +182,7 @@ func TestRunTrackedMonitorCompletesFromSemanticPromptState(t *testing.T) {
 		_ = os.WriteFile(statePath, []byte("{\"event\":\"prompt\",\"exit\":0,\"cwd\":\""+projectDir+"\",\"shell\":\"bash\"}\n"), 0o644)
 	}()
 
-	observer.runTrackedMonitor(context.Background(), monitor, "%0", "sleep 1", "sleep 1", 250*time.Millisecond, client.capture, markers, func() {})
+	observer.runTrackedMonitor(context.Background(), monitor, "%0", "sleep 1", "sleep 1", 250*time.Millisecond, client.capture, client.capture, markers, func() {})
 	result, err := monitor.Wait()
 	if err != nil {
 		t.Fatalf("Wait() error = %v", err)
@@ -299,9 +299,21 @@ func (f *fakeSemanticPaneClient) ListPanes(ctx context.Context, target string) (
 }
 
 func (f *fakeSemanticPaneClient) CapturePaneEscaped(ctx context.Context, target string, startLine int) (string, error) {
+	base, err := f.CapturePane(ctx, target, startLine)
+	if err != nil {
+		return "", err
+	}
+
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.escaped, nil
+	escaped := f.escaped
+	f.mu.Unlock()
+	if strings.TrimSpace(escaped) == "" {
+		return base, nil
+	}
+	if strings.TrimSpace(base) == "" {
+		return escaped, nil
+	}
+	return base + "\n" + escaped, nil
 }
 
 func (f *fakeSemanticPaneClient) PipePaneOutput(ctx context.Context, target string, shellCommand string) error {

@@ -201,6 +201,10 @@ func (s *stubContextReader) CaptureRecentOutput(_ context.Context, paneID string
 	return s.output, nil
 }
 
+func (s *stubContextReader) CaptureRecentOutputDisplay(_ context.Context, paneID string, _ int) (string, error) {
+	return s.CaptureRecentOutput(context.Background(), paneID, 0)
+}
+
 func (s *stubContextReader) CaptureShellContext(context.Context, string) (shell.PromptContext, error) {
 	if s.err != nil {
 		return shell.PromptContext{}, s.err

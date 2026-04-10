@@ -29,12 +29,14 @@ What is working now:
 - first-class shell-context inspection support so the model can refresh authoritative user@host/cwd state instead of guessing from stale prompt text
 - inspect-context and provider turn context now include cwd source/confidence metadata so prompt-derived remote directories like `~` are treated as approximate while probe-confirmed directories are treated as authoritative
 - ordinary agent turns refresh tracked-shell identity and manual shell history without blindly reusing whatever old scrollback is still visible in the top pane as fresh command output
+- Shuttle now preserves ANSI-colored command output for display while still using sanitized plain-text captures for controller logic and prompt reconciliation
 - native unified-diff patch proposals with explicit apply/reject/ask-agent flow
 - controller-synthesized patch proposals for common single-file text edits, so the model can express insert/replace intent without hand-authoring unified hunks
 - target-aware patch application for both the local workspace and the active tracked remote shell
 - local file creation and edits through native patch application
 - remote tracked-shell file edits through the same patch UX, preferring native remote patches over ad hoc shell rewrites and using staged remote payloads with transport selection `git`, then `python3`, then verified shell fallback
 - foreground attach and handoff reconciliation for manually started shell commands
+- tracked `ssh` and similar transport transitions now surface password/confirmation waits as `awaiting_input`, distinguish the outer transport from the inner remote command, and reconcile `F2` return from observed shell state even when prompt text is incomplete
 - real OpenAI Responses API path with API-key auth
 - provider settings UI with:
   - session-local approval-mode selection
@@ -301,6 +303,7 @@ Core controls:
 - in `KEYS>` mode, `Shift-Tab` dismisses `KEYS>` and suppresses auto-reopen for the current waiting prompt until Shuttle observes a material prompt-state change
 - `KEYS>` also accepts explicit tmux control-key tokens such as `<Ctrl+C>` or `<Esc>` for key events the TUI cannot capture directly
 - each `KEYS>` send requires a fresh observed read of the active terminal; after Shuttle sends keys it refreshes the active execution and shell tail before allowing another send, and it briefly suppresses `KEYS>` auto-reopen while the prompt state settles so successful auth/input transitions do not bounce the composer back into key-send mode
+- text selection while Bubble Tea mouse mode is active depends on the terminal emulator: iTerm2 uses `Option`-drag, while some other terminals use `Shift`-drag
 - `Ctrl+O`: inspect the selected transcript entry
 - while the `Ctrl+O` detail view is open, typing incrementally filters visible detail lines; `Backspace` edits the filter and `Esc` clears it before closing the view
 - `F10`: open settings

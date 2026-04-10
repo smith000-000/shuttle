@@ -291,6 +291,7 @@ type CommandExecution struct {
 	CompletedAt        *time.Time
 	ExitCode           *int
 	LatestOutputTail   string
+	LatestDisplayTail  string
 	ForegroundCommand  string
 	SemanticShell      bool
 	SemanticSource     string
@@ -311,6 +312,7 @@ type CommandResultSummary struct {
 	SemanticSource string
 	ExitCode       int
 	Summary        string
+	DisplaySummary string
 	ShellContext   *shell.PromptContext
 }
 

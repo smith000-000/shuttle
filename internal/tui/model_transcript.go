@@ -973,7 +973,7 @@ func silentSuccessTranscriptBody(payload controller.CommandResultSummary) string
 	if payload.ExitCode != 0 || payload.State != controller.CommandExecutionCompleted {
 		return ""
 	}
-	if resultSummaryHasVisibleOutput(payload.Summary) {
+	if resultSummaryHasVisibleOutput(commandResultDisplaySummary(&payload)) {
 		return ""
 	}
 	if payload.ShellContext != nil && commandLikelyChangesDirectory(payload.Command) {
@@ -1508,7 +1508,7 @@ func eventsToEntries(events []controller.TranscriptEvent, collapseResults bool) 
 		case controller.EventCommandResult:
 			payload, _ := event.Payload.(controller.CommandResultSummary)
 			tagKind := classifyResultTagKind(payload)
-			fullBody := strings.TrimSpace(payload.Summary)
+			fullBody := strings.TrimSpace(commandResultDisplaySummary(&payload))
 			hasVisibleOutput := resultSummaryHasVisibleOutput(fullBody)
 			detailBody := fullBody
 			if detailBody == "" {

@@ -43,6 +43,23 @@ func TestTransitionTrackerKeepsAwaitingInputUnsettled(t *testing.T) {
 	}
 }
 
+func TestPublishContextTransitionObservationPromotesAwaitingInputState(t *testing.T) {
+	monitor := newTrackedCommandMonitor("", "ssh openclaw@openclaw")
+	observation := transitionObservation{
+		Delta: "openclaw@openclaw's password:",
+	}
+
+	publishContextTransitionObservation(monitor, observation, transitionTrackerDecision{AwaitingInput: true})
+
+	snapshot := monitor.Snapshot()
+	if snapshot.State != MonitorStateAwaitingInput {
+		t.Fatalf("expected awaiting-input state, got %#v", snapshot)
+	}
+	if snapshot.LatestOutputTail != "openclaw@openclaw's password:" {
+		t.Fatalf("expected password prompt tail, got %#v", snapshot)
+	}
+}
+
 func TestInferShellLocationUsesTransitionEvidence(t *testing.T) {
 	location := inferShellLocation(PromptContext{}, "ssh", shellTransitionNone)
 	if location.Kind != ShellLocationRemote {

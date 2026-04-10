@@ -85,6 +85,7 @@ type activeExecutionMsg struct {
 	execution *controller.CommandExecution
 	events    []controller.TranscriptEvent
 	err       error
+	epoch     uint64
 }
 
 type transcriptRenderLine struct {
@@ -345,12 +346,14 @@ type Model struct {
 	resumeAfterHandoff           bool
 	handoffVisible               bool
 	handoffPriorState            controller.CommandExecutionState
+	handoffResumeRetryBudget     int
 	handoffReturnGraceUntil      time.Time
 	activeExecutionMissingSince  time.Time
 	takeControl                  takeControlConfig
 	liveShellTail                string
 	showShellTail                bool
 	activeExecution              *controller.CommandExecution
+	activeExecutionPollEpoch     uint64
 	pendingFullscreen            *fullscreenAction
 	sendingFullscreenKeys        bool
 	autoOpenedFullscreenKeys     bool
@@ -595,7 +598,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.updatePendingContinueAfterCommand(msg.events, autoContinue)
 		m.syncTrackedShellTarget()
-		return m, m.pollShellTailCmd()
+		if len(msg.events) == 0 && m.activeExecution != nil && m.handoffResumeRetryBudget > 0 {
+			if m.ctrl != nil && m.ctrl.ActiveExecution() == nil {
+				m.handoffResumeRetryBudget = 0
+				m.syncActiveExecution(nil)
+				return m, m.pollShellTailCmd()
+			}
+			m.handoffResumeRetryBudget--
+			return m, tea.Batch(
+				m.resumeAfterTakeControlAfter(150*time.Millisecond),
+				m.pollActiveExecutionAfter(150*time.Millisecond),
+				m.pollShellTailCmd(),
+			)
+		}
+		m.handoffResumeRetryBudget = 0
+		followUpCmds := []tea.Cmd{m.pollShellTailCmd()}
+		if m.activeExecution != nil || !m.handoffReturnGraceUntil.IsZero() {
+			followUpCmds = append([]tea.Cmd{m.pollActiveExecutionCmd()}, followUpCmds...)
+		}
+		return m, tea.Batch(followUpCmds...)
 	case takeControlFinishedMsg:
 		logging.Trace(
 			"tui.take_control.finished",
@@ -615,6 +636,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, restoreMouseTrackingCmd()
 		}
 		m.handoffVisible = false
+		m.invalidateActiveExecutionPolls()
 		m.syncTrackedShellTarget()
 		if m.activeExecution != nil && m.activeExecution.State == controller.CommandExecutionHandoffActive {
 			updated := *m.activeExecution
@@ -636,6 +658,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resumeAfterHandoff = false
 			m.busy = true
 			m.busyStartedAt = time.Now()
+			m.handoffResumeRetryBudget = 3
 			m.handoffReturnGraceUntil = time.Now().Add(2 * time.Second)
 			m.showShellTail = false
 			m.liveShellTail = ""
@@ -649,8 +672,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					events: events,
 					err:    err,
 				}
-			}, tickBusy(), m.refreshShellContextCmd(), m.pollShellTailCmd(), restoreMouseTrackingCmd())
+			}, tickBusy(), m.refreshShellContextCmd(), m.pollActiveExecutionCmd(), m.pollShellTailCmd(), restoreMouseTrackingCmd())
 		}
+		m.handoffResumeRetryBudget = 0
 		m.handoffReturnGraceUntil = time.Time{}
 		followUpCmds = append(followUpCmds, restoreMouseTrackingCmd())
 		return m, tea.Batch(followUpCmds...)
@@ -676,6 +700,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case activeExecutionMsg:
+		if msg.epoch != m.activeExecutionPollEpoch {
+			return m, nil
+		}
 		if msg.err != nil {
 			return m, nil
 		}
@@ -1778,6 +1805,9 @@ func (m Model) startControllerRequest(mark func(*Model), invoke func(context.Con
 	m.busy = true
 	m.busyStartedAt = time.Now()
 	m.showShellTail = followsShell
+	if followsShell {
+		m.invalidateActiveExecutionPolls()
+	}
 	if !followsShell {
 		m.liveShellTail = ""
 		m.syncActiveExecution(nil)
@@ -2005,6 +2035,7 @@ func (m Model) takeControlNow(config takeControlConfig, targetExecution bool) (t
 	if !config.enabled() {
 		return m, nil
 	}
+	m.invalidateActiveExecutionPolls()
 
 	logging.Trace(
 		"tui.take_control.start",

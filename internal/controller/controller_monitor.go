@@ -233,9 +233,16 @@ func (c *LocalController) awaitAttachedMonitor(executionID string, monitor shell
 	if strings.TrimSpace(result.Captured) != "" {
 		execution.LatestOutputTail = result.Captured
 	}
+	if strings.TrimSpace(result.DisplayCaptured) != "" {
+		execution.LatestDisplayTail = result.DisplayCaptured
+	}
 	finalOutput := finalExecutionSummaryOutput(result, execution)
+	finalDisplayOutput := finalExecutionDisplayOutput(result, execution)
 	if strings.TrimSpace(finalOutput) != "" {
 		execution.LatestOutputTail = finalOutput
+	}
+	if strings.TrimSpace(finalDisplayOutput) != "" {
+		execution.LatestDisplayTail = finalDisplayOutput
 	}
 	if result.ExitCode != 0 || result.State == shell.MonitorStateCompleted || result.State == shell.MonitorStateCanceled {
 		exitCode := result.ExitCode
@@ -258,6 +265,7 @@ func (c *LocalController) awaitAttachedMonitor(executionID string, monitor shell
 		SemanticSource: result.SemanticSource,
 		ExitCode:       result.ExitCode,
 		Summary:        finalOutput,
+		DisplaySummary: finalDisplayOutput,
 	}
 	if result.ShellContext.PromptLine() != "" {
 		contextCopy := result.ShellContext
@@ -331,6 +339,9 @@ func (c *LocalController) applyMonitorSnapshotLocked(executionID string, snapsho
 
 	if strings.TrimSpace(snapshot.LatestOutputTail) != "" {
 		execution.LatestOutputTail = snapshot.LatestOutputTail
+	}
+	if strings.TrimSpace(snapshot.LatestDisplayTail) != "" {
+		execution.LatestDisplayTail = snapshot.LatestDisplayTail
 	}
 	if strings.TrimSpace(snapshot.ForegroundCommand) != "" {
 		execution.ForegroundCommand = snapshot.ForegroundCommand

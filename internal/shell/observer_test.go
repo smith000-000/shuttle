@@ -473,6 +473,93 @@ func TestAttachForegroundCommandPromptInferencePreservesCurrentCommandOutputOnly
 	}
 }
 
+func TestAttachForegroundCommandPromptInferenceUsesRemoteForegroundCommandState(t *testing.T) {
+	client := &fakeSemanticPaneClient{
+		pane: tmux.Pane{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/32"},
+		panes: []tmux.Pane{
+			{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/32"},
+			{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/32"},
+			{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/32"},
+		},
+		captures: []string{
+			"openclaw@openclaw:~$ sleep 15",
+			"openclaw@openclaw:~$ sleep 15",
+			"openclaw@openclaw:~$",
+		},
+	}
+	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
+
+	monitor, err := observer.AttachForegroundCommand(context.Background(), "%0")
+	if err != nil {
+		t.Fatalf("AttachForegroundCommand() error = %v", err)
+	}
+	if monitor == nil {
+		t.Fatal("expected active foreground monitor")
+	}
+
+	snapshot := monitor.Snapshot()
+	if snapshot.Command != "sleep 15" {
+		t.Fatalf("expected prompt-inference command label sleep 15, got %#v", snapshot)
+	}
+	if snapshot.State != MonitorStateRunning {
+		t.Fatalf("expected prompt-inference command to start running, got %#v", snapshot)
+	}
+
+	result, err := monitor.Wait()
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if result.State != MonitorStateCompleted {
+		t.Fatalf("expected prompt-inference command to complete, got %#v", result)
+	}
+	if result.Command != "sleep 15" {
+		t.Fatalf("expected completed command label sleep 15, got %#v", result)
+	}
+}
+
+func TestAttachForegroundCommandPromptInferenceSettlesSSHWhenRemoteCommandStarts(t *testing.T) {
+	client := &fakeSemanticPaneClient{
+		pane: tmux.Pane{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/33"},
+		panes: []tmux.Pane{
+			{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/33"},
+			{ID: "%0", CurrentCommand: "ssh", TTY: "/dev/pts/33"},
+		},
+		captures: []string{
+			"openclaw@openclaw's password:",
+			"openclaw@openclaw:~$ sleep 15",
+		},
+	}
+	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
+
+	monitor, err := observer.AttachForegroundCommand(context.Background(), "%0")
+	if err != nil {
+		t.Fatalf("AttachForegroundCommand() error = %v", err)
+	}
+	if monitor == nil {
+		t.Fatal("expected active foreground monitor")
+	}
+	if snapshot := monitor.Snapshot(); snapshot.State != MonitorStateAwaitingInput {
+		t.Fatalf("expected password prompt to start awaiting input, got %#v", snapshot)
+	}
+
+	result, err := monitor.Wait()
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if result.State != MonitorStateCompleted {
+		t.Fatalf("expected ssh transport to settle once remote command starts, got %#v", result)
+	}
+	if result.Command != "ssh" {
+		t.Fatalf("expected settled transport command ssh, got %#v", result)
+	}
+	if result.Cause != CompletionCauseContextTransition {
+		t.Fatalf("expected settled transport command to report context transition cause, got %#v", result)
+	}
+	if result.ShellContext.Host != "openclaw" {
+		t.Fatalf("expected remote shell context to be preserved, got %#v", result)
+	}
+}
+
 func TestCaptureShellContextIgnoresHistoricalPromptWhileForegroundCommandActive(t *testing.T) {
 	client := &fakeSemanticPaneClient{
 		pane:    tmux.Pane{ID: "%0", CurrentCommand: "sleep", TTY: "/dev/pts/26"},
@@ -614,6 +701,7 @@ func TestRunTrackedMonitorCompletesOnPromptReturnEvenWithNonPromptSemanticState(
 		". '/run/user/1000/shuttle/commands/cmd-1.sh'",
 		250*time.Millisecond,
 		shellTestProjectPrompt(t),
+		shellTestProjectPrompt(t),
 		markers,
 		func() {},
 	)
@@ -657,6 +745,30 @@ func TestCaptureRecentOutputRecoversFromRespawnedTopPane(t *testing.T) {
 	}
 	if alias := observer.paneAlias("%0"); alias != "%2" {
 		t.Fatalf("expected respawned pane alias %%2, got %q", alias)
+	}
+}
+
+func TestCaptureRecentOutputDisplayPreservesANSI(t *testing.T) {
+	client := &fakeSemanticPaneClient{
+		capture: "red.txt",
+		escaped: "\x1b[31mred.txt\x1b[0m",
+	}
+	observer := &Observer{client: client}
+
+	display, err := observer.CaptureRecentOutputDisplay(context.Background(), "%0", 20)
+	if err != nil {
+		t.Fatalf("CaptureRecentOutputDisplay() error = %v", err)
+	}
+	if !strings.Contains(display, "\x1b[31m") {
+		t.Fatalf("expected ANSI color in display capture, got %q", display)
+	}
+
+	plain, err := observer.CaptureRecentOutput(context.Background(), "%0", 20)
+	if err != nil {
+		t.Fatalf("CaptureRecentOutput() error = %v", err)
+	}
+	if plain != "red.txt" {
+		t.Fatalf("expected stripped plain output, got %q", plain)
 	}
 }
 
