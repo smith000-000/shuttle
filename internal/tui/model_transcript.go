@@ -93,86 +93,118 @@ func (m Model) renderEntryLines(index int, entry Entry, width int) []transcriptR
 
 func (m Model) renderResultEntryLines(index int, entry Entry, width int, prefix string) []transcriptRenderLine {
 	selected := index == m.selectedEntry
-	tag := m.renderResultTag(entry, selected)
 	prefixWidth := lipgloss.Width(prefix)
-	tagStart := prefixWidth
-	tagEnd := tagStart + lipgloss.Width(tag)
-	firstLineWidth := max(10, width-prefixWidth-lipgloss.Width(tag)-1)
-	bodyWidth := max(10, width-prefixWidth)
+	blockWidth := max(10, width-prefixWidth)
+	innerWidth := max(8, blockWidth-2)
 	command := strings.TrimSpace(entry.Command)
 	if command == "" {
 		command = "(unknown command)"
 	}
 
-	commandExpandable := xansi.StringWidth(command) > m.resultCommandThreshold(width)
-	commandText := command
+	headerContent := m.renderResultTag(entry, false) + " " + command
+	commandExpandable := xansi.StringWidth(headerContent) > min(innerWidth, m.resultCommandThreshold(width))
+	commandText := headerContent
 	if commandExpandable && m.expandedCommandEntry != index {
-		commandText = xansi.Truncate(command, m.resultCommandThreshold(width), "…")
+		commandText = xansi.Truncate(headerContent, innerWidth, "…")
 	}
 
-	commandLines := wrapText(commandText, firstLineWidth)
+	commandLines := wrapText(commandText, innerWidth)
 	if len(commandLines) == 0 {
 		commandLines = []string{""}
 	}
 
-	commandStyle := lipgloss.NewStyle()
 	prefixStyle := lipgloss.NewStyle()
-	detailHintStyle := m.styles.detailMeta
 	if selected {
-		commandStyle = commandStyle.Background(lipgloss.Color(transcriptSelectedBackground))
 		prefixStyle = prefixStyle.Background(lipgloss.Color(transcriptSelectedBackground))
-		detailHintStyle = detailHintStyle.Copy().Background(lipgloss.Color(transcriptSelectedBackground))
 	}
 
-	rendered := make([]transcriptRenderLine, 0, len(commandLines)+4)
-	commandStart := tagEnd + 1
-	commandEnd := commandStart + lipgloss.Width(commandLines[0])
-	rendered = append(rendered, transcriptRenderLine{
-		text:             prefixStyle.Render(prefix) + tag + " " + commandStyle.Render(commandLines[0]),
-		entryIndex:       index,
-		tagStart:         tagStart,
-		tagEnd:           tagEnd,
-		commandStart:     commandStart,
-		commandEnd:       commandEnd,
-		commandClickable: commandExpandable,
-	})
+	type resultBoxLine struct {
+		text             string
+		style            lipgloss.Style
+		commandClickable bool
+		detailClickable  bool
+	}
 
-	bodyIndent := strings.Repeat(" ", prefixWidth)
-	for _, wrapped := range commandLines[1:] {
-		rendered = append(rendered, transcriptRenderLine{text: prefixStyle.Render(bodyIndent) + commandStyle.Render(wrapped), entryIndex: index, tagStart: -1, tagEnd: -1})
+	boxLines := make([]resultBoxLine, 0, len(commandLines)+4)
+	for lineIndex, line := range commandLines {
+		boxLines = append(boxLines, resultBoxLine{
+			text:             line,
+			style:            m.styles.resultHeader,
+			commandClickable: lineIndex == 0 && commandExpandable,
+		})
 	}
 
 	if body := strings.TrimSpace(entry.Body); body != "" {
 		for _, rawLine := range strings.Split(body, "\n") {
-			wrappedLines := wrapText(rawLine, bodyWidth)
+			wrappedLines := wrapText(rawLine, innerWidth)
 			if len(wrappedLines) == 0 {
 				wrappedLines = []string{""}
 			}
 			for _, wrapped := range wrappedLines {
-				rendered = append(rendered, transcriptRenderLine{text: prefixStyle.Render(bodyIndent) + commandStyle.Render(wrapped), entryIndex: index, tagStart: -1, tagEnd: -1})
+				boxLines = append(boxLines, resultBoxLine{text: wrapped, style: m.styles.resultOutput})
 			}
 		}
 	}
 
 	limit := m.resultDisplayLineLimit()
-	if len(rendered) <= limit {
-		return rendered
+	if len(boxLines) > limit {
+		hidden := len(boxLines) - (limit - 1)
+		boxLines = append(boxLines[:limit-1], resultBoxLine{
+			text:            fmt.Sprintf("... (%d more lines, Ctrl+O to inspect)", hidden),
+			style:           m.styles.resultOutput,
+			detailClickable: true,
+		})
 	}
 
-	hidden := len(rendered) - (limit - 1)
-	detailText := fmt.Sprintf("... (%d more lines, Ctrl+O to inspect)", hidden)
-	detailStart := lipgloss.Width(bodyIndent)
-	detailEnd := detailStart + lipgloss.Width(detailText)
-	rendered = append(rendered[:limit-1], transcriptRenderLine{
-		text:            prefixStyle.Render(bodyIndent) + detailHintStyle.Render(detailText),
-		entryIndex:      index,
-		tagStart:        -1,
-		tagEnd:          -1,
-		detailStart:     detailStart,
-		detailEnd:       detailEnd,
-		detailClickable: true,
+	rendered := make([]transcriptRenderLine, 0, len(boxLines)+1)
+	for lineIndex, line := range boxLines {
+		leftBorder := "│"
+		rightBorder := "│"
+		if lineIndex == 0 {
+			leftBorder = "┌"
+			rightBorder = "┐"
+		}
+
+		renderedLine := transcriptRenderLine{
+			text:       prefixStyle.Render(prefix) + m.styles.resultBorder.Render(leftBorder) + line.style.Render(padANSIWidth(line.text, innerWidth)) + m.styles.resultBorder.Render(rightBorder),
+			entryIndex: index,
+			tagStart:   -1,
+			tagEnd:     -1,
+		}
+		if line.commandClickable {
+			renderedLine.commandStart = prefixWidth + 1
+			renderedLine.commandEnd = renderedLine.commandStart + innerWidth
+			renderedLine.commandClickable = true
+		}
+		if line.detailClickable {
+			renderedLine.detailStart = prefixWidth + 1
+			renderedLine.detailEnd = renderedLine.detailStart + xansi.StringWidth(line.text)
+			renderedLine.detailClickable = true
+		}
+		rendered = append(rendered, renderedLine)
+	}
+
+	rendered = append(rendered, transcriptRenderLine{
+		text:       prefixStyle.Render(prefix) + m.styles.resultBorder.Render("└"+strings.Repeat("─", innerWidth)+"┘"),
+		entryIndex: index,
+		tagStart:   -1,
+		tagEnd:     -1,
 	})
 	return rendered
+}
+
+func padANSIWidth(value string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if xansi.StringWidth(value) > width {
+		return xansi.Truncate(value, width, "…")
+	}
+	padding := width - xansi.StringWidth(value)
+	if padding <= 0 {
+		return value
+	}
+	return value + strings.Repeat(" ", padding)
 }
 
 func (m Model) renderBodyStyle(entry Entry) lipgloss.Style {

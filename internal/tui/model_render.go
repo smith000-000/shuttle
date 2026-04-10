@@ -1354,7 +1354,7 @@ func helpContentLines(width int, mode Mode, canSendKeys bool) []string {
 		"Click a long shell-result command header: expand or collapse wrapped command text",
 		"Mouse wheel over transcript: scroll transcript",
 		"Click shell label in the shell-tail block: same as F2 take control",
-		"Shift-drag: use your terminal's normal text selection while Bubble Tea mouse mode is active",
+		"Text selection while mouse mode is active: iTerm2 uses Option-drag; some other terminals use Shift-drag",
 		"Ctrl+Shift+C / Ctrl+Shift+V: use your terminal copy and paste shortcuts for selected text and pasted input",
 		"",
 		"# Modes",

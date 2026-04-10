@@ -41,7 +41,7 @@ func TestF1OpensAndClosesHelpView(t *testing.T) {
 
 func TestHelpViewContainsSlashCommandsAndShortcuts(t *testing.T) {
 	view := strings.Join(helpContentLines(120, ShellMode, true), "\n")
-	for _, fragment := range []string{"/help", "/approvals", "/approvals dangerous", "/new", "/compact", "/onboard", "/provider", "/model", "/quit", "Shift-Tab", "F2", "Shift-drag", "Ctrl+Shift+C / Ctrl+Shift+V", "KEYS> Enter", "KEYS> Ctrl+Y", "KEYS> Ctrl+J"} {
+	for _, fragment := range []string{"/help", "/approvals", "/approvals dangerous", "/new", "/compact", "/onboard", "/provider", "/model", "/quit", "Shift-Tab", "F2", "Option-drag", "Shift-drag", "Ctrl+Shift+C / Ctrl+Shift+V", "KEYS> Enter", "KEYS> Ctrl+Y", "KEYS> Ctrl+J"} {
 		if !strings.Contains(view, fragment) {
 			t.Fatalf("expected help view to contain %q, got %q", fragment, view)
 		}

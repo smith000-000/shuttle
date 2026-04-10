@@ -53,6 +53,9 @@ type styles struct {
 	tagResult             lipgloss.Style
 	tagAgent              lipgloss.Style
 	tagError              lipgloss.Style
+	resultBorder          lipgloss.Style
+	resultHeader          lipgloss.Style
+	resultOutput          lipgloss.Style
 	bodySystem            lipgloss.Style
 	bodyShell             lipgloss.Style
 	bodyResult            lipgloss.Style
@@ -235,6 +238,13 @@ func newStyles() styles {
 			Background(lipgloss.Color("160")).
 			Bold(true).
 			Padding(0, 1),
+		resultBorder: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("238")),
+		resultHeader: lipgloss.NewStyle().
+			Foreground(lipgloss.Color("255")).
+			Background(lipgloss.Color("238")),
+		resultOutput: lipgloss.NewStyle().
+			Background(lipgloss.Color("0")),
 		bodySystem: lipgloss.NewStyle().
 			Foreground(lipgloss.Color("246")),
 		bodyShell: lipgloss.NewStyle().
