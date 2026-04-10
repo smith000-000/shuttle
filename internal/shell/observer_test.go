@@ -945,6 +945,33 @@ func TestPromptReturnedAfterTransitionIgnoresAwaitingInputTail(t *testing.T) {
 	}
 }
 
+func TestShouldFallbackSettleExitTransitionOnRespawnedPane(t *testing.T) {
+	observation := transitionObservation{}
+	livePane := tmux.Pane{ID: "%1", CurrentCommand: "zsh"}
+
+	if !shouldFallbackSettleExitTransition("exit", "%0", livePane, observation) {
+		t.Fatal("expected respawned pane to settle exit transition")
+	}
+}
+
+func TestShouldFallbackSettleExitTransitionOnDisconnectTail(t *testing.T) {
+	observation := transitionObservation{Delta: "logout\nConnection to openclaw closed.\n➜ shuttle git:(uitweaks)"}
+	livePane := tmux.Pane{ID: "%1", CurrentCommand: "zsh"}
+
+	if !shouldFallbackSettleExitTransition("exit", "%1", livePane, observation) {
+		t.Fatal("expected disconnect tail to settle exit transition")
+	}
+}
+
+func TestShouldFallbackSettleExitTransitionIgnoresPlainEcho(t *testing.T) {
+	observation := transitionObservation{}
+	livePane := tmux.Pane{ID: "%1", CurrentCommand: "zsh"}
+
+	if shouldFallbackSettleExitTransition("exit", "%1", livePane, observation) {
+		t.Fatal("expected plain echoed exit not to settle transition")
+	}
+}
+
 func TestPromptReturnedAfterTransitionAcceptsSamePromptWithNonInteractiveOutput(t *testing.T) {
 	before := "openclaw@openclaw ~ $"
 	baseline := PromptContext{

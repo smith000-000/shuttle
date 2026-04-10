@@ -819,6 +819,21 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, monitor *tra
 			)
 			goto probe
 		}
+		if paneInfo, paneErr := o.paneInfo(ctx, paneID); paneErr == nil {
+			if shouldFallbackSettleExitTransition(command, paneID, paneInfo, observation) {
+				promptCapture = captured
+				promptContext = observation.Candidate
+				logging.Trace(
+					"shell.context_transition.fallback_settled",
+					"pane", paneID,
+					"resolved_pane", strings.TrimSpace(paneInfo.ID),
+					"command", command,
+					"pane_command", strings.TrimSpace(paneInfo.CurrentCommand),
+					"delta_preview", logging.Preview(observation.Delta, 1200),
+				)
+				goto probe
+			}
+		}
 		if decision.NeedsVerify {
 			verifyCapture, verifyErr := o.capturePane(ctx, paneID, -200)
 			if verifyErr != nil {
@@ -1664,6 +1679,38 @@ func promptReturnedAfterTransition(beforeCapture string, baseline PromptContext,
 	}
 
 	return strings.TrimSpace(captured) != strings.TrimSpace(beforeCapture)
+}
+
+func shouldFallbackSettleExitTransition(command string, requestedPaneID string, livePane tmux.Pane, observation transitionObservation) bool {
+	fields := transitionCommandFields(command)
+	if len(fields) == 0 {
+		return false
+	}
+	switch fields[0] {
+	case "exit", "logout":
+	default:
+		return false
+	}
+	if !paneCommandIsShell(strings.TrimSpace(livePane.CurrentCommand)) {
+		return false
+	}
+	livePaneID := strings.TrimSpace(livePane.ID)
+	requestedPaneID = strings.TrimSpace(requestedPaneID)
+	if requestedPaneID != "" && livePaneID != "" && requestedPaneID != livePaneID {
+		return true
+	}
+	return transitionTailSuggestsDisconnect(observation.Delta)
+}
+
+func transitionTailSuggestsDisconnect(delta string) bool {
+	lower := strings.ToLower(strings.TrimSpace(delta))
+	if lower == "" {
+		return false
+	}
+	if strings.Contains(lower, "connection to ") && strings.Contains(lower, " closed") {
+		return true
+	}
+	return strings.Contains(lower, "logout")
 }
 
 func promptContextsMateriallyDiffer(left PromptContext, right PromptContext) bool {
