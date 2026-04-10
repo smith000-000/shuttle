@@ -91,6 +91,8 @@ Shuttle now has a usable first pass of the redesigned execution stack on `main`:
 - transcript result entries now reflect exit status instead of always presenting a green success result
 - transcript and active-execution views now preserve ANSI-colored shell output for display while keeping sanitized plain-text summaries for controller state and prompt reconciliation
 - prompt-inference transport commands such as `ssh` now distinguish the outer transport from the inner remote command, surface auth waits as `awaiting_input`, and settle more reliably after `F2` return
+- tracked-shell recovery now rewrites any live user-shell execution to the new pane target when tmux respawns the tracked shell, instead of leaving active execution state bound to a dead pane ID
+- `exit` / `logout` transitions now have fallback settlement when Shuttle can see either a disconnect tail or a respawned tracked shell even if the prompt parser never produces one final clean trailing prompt line
 
 What is still not done:
 - fullscreen/interactive detection still needs stronger terminal-behavior signals beyond current tmux metadata heuristics
@@ -100,6 +102,11 @@ What is still not done:
 - `internal/controller/controller.go` and `internal/tui/model.go` are now large enough that further point fixes should come with a decomposition backlog:
   - controller: execution lifecycle/state machine, agent-turn normalization, plan management, and tracked-shell ownership helpers
   - TUI: composer/input routing, transcript rendering, proposal/approval state, and handoff/fullscreen control
+- the recent shell hardening has accumulated enough special-case settlement and recovery logic that a dedicated architecture review is now warranted before adding more shell-tracking behavior:
+  - exit/logout transition settlement
+  - tracked-pane migration into active executions
+  - prompt-return fallback rules across local and remote flows
+  - controller/TUI ownership boundaries during `F2`/`F3` reconciliation
 
 Recent direction change that is now the baseline on `main`:
 - keep one persistent user shell pane as the continuity surface for cwd, `$>`, and recent manual shell history
@@ -118,6 +125,7 @@ For this branch, the better direction is:
 - keep the current hybrid shell model stable
 - clean up transcript/UI noise around results, plans, and handoff
 - split the large controller/TUI files before layering more behavior onto them
+- do an explicit architecture review of the shell-tracking and handoff stack before another recovery-oriented behavior slice
 - defer multi-card / parallel execution work to a later branch
 
 Semantic-shell expansion remains valuable, but it is no longer the immediate blocker for normal serial use. When that work resumes, it should still stay standards-based:

@@ -90,6 +90,10 @@ Current implementation note:
 - context-transition polling now routes through a dedicated transition tracker state machine with states such as `submitted`, `candidate_prompt_seen`, `awaiting_interactive_input`, and `probe_verifying`
 - this is intended as an internal cleanup seam so later remote-shell reliability work can replace scattered boolean checks without redesigning the shell product model again
 - when a post-transition probe succeeds, its `PWD` becomes the authoritative tracked cwd; when it fails after a remote transition, Shuttle keeps the remote identity but downgrades cwd confidence instead of overclaiming certainty
+- `exit` / `logout` transitions now have a bounded fallback settle path when prompt parsing does not conclusively finish but Shuttle can still see that the tracked shell has recovered:
+  - the tracked pane respawned and the resolved pane is back in a shell
+  - or the tail clearly shows a disconnect/unwind sequence such as `logout` or `Connection to ... closed.`
+- that fallback exists because tmux respawn and remote transport teardown can return Shuttle to a healthy shell without always leaving a fresh parseable trailing prompt in the capture window
 
 ## 2.3 Semantic Collectors
 
@@ -159,6 +163,7 @@ Current rule:
 - `CommandExecution.LatestOutputTail` is the sanitized control tail; `LatestDisplayTail` is the display-oriented tail that may retain ANSI styling
 - owned execution results do not overwrite persistent user-shell cwd or prompt context
 - controller and provider policy should key remote-sensitive decisions from `CurrentShellLocation`, not from `PromptContext.Remote`
+- if the tracked shell pane ID changes during recovery or local-shell respawn, the controller must migrate any live user-shell execution that was bound to the old pane so active execution state and handoff targets continue to follow the real tracked shell
 
 ## 2.5 TUI and Handoff
 
@@ -197,6 +202,7 @@ Current fallback ladder:
 - use the controller's currently tracked execution when one exists
 - on `F2` return, reconcile prompt state against the controller-selected take-control target for the active execution
 - when the post-handoff prompt text is not parseable, handoff reconciliation may still settle from observed shell-wrapper state plus semantic exit metadata or explicit interrupt evidence such as `^C`
+- for `exit` / `logout`, reconciliation may also settle from tracked-pane respawn or disconnect-tail evidence before waiting forever on a fresh prompt parse
 - if no execution reconciles, ask the controller to attach to a manually started foreground command
 - if neither applies, treat the shell as having no active tracked command
 
