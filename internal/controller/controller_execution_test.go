@@ -148,6 +148,43 @@ func TestLocalControllerSubmitShellCommandReturnsTrackedShellChangeNotice(t *tes
 	}
 }
 
+func TestLocalControllerSyncTrackedShellTargetUpdatesTrackedExecutionTarget(t *testing.T) {
+	reader := &stubContextReader{resolvedPaneID: "%5"}
+	controller := New(nil, nil, reader, SessionContext{
+		SessionName:  "shuttle-test",
+		TrackedShell: TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
+	})
+	setPrimaryExecutionForTest(controller, CommandExecution{
+		ID:        "cmd-1",
+		Command:   "exit",
+		Origin:    CommandOriginUserShell,
+		State:     CommandExecutionRunning,
+		StartedAt: time.Now(),
+		TrackedShell: TrackedShellTarget{
+			SessionName: "shuttle-test",
+			PaneID:      "%0",
+		},
+	})
+
+	updated, notice := controller.syncTrackedShellTargetWithNotice(context.Background())
+	if updated.PaneID != "%5" {
+		t.Fatalf("expected tracked shell pane %%5, got %#v", updated)
+	}
+	if notice == nil {
+		t.Fatal("expected tracked-shell change notice")
+	}
+	active := controller.ActiveExecution()
+	if active == nil {
+		t.Fatal("expected active execution to remain present")
+	}
+	if active.TrackedShell.PaneID != "%5" {
+		t.Fatalf("expected active execution pane %%5 after tracked-shell move, got %#v", active.TrackedShell)
+	}
+	if target := controller.TakeControlTarget(); target.PaneID != "%5" {
+		t.Fatalf("expected take-control target pane %%5 after tracked-shell move, got %#v", target)
+	}
+}
+
 func TestNewNormalizesTrackedShellTargetFromSessionContext(t *testing.T) {
 	controller := New(nil, nil, nil, SessionContext{
 		SessionName: " shuttle-test ",

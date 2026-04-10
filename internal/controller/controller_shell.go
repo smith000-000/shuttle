@@ -404,6 +404,7 @@ func (c *LocalController) syncTrackedShellTargetWithNotice(ctx context.Context) 
 	c.session.TrackedShell.PaneID = resolved
 	c.session = normalizeSessionContext(c.session)
 	updated := c.session.TrackedShell
+	c.syncTrackedShellExecutionsLocked(previous, updated)
 	var notice *TranscriptEvent
 	if previous.PaneID != updated.PaneID || previous.SessionName != updated.SessionName {
 		event := c.newEvent(EventSystemNotice, TextPayload{Text: trackedShellChangeNotice(previous, updated)})
@@ -422,6 +423,27 @@ func (c *LocalController) syncTrackedShellTargetWithNotice(ctx context.Context) 
 	}
 
 	return updated, notice
+}
+
+func (c *LocalController) syncTrackedShellExecutionsLocked(previous TrackedShellTarget, updated TrackedShellTarget) {
+	if sameTrackedShellTarget(previous, updated) || len(c.executions) == 0 {
+		return
+	}
+
+	changed := false
+	for _, execution := range c.executions {
+		if execution == nil {
+			continue
+		}
+		if !sameTrackedShellTarget(executionTarget(execution, previous), previous) {
+			continue
+		}
+		execution.TrackedShell = updated
+		changed = true
+	}
+	if changed {
+		c.syncTaskExecutionViewsLocked()
+	}
 }
 
 func trackedShellChangeNotice(previous TrackedShellTarget, current TrackedShellTarget) string {
