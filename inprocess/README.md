@@ -2,7 +2,7 @@
 
 Shuttle is a tmux-backed AI terminal assistant.
 
-It runs a persistent real shell in the top tmux pane and a Bubble Tea TUI in the bottom pane. Agent-approved commands can also run in owned tmux execution panes for local work. The persistent shell remains the continuity surface for shell-command input, cwd, recent manual shell activity, and remote SSH continuity, while `F2` can temporarily hand off into an owned execution pane when that pane is where the active command is actually running.
+It runs a persistent real shell in the top tmux pane and a Bubble Tea TUI in the bottom pane. Agent-approved commands can also run in owned tmux execution panes for local work. The persistent shell remains the continuity surface for shell-command input, cwd, recent manual shell activity, and remote SSH continuity. `F2` always hands control to that persistent tracked shell, while `F3` targets a separate owned execution pane when Shuttle is actively running a command there.
 
 ## Status
 

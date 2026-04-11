@@ -102,7 +102,7 @@ What is still not done:
 - `internal/controller/controller.go` and `internal/tui/model.go` are now large enough that further point fixes should come with a decomposition backlog:
   - controller: execution lifecycle/state machine, agent-turn normalization, plan management, and tracked-shell ownership helpers
   - TUI: composer/input routing, transcript rendering, proposal/approval state, and handoff/fullscreen control
-- the recent shell hardening has accumulated enough special-case settlement and recovery logic that a dedicated architecture review is now warranted before adding more shell-tracking behavior:
+- the recent shell hardening did require an architecture review before more behavior was added, and that review has already driven a first cleanup pass across:
   - exit/logout transition settlement
   - tracked-pane migration into active executions
   - prompt-return fallback rules across local and remote flows
@@ -110,7 +110,7 @@ What is still not done:
 
 Recent direction change that is now the baseline on `main`:
 - keep one persistent user shell pane as the continuity surface for cwd, `$>`, and recent manual shell history
-- let `F2` normally target that persistent shell, but temporarily follow the active owned execution pane whenever that pane is where the command is really running
+- keep `F2` permanently bound to that persistent tracked shell and use `F3` for a separate active owned execution pane when one exists
 - run approved agent shell commands in owned tmux execution panes by default
 - exception: when the tracked user shell is remote, keep agent shell execution in that tracked remote shell instead of opening a local owned pane
 - feed the agent structured recent manual commands/actions plus full command results, instead of forcing both concerns through one shared pane

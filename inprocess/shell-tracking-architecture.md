@@ -20,7 +20,7 @@ The persistent user shell target is:
 
 Current design rule:
 - the persistent tracked shell is the continuity surface for `$>`, cwd, recent manual commands, and recent manual file-affecting actions
-- `F2` normally targets that persistent shell, but temporarily targets the active owned execution pane whenever the current command is running there
+- `F2` always targets that persistent tracked shell; `F3` targets a separate active owned execution pane when one exists
 - approved agent commands no longer need to run inside that persistent shell pane
 - agent-approved commands can run in detached owned tmux panes and are tracked through their own `CommandExecution.TrackedShell`
 - the TUI is not the source of truth for either target
