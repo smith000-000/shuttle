@@ -339,12 +339,44 @@ type metadataRuntime struct {
 	meta     RuntimeMetadata
 }
 
+type piRuntime struct {
+	metadataRuntime
+}
+
+type codexSDKRuntime struct {
+	metadataRuntime
+}
+
+func NewSelectedRuntime(meta RuntimeMetadata) Runtime {
+	meta.Type = normalizeRuntimeSelection(meta.Type)
+	if meta.Type == "" {
+		meta.Type = RuntimeBuiltin
+	}
+	switch meta.Type {
+	case RuntimeBuiltin:
+		return NewBuiltin()
+	case RuntimePi:
+		return piRuntime{metadataRuntime{delegate: NewBuiltin(), meta: meta}}
+	case RuntimeCodexSDK:
+		return codexSDKRuntime{metadataRuntime{delegate: NewBuiltin(), meta: meta}}
+	default:
+		return metadataRuntime{delegate: NewBuiltin(), meta: meta}
+	}
+}
+
 func WrapRuntime(delegate Runtime, meta RuntimeMetadata) Runtime {
 	meta.Type = normalizeRuntimeSelection(meta.Type)
 	if meta.Type == "" || meta.Type == RuntimeBuiltin {
 		return delegate
 	}
-	return metadataRuntime{delegate: delegate, meta: meta}
+	switch meta.Type {
+	case RuntimePi:
+		return piRuntime{metadataRuntime{delegate: delegate, meta: meta}}
+	case RuntimeCodexSDK:
+		return codexSDKRuntime{metadataRuntime{delegate: delegate, meta: meta}}
+	default:
+		return metadataRuntime{delegate: delegate, meta: meta}
+	}
 }
 
 func (m metadataRuntime) Handle(ctx context.Context, host Host, req Request) (Outcome, error) {

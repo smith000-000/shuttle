@@ -118,6 +118,7 @@ type fakeController struct {
 	sessionName              string
 	trackedPaneID            string
 	contextUsage             controller.ContextWindowUsage
+	executionOverview        *controller.ExecutionOverview
 	approvalMode             controller.ApprovalMode
 	refreshedShellContext    *shell.PromptContext
 	refreshShellContextErr   error
@@ -378,6 +379,39 @@ func (f *fakeController) ActiveExecution() *controller.CommandExecution {
 	}
 	execution := *f.activeExecution
 	return &execution
+}
+
+func (f *fakeController) ExecutionOverview() controller.ExecutionOverview {
+	if f.executionOverview != nil {
+		copyOverview := *f.executionOverview
+		if f.executionOverview.ActiveExecution != nil {
+			executionCopy := *f.executionOverview.ActiveExecution
+			copyOverview.ActiveExecution = &executionCopy
+		}
+		return copyOverview
+	}
+	overview := controller.ExecutionOverview{TrackedShell: f.TrackedShellTarget()}
+	if f.activeExecution == nil {
+		return overview
+	}
+	execution := *f.activeExecution
+	active := controller.ActiveExecutionOverview{
+		ID:               execution.ID,
+		Command:          execution.Command,
+		Origin:           execution.Origin,
+		State:            execution.State,
+		StartedAt:        execution.StartedAt,
+		UsesTrackedShell: strings.TrimSpace(execution.TrackedShell.PaneID) == "" || strings.TrimSpace(execution.TrackedShell.PaneID) == strings.TrimSpace(overview.TrackedShell.PaneID),
+	}
+	if !active.UsesTrackedShell {
+		sessionName := strings.TrimSpace(execution.TrackedShell.SessionName)
+		if sessionName == "" {
+			sessionName = strings.TrimSpace(overview.TrackedShell.SessionName)
+		}
+		active.ExecutionTakeControlTarget = controller.TrackedShellTarget{SessionName: sessionName, PaneID: strings.TrimSpace(execution.TrackedShell.PaneID)}
+	}
+	overview.ActiveExecution = &active
+	return overview
 }
 
 func (f *fakeController) RefreshActiveExecution(_ context.Context) ([]controller.TranscriptEvent, *controller.CommandExecution, error) {

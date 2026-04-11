@@ -185,6 +185,9 @@ func Parse(args []string) (Config, error) {
 	if !isValidTraceMode(cfg.TraceMode) {
 		return Config{}, errors.New("trace mode must be one of: off, safe, sensitive")
 	}
+	if err := validateTraceConfig(cfg.TraceMode, cfg.TraceConsent); err != nil {
+		return Config{}, err
+	}
 	cfg.ProviderType = normalizeProviderType(cfg.ProviderType)
 	cfg.RuntimeType = normalizeRuntimeType(cfg.RuntimeType)
 	authMethod, err := normalizeProviderAuthMethod(cfg.ProviderAuthMethod)
@@ -300,6 +303,13 @@ func resolveTraceMode(traceValue string, traceModeValue string) (TraceMode, erro
 	default:
 		return TraceModeOff, fmt.Errorf("SHUTTLE_TRACE must be boolean, off, safe, or sensitive")
 	}
+}
+
+func validateTraceConfig(mode TraceMode, consent bool) error {
+	if mode == TraceModeSensitive && !consent {
+		return errors.New("sensitive trace captures raw commands, terminal output, key input, prompts, and provider payloads; re-run with --trace-consent or set SHUTTLE_TRACE_CONSENT=true to acknowledge the risk")
+	}
+	return nil
 }
 
 func isValidTraceMode(mode TraceMode) bool {

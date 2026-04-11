@@ -74,36 +74,18 @@ func BuildOnboardingCandidates(stateDir string) ([]OnboardingCandidate, error) {
 func DetectOnboardingCandidates() ([]OnboardingCandidate, error) {
 	candidates := make([]OnboardingCandidate, 0, 4)
 
-	openAICandidate, ok, err := detectResponsesCandidate(PresetOpenAI, "OPENAI_API_KEY")
-	if err != nil {
-		return nil, err
-	}
-	if ok {
-		candidates = append(candidates, openAICandidate)
-	}
-
-	openRouterCandidate, ok, err := detectResponsesCandidate(PresetOpenRouter, "OPENROUTER_API_KEY")
-	if err != nil {
-		return nil, err
-	}
-	if ok {
-		candidates = append(candidates, openRouterCandidate)
-	}
-
-	openWebUICandidate, ok, err := detectResponsesCandidate(PresetOpenWebUI, "OPENWEBUI_API_KEY")
-	if err != nil {
-		return nil, err
-	}
-	if ok {
-		candidates = append(candidates, openWebUICandidate)
-	}
-
-	anthropicCandidate, ok, err := detectResponsesCandidate(PresetAnthropic, "ANTHROPIC_API_KEY")
-	if err != nil {
-		return nil, err
-	}
-	if ok {
-		candidates = append(candidates, anthropicCandidate)
+	for _, preset := range OrderedProviderPresets() {
+		descriptor := DescriptorForPreset(preset)
+		if len(descriptor.DetectedAPIKeyEnvVars) == 0 {
+			continue
+		}
+		candidate, ok, err := detectResponsesCandidate(preset, descriptor.DetectedAPIKeyEnvVars...)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			candidates = append(candidates, candidate)
+		}
 	}
 
 	ollamaCandidate, ok, err := detectOllamaCandidate()
@@ -141,9 +123,9 @@ func DetectOnboardingCandidates() ([]OnboardingCandidate, error) {
 	}
 
 	preset := normalizePreset(os.Getenv("SHUTTLE_PROVIDER"))
-	switch preset {
-	case PresetOpenRouter, PresetAnthropic, PresetCustom:
-	default:
+	if preset == PresetCustom {
+		// Keep explicit custom fallback when a base URL is provided below.
+	} else if !DescriptorForPreset(preset).AllowGenericAPIKeyFallback {
 		preset = PresetOpenAI
 	}
 
@@ -171,8 +153,8 @@ func DetectOnboardingCandidates() ([]OnboardingCandidate, error) {
 	}}, nil
 }
 
-func detectResponsesCandidate(preset ProviderPreset, specificEnvVar string) (OnboardingCandidate, bool, error) {
-	apiKey, apiKeySource := firstSetEnv(specificEnvVar)
+func detectResponsesCandidate(preset ProviderPreset, envVars ...string) (OnboardingCandidate, bool, error) {
+	apiKey, apiKeySource := firstSetEnv(envVars...)
 	if apiKey == "" {
 		return OnboardingCandidate{}, false, nil
 	}
@@ -322,42 +304,13 @@ func loadStoredOnboardingCandidates(stateDir string) ([]OnboardingCandidate, Pro
 }
 
 func manualOnboardingCandidates() []OnboardingCandidate {
-	profiles := []Profile{
-		resolveResponsesProfile(config.Config{
-			ProviderType:       string(PresetOpenAI),
-			ProviderAuthMethod: "api_key",
-		}, responsesPresetDefaults(PresetOpenAI)),
-		resolveResponsesProfile(config.Config{
-			ProviderType:       string(PresetOpenRouter),
-			ProviderAuthMethod: "api_key",
-		}, responsesPresetDefaults(PresetOpenRouter)),
-		resolveResponsesProfile(config.Config{
-			ProviderType:       string(PresetOpenWebUI),
-			ProviderAuthMethod: "api_key",
-		}, responsesPresetDefaults(PresetOpenWebUI)),
-		resolveAnthropicProfile(config.Config{
-			ProviderType:       string(PresetAnthropic),
-			ProviderAuthMethod: "api_key",
-		}),
-		resolveCodexCLIProfile(config.Config{
-			ProviderType:       string(PresetCodexCLI),
-			ProviderAuthMethod: "codex_login",
-		}),
-	}
-
-	if ollamaProfile, err := resolveOllamaProfile(config.Config{
-		ProviderType:       string(PresetOllama),
-		ProviderAuthMethod: "none",
-	}); err == nil {
-		profiles = append(profiles, ollamaProfile)
-	}
-
-	if customProfile, err := ResolveProfile(config.Config{
-		ProviderType:       string(PresetCustom),
-		ProviderAuthMethod: "none",
-		ProviderBaseURL:    "https://api.example.com/v1",
-	}); err == nil {
-		profiles = append(profiles, customProfile)
+	profiles := make([]Profile, 0, len(OrderedProviderPresets()))
+	for _, preset := range OrderedProviderPresets() {
+		profile, ok := ManualOnboardingProfile(preset)
+		if !ok {
+			continue
+		}
+		profiles = append(profiles, profile)
 	}
 
 	candidates := make([]OnboardingCandidate, 0, len(profiles))
@@ -430,36 +383,15 @@ func sortOnboardingCandidates(candidates []OnboardingCandidate) {
 
 func onboardingCandidateRank(candidate OnboardingCandidate) int {
 	if candidate.Manual || candidate.Source == OnboardingCandidateManual {
-		return 1000 + onboardingPresetRank(candidate.Profile.Preset)
+		return 1000 + OnboardingPresetRank(candidate.Profile.Preset)
 	}
 
 	switch candidate.Source {
 	case OnboardingCandidateDetected:
-		return onboardingPresetRank(candidate.Profile.Preset)
+		return OnboardingPresetRank(candidate.Profile.Preset)
 	case OnboardingCandidateStored:
-		return 500 + onboardingPresetRank(candidate.Profile.Preset)
+		return 500 + OnboardingPresetRank(candidate.Profile.Preset)
 	default:
-		return 800 + onboardingPresetRank(candidate.Profile.Preset)
-	}
-}
-
-func onboardingPresetRank(preset ProviderPreset) int {
-	switch preset {
-	case PresetCodexCLI:
-		return 0
-	case PresetOpenAI:
-		return 10
-	case PresetOpenRouter:
-		return 20
-	case PresetAnthropic:
-		return 30
-	case PresetOpenWebUI:
-		return 40
-	case PresetOllama:
-		return 50
-	case PresetCustom:
-		return 90
-	default:
-		return 200
+		return 800 + OnboardingPresetRank(candidate.Profile.Preset)
 	}
 }

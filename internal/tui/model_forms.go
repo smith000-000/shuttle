@@ -945,54 +945,35 @@ func applyProviderFormVisibility(form *onboardingFormState) {
 
 func buildOnboardingForm(choice provider.OnboardingCandidate) onboardingFormState {
 	profile := choice.Profile
+	descriptor := provider.DescriptorForPreset(profile.Preset)
 	form := onboardingFormState{
 		title:   "Configure " + profile.Name,
 		intro:   "Enter the provider settings to save and activate.",
 		profile: profile,
 	}
-
-	switch profile.Preset {
-	case provider.PresetOpenAI, provider.PresetOpenRouter:
-		form.fields = []onboardingField{
-			{key: "base_url", label: "Base URL", value: profile.BaseURL, required: true},
-			{key: "model", label: "Model", value: profile.Model, required: true},
-			providerThinkingField(profile),
-			providerReasoningEffortField(profile),
-			providerAPIKeyField(profile, true),
+	if strings.TrimSpace(descriptor.OnboardingIntro) != "" {
+		form.intro = descriptor.OnboardingIntro
+	}
+	form.fields = make([]onboardingField, 0, len(descriptor.OnboardingFields))
+	for _, fieldKind := range descriptor.OnboardingFields {
+		switch fieldKind {
+		case provider.OnboardingFieldBaseURL:
+			form.fields = append(form.fields, onboardingField{key: "base_url", label: "Base URL", value: profile.BaseURL, required: true})
+		case provider.OnboardingFieldModel:
+			required, placeholder := provider.ModelFieldConfig(profile.Preset)
+			field := onboardingField{key: "model", label: "Model", value: profile.Model, required: required, placeholder: placeholder}
+			form.fields = append(form.fields, field)
+		case provider.OnboardingFieldThinking:
+			form.fields = append(form.fields, providerThinkingField(profile))
+		case provider.OnboardingFieldReasoningEffort:
+			form.fields = append(form.fields, providerReasoningEffortField(profile))
+		case provider.OnboardingFieldAPIKey:
+			form.fields = append(form.fields, providerAPIKeyField(profile, descriptor.RequiredAPIKeyByDefault))
+		case provider.OnboardingFieldCLICommand:
+			form.fields = append(form.fields, onboardingField{key: "cli_command", label: "CLI Command", value: profile.CLICommand, required: true})
 		}
-	case provider.PresetAnthropic:
-		form.fields = []onboardingField{
-			{key: "base_url", label: "Base URL", value: profile.BaseURL, required: true},
-			{key: "model", label: "Model", value: profile.Model, required: true},
-			providerThinkingField(profile),
-			providerAPIKeyField(profile, true),
-		}
-	case provider.PresetOpenWebUI:
-		form.fields = []onboardingField{
-			{key: "base_url", label: "Base URL", value: profile.BaseURL, required: true},
-			{key: "model", label: "Model", value: profile.Model, required: true},
-			providerAPIKeyField(profile, false),
-		}
-	case provider.PresetOllama:
-		form.fields = []onboardingField{
-			{key: "base_url", label: "Base URL", value: profile.BaseURL, required: true},
-			{key: "model", label: "Model", value: profile.Model, required: true},
-			providerThinkingField(profile),
-			providerAPIKeyField(profile, false),
-		}
-	case provider.PresetCustom:
-		form.fields = []onboardingField{
-			{key: "base_url", label: "Base URL", value: profile.BaseURL, required: true},
-			{key: "model", label: "Model", value: profile.Model, required: true},
-			providerAPIKeyField(profile, false),
-		}
-	case provider.PresetCodexCLI:
-		form.fields = []onboardingField{
-			{key: "cli_command", label: "CLI Command", value: profile.CLICommand, required: true},
-			{key: "model", label: "Model", value: profile.Model, placeholder: "optional"},
-		}
-		form.intro = "Use an installed Codex CLI and the existing local login."
-	default:
+	}
+	if len(form.fields) == 0 {
 		form.fields = []onboardingField{{key: "model", label: "Model", value: profile.Model}}
 	}
 
@@ -1071,23 +1052,5 @@ func providerAPIKeyField(profile provider.Profile, required bool) onboardingFiel
 }
 
 func onboardingAuthMethod(preset provider.ProviderPreset, apiKey string, existing provider.Profile) string {
-	switch preset {
-	case provider.PresetOllama, provider.PresetCustom:
-		if strings.TrimSpace(apiKey) == "" {
-			if existing.AuthMethod == provider.AuthAPIKey {
-				return "api_key"
-			}
-			return "none"
-		}
-		return "api_key"
-	case provider.PresetOpenWebUI:
-		if strings.TrimSpace(apiKey) == "" && existing.AuthMethod != provider.AuthAPIKey {
-			return "none"
-		}
-		return "api_key"
-	case provider.PresetCodexCLI:
-		return "codex_login"
-	default:
-		return "api_key"
-	}
+	return string(provider.ResolveOnboardingAuthMethod(preset, apiKey, existing))
 }

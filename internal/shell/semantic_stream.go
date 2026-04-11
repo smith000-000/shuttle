@@ -146,7 +146,10 @@ func newSemanticStreamGenerationID() string {
 }
 
 func (c *streamSemanticCollector) cleanupStaleGenerations() error {
-	root := filepath.Join(c.stateDir, "semantic-stream")
+	return pruneStaleSemanticStreamGenerations(filepath.Join(c.stateDir, "semantic-stream"), c.generationID)
+}
+
+func pruneStaleSemanticStreamGenerations(root string, keepGeneration string) error {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -160,7 +163,7 @@ func (c *streamSemanticCollector) cleanupStaleGenerations() error {
 			continue
 		}
 		generationID := strings.TrimSpace(entry.Name())
-		if generationID == "" || generationID == c.generationID {
+		if generationID == "" || generationID == keepGeneration {
 			continue
 		}
 		if !shouldPruneSemanticStreamGeneration(generationID) {

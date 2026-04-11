@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -28,6 +30,10 @@ const (
 type App struct {
 	cfg    config.Config
 	logger *slog.Logger
+}
+
+type runtimeSocketProbe interface {
+	ListAllPanes(context.Context) ([]tmux.Pane, error)
 }
 
 type Result struct {
@@ -85,6 +91,14 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	if err != nil {
 		logging.TraceError("app.tmux_client.error", err, "socket", socketTarget)
 		return Result{}, err
+	}
+	if err := cleanupStaleManagedSocket(ctx, socketTarget, client); err != nil {
+		logging.TraceError("app.runtime_socket_cleanup.error", err, "socket", socketTarget)
+		return Result{}, fmt.Errorf("cleanup stale managed socket: %w", err)
+	}
+	if err := shell.PrepareRuntimeArtifacts(ctx, a.cfg.RuntimeDir, client); err != nil {
+		logging.TraceError("app.runtime_cleanup.error", err, "runtime_dir", a.cfg.RuntimeDir)
+		return Result{}, fmt.Errorf("prepare runtime artifacts: %w", err)
 	}
 
 	workspace, created, err := tmux.BootstrapWorkspace(
@@ -253,8 +267,8 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 				return provider.CheckHealth(ctx, profile, provider.FactoryOptions{})
 			})
 		program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
-		_, runErr := program.Run()
-		cleanupErr := cleanupTUISession(a.cfg, created, client, workspace.SessionName)
+		finalModel, runErr := program.Run()
+		cleanupErr := cleanupTUISession(a.cfg, created, client, resolveCleanupSessionName(finalModel, workspace.SessionName))
 		if runErr != nil {
 			logging.TraceError("app.tui.error", runErr, "session", workspace.SessionName)
 			if cleanupErr != nil {
@@ -338,9 +352,10 @@ func providerLogAuthSource(profile provider.Profile) string {
 }
 
 func buildConfiguredRuntime(cfg config.Config, profile provider.Profile) agentruntime.Runtime {
-	return agentruntime.WrapRuntime(agentruntime.NewBuiltin(), agentruntime.RuntimeMetadata{
-		Type:           cfg.RuntimeType,
-		Command:        cfg.RuntimeCommand,
+	resolved := provider.ResolveRuntimeSelection(cfg.RuntimeType, cfg.RuntimeCommand)
+	return agentruntime.NewSelectedRuntime(agentruntime.RuntimeMetadata{
+		Type:           resolved.SelectedType,
+		Command:        resolved.Command,
 		ProviderPreset: string(profile.Preset),
 		Model:          strings.TrimSpace(profile.Model),
 	})
@@ -354,6 +369,46 @@ func initialPromptContext(ctx context.Context, observer *shell.Observer, paneID 
 	}
 
 	return shell.GuessLocalContext(startDir)
+}
+
+type cleanupSessionNameProvider interface {
+	CleanupSessionName() string
+}
+
+func resolveCleanupSessionName(model tea.Model, fallback string) string {
+	fallback = strings.TrimSpace(fallback)
+	provider, ok := model.(cleanupSessionNameProvider)
+	if !ok || provider == nil {
+		return fallback
+	}
+	if sessionName := strings.TrimSpace(provider.CleanupSessionName()); sessionName != "" {
+		return sessionName
+	}
+	return fallback
+}
+
+func cleanupStaleManagedSocket(ctx context.Context, socketTarget string, probe runtimeSocketProbe) error {
+	socketTarget = strings.TrimSpace(socketTarget)
+	if probe == nil || socketTarget == "" || !filepath.IsAbs(socketTarget) {
+		return nil
+	}
+	info, err := os.Lstat(socketTarget)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if info.IsDir() {
+		return nil
+	}
+	if _, err := probe.ListAllPanes(ctx); err == nil || !shell.RuntimeServerUnavailable(err) {
+		return nil
+	}
+	if err := os.Remove(socketTarget); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func initialShellContextPtr(promptContext shell.PromptContext) *shell.PromptContext {

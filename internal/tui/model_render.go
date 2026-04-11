@@ -24,7 +24,11 @@ const (
 )
 
 func canExecutionTakeControl(m Model) bool {
-	return m.executionTakeControlConfig().enabled()
+	overview := m.currentExecutionOverview()
+	if overview.ActiveExecution == nil {
+		return false
+	}
+	return strings.TrimSpace(overview.ActiveExecution.ExecutionTakeControlTarget.PaneID) != ""
 }
 
 func interactiveTakeControlHint(hasExecutionTarget bool) string {
@@ -502,7 +506,7 @@ func (m Model) renderActiveExecutionCard(width int) string {
 	if m.activeExecution == nil {
 		return ""
 	}
-
+	overview := m.currentExecutionOverview()
 	body := []string{
 		fmt.Sprintf("state: %s", humanizeExecutionState(m.activeExecution.State)),
 		fmt.Sprintf("origin: %s", humanizeExecutionOrigin(m.activeExecution.Origin)),
@@ -511,6 +515,11 @@ func (m Model) renderActiveExecutionCard(width int) string {
 	}
 	usesTrackedShell := m.activeExecutionUsesTrackedShell()
 	takeControlTargetsExecution := m.takeControlTargetsActiveExecution()
+	if overview.ActiveExecution != nil && !usesTrackedShell {
+		body = append(body, "surface: owned execution pane")
+	} else {
+		body = append(body, "surface: tracked shell")
+	}
 	if m.activeExecution.State == controller.CommandExecutionInteractiveFullscreen {
 		body = append(body, "Fullscreen terminal app detected.")
 		if strings.TrimSpace(m.lastFullscreenKeys) != "" {
@@ -521,11 +530,11 @@ func (m Model) renderActiveExecutionCard(width int) string {
 			if usesTrackedShell {
 				body = append(body, "Exit or control the fullscreen app manually from the shell view with F2.")
 			} else {
-				body = append(body, "Temporary Shuttle execution pane. It closes when the command finishes.")
+				body = append(body, "Temporary Shuttle execution pane. F2 still targets the persistent shell; F3 takes control of the command pane.")
 			}
 		} else {
 			body = append(body, "S send keys")
-			body = append(body, "This command is running in an owned execution pane. F3 takes control of that pane.")
+			body = append(body, "This command is running in an owned execution pane. F2 still targets the persistent shell; F3 takes control of the command pane.")
 		}
 	} else if displayTail := strings.TrimSpace(executionDisplayTail(m.activeExecution)); displayTail != "" {
 		lines := strings.Split(displayTail, "\n")
@@ -540,28 +549,28 @@ func (m Model) renderActiveExecutionCard(width int) string {
 			if takeControlTargetsExecution || usesTrackedShell {
 				body = append(body, activeExecutionTakeControlAffordance(takeControlTargetsExecution, canExecutionTakeControl(m))+"  S send keys")
 				if takeControlTargetsExecution && !usesTrackedShell {
-					body = append(body, "Temporary Shuttle execution pane. It closes when the command finishes.")
+					body = append(body, "Temporary Shuttle execution pane. F2 still targets the persistent shell; F3 takes control of the command pane.")
 				}
 			} else {
 				body = append(body, "S send keys")
-				body = append(body, "This command is running in an owned execution pane. F3 takes control of that pane.")
+				body = append(body, "This command is running in an owned execution pane. F2 still targets the persistent shell; F3 takes control of the command pane.")
 			}
 		} else if takeControlTargetsExecution || usesTrackedShell {
 			body = append(body, activeExecutionTakeControlAffordance(takeControlTargetsExecution, canExecutionTakeControl(m)))
 			if takeControlTargetsExecution && !usesTrackedShell {
-				body = append(body, "Temporary Shuttle execution pane. It closes when the command finishes.")
+				body = append(body, "Temporary Shuttle execution pane. F2 still targets the persistent shell; F3 takes control of the command pane.")
 			}
 		} else {
-			body = append(body, "Running in owned execution pane. F3 takes control of that pane.")
+			body = append(body, "Running in an owned execution pane. F2 still targets the persistent shell; F3 takes control of the command pane.")
 		}
 	} else {
 		if takeControlTargetsExecution || usesTrackedShell {
 			body = append(body, activeExecutionTakeControlAffordance(takeControlTargetsExecution, canExecutionTakeControl(m)))
 			if takeControlTargetsExecution && !usesTrackedShell {
-				body = append(body, "Temporary Shuttle execution pane. It closes when the command finishes.")
+				body = append(body, "Temporary Shuttle execution pane. F2 still targets the persistent shell; F3 takes control of the command pane.")
 			}
 		} else {
-			body = append(body, "Running in owned execution pane. F3 takes control of that pane.")
+			body = append(body, "Running in an owned execution pane. F2 still targets the persistent shell; F3 takes control of the command pane.")
 		}
 	}
 
@@ -1444,8 +1453,8 @@ func (m Model) renderSettingsModels(contentWidth int) []string {
 	}
 	lines = append(lines, m.styles.detailMeta.Render(filterLine))
 	lines = append(lines, m.styles.detailMeta.Render("Shift+I shows extra model details for the highlighted row."))
-	if settingsModelChoicesContainPreset(m.settingsModelCatalog, provider.PresetCodexCLI) {
-		lines = append(lines, m.styles.detailMeta.Render("Codex CLI entries are suggested from the OpenAI catalog when available. The live codex CLI picker may differ, and manual entry is still allowed."))
+	if helpText := settingsModelCatalogHelpText(m.settingsModelCatalog); helpText != "" {
+		lines = append(lines, m.styles.detailMeta.Render(helpText))
 	}
 	if len(m.settingsModels) == 0 {
 		if strings.TrimSpace(m.settingsModelFilter) != "" && len(m.settingsModelCatalog) > 0 {
@@ -1538,13 +1547,23 @@ func (m Model) updateHelp(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) renderHelpFooter(width int) string {
+	hasExecutionTarget := canExecutionTakeControl(m)
 	switch {
 	case width < 40:
-		return "[F1/Esc] close  [Up/Down]  [Pg]  [F2] [F3]  [Ctrl+C]"
+		if hasExecutionTarget {
+			return "[F1/Esc] close  [Up/Down]  [Pg]  [F2] [F3]  [Ctrl+C]"
+		}
+		return "[F1/Esc] close  [Up/Down]  [Pg]  [F2]  [Ctrl+C]"
 	case width < 64:
-		return "[F1/Esc] close  [Up/Down] scroll  [PgUp/PgDn] page  [F2] shell  [F3] cmd  [Ctrl+C] quit"
+		if hasExecutionTarget {
+			return "[F1/Esc] close  [Up/Down] scroll  [PgUp/PgDn] page  [F2] shell  [F3] cmd  [Ctrl+C] quit"
+		}
+		return "[F1/Esc] close  [Up/Down] scroll  [PgUp/PgDn] page  [F2] shell  [Ctrl+C] quit"
 	default:
-		return "[F1/Esc] close  [Up/Down] scroll  [PgUp/PgDn] page  [Home/End] bounds  [F2] shell  [F3] cmd  [Ctrl+C] quit"
+		if hasExecutionTarget {
+			return "[F1/Esc] close  [Up/Down] scroll  [PgUp/PgDn] page  [Home/End] bounds  [F2] shell  [F3] cmd  [Ctrl+C] quit"
+		}
+		return "[F1/Esc] close  [Up/Down] scroll  [PgUp/PgDn] page  [Home/End] bounds  [F2] shell  [Ctrl+C] quit"
 	}
 }
 
@@ -1873,28 +1892,28 @@ func settingsApprovalEntries() []settingsApprovalEntry {
 
 func buildSettingsProviderEntries(candidates []provider.OnboardingCandidate, active provider.Profile) []settingsProviderEntry {
 	chosen := map[provider.ProviderPreset]provider.OnboardingCandidate{}
-	for _, preset := range settingsProviderOrder() {
+	for _, preset := range provider.OrderedProviderPresets() {
 		if candidate, ok := chooseSettingsCandidate(candidates, preset, active); ok {
 			chosen[preset] = candidate
 		}
 	}
 
 	entries := []settingsProviderEntry{}
-	for _, preset := range settingsProviderOrder() {
+	for _, preset := range provider.OrderedProviderPresets() {
 		candidate, ok := chosen[preset]
 		if !ok {
 			continue
 		}
 		candidateCopy := candidate
 		entries = append(entries, settingsProviderEntry{
-			label:     settingsProviderLabel(preset),
+			label:     provider.ProviderLabel(preset),
 			detail:    settingsProviderDetail(candidate),
 			candidate: &candidateCopy,
 		})
-		if preset == provider.PresetAnthropic {
+		if label, detail, ok := provider.ReservedSettingsEntry(preset); ok {
 			entries = append(entries, settingsProviderEntry{
-				label:    "Anthropic Agent SDK",
-				detail:   "Reserved first-class Anthropic agent runtime integration.",
+				label:    label,
+				detail:   detail,
 				disabled: true,
 			})
 		}
@@ -1946,37 +1965,8 @@ func chooseSettingsCandidate(candidates []provider.OnboardingCandidate, preset p
 	return provider.OnboardingCandidate{}, false
 }
 
-func settingsProviderOrder() []provider.ProviderPreset {
-	return []provider.ProviderPreset{
-		provider.PresetAnthropic,
-		provider.PresetCodexCLI,
-		provider.PresetOllama,
-		provider.PresetOpenAI,
-		provider.PresetOpenRouter,
-		provider.PresetOpenWebUI,
-		provider.PresetCustom,
-	}
-}
-
 func settingsProviderLabel(preset provider.ProviderPreset) string {
-	switch preset {
-	case provider.PresetOpenAI:
-		return "OpenAI"
-	case provider.PresetOpenRouter:
-		return "OpenRouter"
-	case provider.PresetOpenWebUI:
-		return "OpenWebUI"
-	case provider.PresetCustom:
-		return "OpenAI-Compatible"
-	case provider.PresetCodexCLI:
-		return "Codex CLI"
-	case provider.PresetAnthropic:
-		return "Anthropic"
-	case provider.PresetOllama:
-		return "Ollama"
-	default:
-		return string(preset)
-	}
+	return provider.ProviderLabel(preset)
 }
 
 func settingsProviderDetail(candidate provider.OnboardingCandidate) string {
@@ -2155,26 +2145,17 @@ func containsModelOption(models []provider.ModelOption, target string) bool {
 	return false
 }
 
-func settingsModelChoicesContainPreset(choices []settingsModelChoice, preset provider.ProviderPreset) bool {
+func settingsModelCatalogHelpText(choices []settingsModelChoice) string {
 	for _, choice := range choices {
-		if choice.profile.Preset == preset {
-			return true
+		if helpText := provider.ModelCatalogHelpText(choice.profile.Preset); helpText != "" {
+			return helpText
 		}
 	}
-	return false
+	return ""
 }
 
 func shouldValidateProviderModel(profile provider.Profile) bool {
-	if strings.TrimSpace(profile.Model) == "" {
-		return false
-	}
-
-	switch profile.Preset {
-	case provider.PresetOpenAI, provider.PresetOpenRouter, provider.PresetOpenWebUI, provider.PresetAnthropic, provider.PresetOllama:
-		return true
-	default:
-		return false
-	}
+	return provider.ShouldValidateModelSelection(profile)
 }
 
 func onboardingFooter(width int, step onboardingStep) string {

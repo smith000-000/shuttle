@@ -979,3 +979,49 @@ func TestPatchProposalFailureStillAutoContinuesThroughPatchContinuation(t *testi
 		t.Fatalf("expected follow-up patch proposal after failure, got %#v", model.pendingProposal)
 	}
 }
+
+func TestProposalRefinementClearsDisplayedActivePlanForExternalUserHandoff(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.mode = AgentMode
+	model.activePlan = &controller.ActivePlan{
+		Summary: "Fix the reported SnapRAID sync errors, then verify the array returns to a clean state.",
+		Steps: []controller.PlanStep{
+			{Text: "Apply the required repair.", Status: controller.PlanStepDone},
+			{Text: "Rerun sync and verify the array is clean.", Status: controller.PlanStepInProgress},
+		},
+	}
+	model.refiningProposal = &controller.ProposalPayload{Kind: controller.ProposalCommand, Command: "snapraid sync"}
+	model.setInput("No, don't run a sync here. I will run it in another tmux shell.")
+
+	updated, cmd := model.submit()
+	next := updated.(Model)
+	if next.activePlan != nil {
+		t.Fatalf("expected explicit external handoff note to clear displayed active plan, got %#v", next.activePlan)
+	}
+	if cmd == nil {
+		t.Fatal("expected refinement submission command")
+	}
+}
+
+func TestProposalRefinementPreservesDisplayedActivePlanForRoutineNote(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.mode = AgentMode
+	model.activePlan = &controller.ActivePlan{
+		Summary: "Inspect and repair the workspace.",
+		Steps: []controller.PlanStep{
+			{Text: "Review the current files.", Status: controller.PlanStepInProgress},
+			{Text: "Summarize the result.", Status: controller.PlanStepPending},
+		},
+	}
+	model.refiningProposal = &controller.ProposalPayload{Kind: controller.ProposalCommand, Command: "cat /tmp/huge.log"}
+	model.setInput("Use snapraid status instead.")
+
+	updated, cmd := model.submit()
+	next := updated.(Model)
+	if next.activePlan == nil {
+		t.Fatal("expected routine refinement note to preserve displayed active plan")
+	}
+	if cmd == nil {
+		t.Fatal("expected refinement submission command")
+	}
+}

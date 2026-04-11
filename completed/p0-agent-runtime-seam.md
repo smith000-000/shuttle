@@ -1,13 +1,13 @@
 # P0: Agent Runtime Seam
 
 ## Purpose
-Track the current top-priority slice without creating more root-level planning files. This file is the live checklist for the agent-runtime seam work and should be amended in place for defects, regressions, and follow-up fixes.
+Retained as the completed mega-epic worklist for the agent-runtime seam work. This tracker is archived for historical context; active work has moved to `inprocess/P1.md`.
 
 ## Current Decision Summary
 - Shuttle remains the sole executor for shell commands, patch application, approvals, and state mutation.
 - P0 is seam-first only. It does not add real PI or Codex alternate runtimes yet.
 - `BACKLOG.md` remains the only root planning file.
-- Active slice tracking lives here in `inprocess/P0.md`.
+- This tracker previously lived in `inprocess/P0.md` before being archived under `completed/`. 
 - `F2` is the persistent tracked shell handoff, including remote shells.
 - `F3` is the separate owned-execution-pane handoff when a distinct local agent command pane exists.
 
@@ -51,7 +51,8 @@ Track the current top-priority slice without creating more root-level planning f
 - Active checklists must update only from explicit agent status reconciliation on continuation turns, not controller-side blind advancement after command or patch completion.
 
 ## Notes
-- When this P0 completes, archive this file under `completed/` with a descriptive name and create a fresh `inprocess/P0.md` for the next top-priority effort.
+- This mega-epic is retired and archived as `completed/p0-agent-runtime-seam.md`.
+- The lingering transcript selection rendering bug from this epic is tracked separately in GitHub and is not a blocker for archiving the P0 worklist.
 - The controller now depends on `Runtime` plus a runtime-host adapter, not on a provider/model agent field directly.
 - Shared runtime/model domain types are now owned by `internal/agentruntime`, with controller re-exporting aliases for compatibility.
 - The obsolete provider-side runtime wrapper scaffold was removed during cleanup.
@@ -61,4 +62,4 @@ Track the current top-priority slice without creating more root-level planning f
   - `F3`: distinct local owned execution pane, when present
 - Provider context now reports execution state and shell context without exposing Shuttle-managed pane IDs to the model.
 - Verification passed repeatedly with `go test ./internal/... -count=1` and `go test ./... -count=1`.
-- The seam slice is otherwise functionally closed; the transcript shell-rendering regression above is the main remaining blocker before archiving this tracker.
+- The seam slice is otherwise functionally closed; the transcript shell-rendering regression above is tracked separately in GitHub rather than through this archived epic.

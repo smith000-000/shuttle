@@ -17,6 +17,8 @@ Shuttle provider integration should:
 - allow talking to an existing CLI coding agent where that is operationally safer than reimplementing its auth/runtime
 - keep the existing `controller.Agent` contract stable
 - make onboarding detect likely working options instead of forcing the user to understand endpoints first
+- return health-check failures with provider-specific operator guidance instead of raw transport errors alone
+- keep provider construction behind shared descriptor/backend constructor tables instead of repeating preset/backend registration switches in multiple files
 
 ## 1.1 Non-Goals
 
@@ -214,6 +216,21 @@ The onboarding result should clearly say:
 - what auth source was detected
 
 ---
+
+# 5.5 Descriptor-Owned Provider Metadata
+
+Shuttle should keep one provider descriptor table that owns preset-level metadata used across onboarding, settings, profile resolution, and detection.
+
+That descriptor contract should at minimum own:
+- display label and default profile name
+- backend family
+- default base URL and default model
+- thinking and reasoning-effort capability flags
+- onboarding field layout and auth defaults
+- onboarding candidate ranking and manual-profile defaults
+- model-field semantics, reserved settings entries, and provider-specific model-catalog guidance
+
+The intent is to avoid maintaining separate preset switch statements in the TUI, detection path, and profile resolver that can drift over time.
 
 # 6. Endpoint Resolution
 

@@ -6,11 +6,18 @@ Current status:
 - explicit `--socket` / `--session` overrides still exist for development and integration work
 - runtime registry and startup reconciliation now exist well enough for workspace rediscovery
 - product-level lifecycle subcommands such as `shuttle list`, `resume`, `cleanup`, and `doctor` are still pending
+- startup now prunes stale runtime artifacts under the managed runtime directory while preserving live pane state and the managed tmux socket
+- runtime cleanup now shares one tmux-server-unavailable detector across socket cleanup and pane-state pruning, including missing-socket-path failures
+- runtime permission coverage now explicitly includes staged command dirs, shell-integration dirs, semantic artifact dirs, operational logs, and plaintext provider-secret fallback paths
 
 ## Purpose
 Define how Shuttle should manage tmux sockets, sessions, workspace identity, and crash recovery in a release build so users do not have to think about `--socket` and `--session` flags.
 
 This document covers the operational layer between "launch Shuttle" and "attach to an existing two-pane workspace."
+
+State split:
+- `runtimeDir` is for short-lived operational artifacts such as the managed tmux socket, staged command payloads, shell integration scripts, and semantic runtime captures. Shuttle may prune these conservatively on startup.
+- `stateDir` is for persistent operator state such as logs, shell history, and saved provider configuration. Shuttle should not treat those files as disposable runtime leftovers.
 
 ---
 
@@ -290,6 +297,10 @@ Shuttle should clean up aggressively enough to avoid stale runtime junk, but not
 Recommended rules:
 - do not kill active sessions on normal restart
 - mark missing sessions stale before deleting metadata
+- startup may prune clearly ephemeral runtime artifacts such as staged command scripts, sourced shell-integration scripts, dead semantic-stream generations, and semantic state files for panes that no longer exist
+- startup should also normalize runtime artifact directories such as `shell-state` and `semantic-stream` back to private permissions before reuse
+- keep live pane state and the managed tmux socket intact during normal startup cleanup
+- if the managed socket path exists but tmux reports no live server behind it, startup may remove that dead absolute socket file before bootstrap
 - allow explicit `cleanup` to remove stale state
 - only auto-delete clearly dead records after a conservative age threshold
 

@@ -2,7 +2,7 @@
 
 Shuttle is a tmux-backed AI terminal assistant.
 
-It runs a persistent real shell in the top tmux pane and a Bubble Tea TUI in the bottom pane. Agent-approved commands can also run in owned tmux execution panes for local work. The persistent shell remains the continuity surface for shell-command input, cwd, recent manual shell activity, and remote SSH continuity. `F2` always hands control to that persistent tracked shell, while `F3` targets a separate owned execution pane when Shuttle is actively running a command there.
+It runs a persistent real shell in the top tmux pane and a Bubble Tea TUI in the bottom pane. Agent-approved commands can also run in owned tmux execution panes for local work. The persistent shell remains the continuity surface for shell-command input, cwd, recent manual shell activity, and remote SSH continuity. `F2` always hands control to that persistent tracked shell. `F3` is only advertised when Shuttle has a distinct owned execution pane live, and then it targets that command pane.
 
 ## Status
 
@@ -14,6 +14,7 @@ What is working now:
 - tracked command observation with execution states
 - persistent user-shell context for cwd, recent shell output, and recent manual shell actions
 - owned tmux execution panes for agent-approved commands
+- controller-owned execution overview and help-card copy that keep `F2` bound to the persistent shell while only surfacing `F3` when a distinct owned execution pane is live
 - remote tracked-shell execution stays in the tracked shell instead of spilling into a local owned pane
 - Agent and Shell modes in the TUI
 - approval and refine flow
@@ -24,6 +25,7 @@ What is working now:
 - serial agentic command loops with one proposal at a time and auto-continue after results
 - active checklist reconciliation on continuation turns, so plan cards can reflect explicit agent status updates instead of only command-completion guesses
 - fresh user prompts now supersede stale active checklists unless the user is explicitly asking to continue or resume the current plan
+- refinement notes can now explicitly abandon or hand off the current checklist so stale plan cards do not reassert after the user redirects a proposed next step
 - fresh user prompts and continuation turns now explicitly treat rerun/retry requests and shell-target shifts as reasons to distrust earlier completion and reassess the work in the current shell context
 - agent prompt decoration now explicitly classifies requests by execution surface and treats controller session state, not matching path strings, as the source of truth for shell identity and target context
 - first-class shell-context inspection support so the model can refresh authoritative user@host/cwd state instead of guessing from stale prompt text
@@ -160,10 +162,12 @@ Important variables:
 - `SHUTTLE_SESSION`: optional tmux session name override
 - `SHUTTLE_TMUX_SOCKET`: optional tmux socket/server name override
 - `SHUTTLE_STATE_DIR`: optional persistent state directory for logs and shell history
-- `SHUTTLE_RUNTIME_DIR`: optional private runtime directory for staged shell scripts and semantic shell state
+- `SHUTTLE_RUNTIME_DIR`: optional private runtime directory for staged shell scripts, semantic shell state, and other ephemeral runtime artifacts
 - `SHUTTLE_ALLOW_PLAINTEXT_PROVIDER_SECRETS`: allow an explicit less-secure local file fallback if OS keyring storage is unavailable
 - `SHUTTLE_TRACE`: `off`, `safe`, or `sensitive`
-- `SHUTTLE_TRACE_CONSENT`: must be true or passed as `--trace-consent` when using sensitive trace
+- `SHUTTLE_TRACE_CONSENT`: must be true or passed as `--trace-consent` when using sensitive trace; Shuttle rejects sensitive trace at config-parse time until consent is explicit
+- `SHUTTLE_RUNTIME`: coding runtime selection: `builtin`, `auto`, `pi`, or `codex_sdk`
+- `SHUTTLE_RUNTIME_COMMAND`: optional explicit runtime command path override
 
 `launch.sh` loads `./env.sh` if present, otherwise it falls back to `./env.sh.sample`.
 
@@ -247,6 +251,21 @@ go run ./cmd/shuttle \
   --provider openai --auth api_key --model "${SHUTTLE_MODEL}"
 ```
 
+## Runtime Selection
+
+Runtime selection controls how Shuttle labels and routes the coding runtime layer behind `internal/agentruntime`. Current choices:
+- `builtin`: use Shuttle's built-in runtime behavior
+- `auto`: prefer the first supported installed external runtime in the current priority order, then fall back to `builtin`
+- `pi`: select the `pi` runtime path explicitly
+- `codex_sdk`: select the `codex_sdk` runtime path explicitly
+
+Current implementation boundary:
+- runtime selection is real and deterministic, including default command filling for explicit external runtime selections
+- Shuttle still owns execution panes, approvals, patch validation/application, transcript mutation, and task/session state
+- today the non-builtin runtime selections are metadata-carrying adapters around the built-in controller-owned runtime path, not fully delegated external execution stacks yet
+
+Use `SHUTTLE_RUNTIME_COMMAND` to override the executable path for an explicit runtime selection.
+
 ## Trace Logging
 
 Enable safe trace logging:
@@ -267,10 +286,11 @@ Trace modes:
 - `sensitive`: keeps full raw trace data, but Shuttle requires explicit consent before launch
 
 Important:
+- `trace.log` owns trace-detail behavior; `shuttle.log` is operational-only and redacts raw commands, prompts, key input, and provider payloads
 - trace mode only controls what Shuttle writes to its trace log
 - it does not disable normal runtime context sent to the active provider, such as shell output or recovery snapshots needed for agent reasoning
 
-Persistent logs and shell history now default to XDG state space instead of the repo-local `.shuttle/` directory. Ephemeral staged command scripts and semantic shell state now live in a separate private runtime directory.
+Persistent logs and shell history now default to XDG state space instead of the repo-local `.shuttle/` directory. Ephemeral staged command scripts, shell integration scripts, semantic shell state, and semantic stream captures now live in a separate private runtime directory. On startup Shuttle prunes stale staged artifacts, removes semantic state entries for panes that no longer exist in the managed tmux server, and keeps live pane state plus the managed socket intact. The local semantic state payload is now versioned so newer builds can reject incompatible future formats while still reading the older unversioned form.
 
 Provider secret storage policy:
 - preferred: OS keyring

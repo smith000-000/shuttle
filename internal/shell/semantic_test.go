@@ -15,7 +15,7 @@ import (
 )
 
 func TestParseSemanticShellStatePrompt(t *testing.T) {
-	state, ok := parseSemanticShellState("{\"event\":\"prompt\",\"exit\":130,\"cwd\":\"/tmp/demo\",\"shell\":\"zsh\"}")
+	state, ok := parseSemanticShellState("{\"version\":1,\"event\":\"prompt\",\"exit\":130,\"cwd\":\"/tmp/demo\",\"shell\":\"zsh\"}")
 	if !ok {
 		t.Fatal("expected semantic shell state to parse")
 	}
@@ -27,6 +27,23 @@ func TestParseSemanticShellStatePrompt(t *testing.T) {
 	}
 	if state.Directory != "/tmp/demo" || state.Shell != "zsh" {
 		t.Fatalf("unexpected semantic state %#v", state)
+	}
+}
+
+
+func TestParseSemanticShellStateLegacyPayloadStillParses(t *testing.T) {
+	state, ok := parseSemanticShellState("{\"event\":\"command\",\"exit\":null,\"cwd\":\"/tmp/demo\",\"shell\":\"bash\"}")
+	if !ok {
+		t.Fatal("expected legacy semantic shell state to parse")
+	}
+	if state.Event != semanticEventCommand || state.Directory != "/tmp/demo" || state.Shell != "bash" {
+		t.Fatalf("unexpected legacy semantic state %#v", state)
+	}
+}
+
+func TestParseSemanticShellStateRejectsUnsupportedVersion(t *testing.T) {
+	if _, ok := parseSemanticShellState("{\"version\":2,\"event\":\"prompt\",\"exit\":0,\"cwd\":\"/tmp/demo\",\"shell\":\"zsh\"}"); ok {
+		t.Fatal("expected unsupported semantic shell state version to fail parsing")
 	}
 }
 
@@ -349,4 +366,76 @@ func wrappedMarkerLines(command string) (string, string, bool) {
 		return "", "", false
 	}
 	return beginLine, endPrefix, true
+}
+
+func TestParseSemanticShellStateRejectsUnknownEventAndInvalidShell(t *testing.T) {
+	if _, ok := parseSemanticShellState("{\"version\":1,\"event\":\"bogus\",\"exit\":null,\"cwd\":\"/tmp/demo\",\"shell\":\"zsh\"}"); ok {
+		t.Fatal("expected unknown semantic event to fail parsing")
+	}
+	if _, ok := parseSemanticShellState("{\"version\":1,\"event\":\"prompt\",\"exit\":0,\"cwd\":\"/tmp/demo\",\"shell\":\"fish\"}"); ok {
+		t.Fatal("expected unsupported shell to fail parsing")
+	}
+}
+
+func TestReadSemanticShellStateRejectsTruncatedPayload(t *testing.T) {
+	dir := t.TempDir()
+	path := semanticStatePath(dir, "/dev/pts/8")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("{\"version\":1,\"event\":\"prompt\",\"exit\":0,\"cwd\":\"/tmp/demo\",\"shell\":\"zsh\"}"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	if _, ok := readSemanticShellState(dir, "/dev/pts/8"); ok {
+		t.Fatal("expected truncated semantic shell state to be ignored")
+	}
+}
+
+func TestStateFileSemanticCollectorIgnoresMismatchedShellAndStaleCommandState(t *testing.T) {
+	dir := t.TempDir()
+	path := semanticStatePath(dir, "/dev/pts/9")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("{\"version\":1,\"event\":\"prompt\",\"exit\":0,\"cwd\":\"/tmp/demo\",\"shell\":\"bash\"}\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	collector := stateFileSemanticCollector{stateDir: dir}
+	if _, ok := collector.Collect(context.Background(), "%0", "/dev/pts/9", "zsh", PromptContext{}); ok {
+		t.Fatal("expected mismatched shell semantic state to be ignored")
+	}
+
+	if err := os.WriteFile(path, []byte("{\"version\":1,\"event\":\"command\",\"exit\":null,\"cwd\":\"/tmp/demo\",\"shell\":\"bash\"}\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	old := time.Now().Add(-semanticStateCommandStaleWindow - time.Second)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	if _, ok := collector.Collect(context.Background(), "%0", "/dev/pts/9", "bash", PromptContext{}); ok {
+		t.Fatal("expected stale command semantic state to be ignored")
+	}
+}
+
+func TestStateFileSemanticCollectorKeepsPromptStateEvenWhenOld(t *testing.T) {
+	dir := t.TempDir()
+	path := semanticStatePath(dir, "/dev/pts/10")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("{\"version\":1,\"event\":\"prompt\",\"exit\":0,\"cwd\":\"/tmp/demo\",\"shell\":\"zsh\"}\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	old := time.Now().Add(-24 * time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+	collector := stateFileSemanticCollector{stateDir: dir}
+	observation, ok := collector.Collect(context.Background(), "%0", "/dev/pts/10", "zsh", PromptContext{})
+	if !ok {
+		t.Fatal("expected prompt semantic state to remain usable even when old")
+	}
+	if observation.Source != semanticSourceState || observation.State.Event != semanticEventPrompt {
+		t.Fatalf("unexpected semantic observation %#v", observation)
+	}
 }

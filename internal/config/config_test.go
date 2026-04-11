@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -303,6 +304,28 @@ func TestParseAcceptsSensitiveTraceMode(t *testing.T) {
 	}
 	if !cfg.TraceConsent {
 		t.Fatalf("expected trace consent to be set")
+	}
+}
+
+func TestParseRejectsSensitiveTraceWithoutConsentFlag(t *testing.T) {
+	_, err := Parse([]string{"--trace-mode", "sensitive"})
+	if err == nil {
+		t.Fatal("expected sensitive trace without consent to fail")
+	}
+	if !strings.Contains(err.Error(), "--trace-consent") {
+		t.Fatalf("expected consent error, got %v", err)
+	}
+}
+
+func TestParseRejectsSensitiveTraceWithoutConsentEnv(t *testing.T) {
+	t.Setenv("SHUTTLE_TRACE", "sensitive")
+
+	_, err := Parse(nil)
+	if err == nil {
+		t.Fatal("expected sensitive trace from env without consent to fail")
+	}
+	if !strings.Contains(err.Error(), "SHUTTLE_TRACE_CONSENT") {
+		t.Fatalf("expected env consent error, got %v", err)
 	}
 }
 

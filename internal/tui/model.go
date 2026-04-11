@@ -456,6 +456,10 @@ func (m Model) WithShellContext(promptContext shell.PromptContext) Model {
 	return m
 }
 
+func (m Model) CleanupSessionName() string {
+	return strings.TrimSpace(m.workspace.SessionName)
+}
+
 func (m Model) WithTakeControl(socketName string, sessionName string, trackedPaneID string, detachKey string) Model {
 	m.takeControl = takeControlConfig{
 		SocketName:    socketName,
@@ -1034,7 +1038,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busyStartedAt = time.Time{}
 		m.inFlightCancel = nil
 		if msg.err != nil {
-			m.settingsBanner = fmt.Sprintf("Provider test failed for %s (%s, auth %s): %v", msg.profile.Name, msg.profile.BaseURL, providerAuthSourceLabel(msg.profile), msg.err)
+			m.settingsBanner = fmt.Sprintf("Provider test failed for %s (%s, auth %s): %s", msg.profile.Name, msg.profile.BaseURL, providerAuthSourceLabel(msg.profile), provider.ExplainHealthCheckError(msg.profile, msg.err))
 			return m, nil
 		}
 		m.settingsBanner = fmt.Sprintf("Provider test succeeded for %s (%s, auth %s).", msg.profile.Name, msg.profile.BaseURL, providerAuthSourceLabel(msg.profile))
@@ -1427,36 +1431,11 @@ func (m Model) composerLocked() bool {
 }
 
 func shouldReplaceDisplayedActivePlan(activePlan *controller.ActivePlan, prompt string) bool {
-	if activePlan == nil {
-		return false
-	}
+	return controller.ShouldReplaceActivePlanForUserPrompt(activePlan, prompt)
+}
 
-	prompt = strings.ToLower(strings.TrimSpace(prompt))
-	if prompt == "" {
-		return false
-	}
-
-	for _, marker := range []string{
-		"continue",
-		"resume",
-		"keep going",
-		"go on",
-		"what next",
-		"what's next",
-		"whats next",
-		"next step",
-		"next steps",
-		"current plan",
-		"active plan",
-		"current checklist",
-		"active checklist",
-	} {
-		if strings.Contains(prompt, marker) {
-			return false
-		}
-	}
-
-	return true
+func shouldReplaceDisplayedActivePlanForRefinement(activePlan *controller.ActivePlan, prompt string) bool {
+	return controller.ShouldReplaceActivePlanForRefinement(activePlan, prompt)
 }
 
 func (m Model) handleActionCardKey(msg tea.KeyMsg) (tea.Model, bool, tea.Cmd) {
@@ -1576,8 +1555,14 @@ func (m Model) submitWithOptions(appendEnterToFullscreenKeys bool) (tea.Model, t
 		return next, cmd
 	}
 
-	if m.mode == AgentMode && shouldReplaceDisplayedActivePlan(m.activePlan, text) {
-		m.activePlan = nil
+	if m.mode == AgentMode {
+		clearDisplayedPlan := shouldReplaceDisplayedActivePlan(m.activePlan, text)
+		if m.refiningApproval != nil || m.refiningProposal != nil {
+			clearDisplayedPlan = shouldReplaceDisplayedActivePlanForRefinement(m.activePlan, text)
+		}
+		if clearDisplayedPlan {
+			m.activePlan = nil
+		}
 	}
 
 	m.setInput("")
