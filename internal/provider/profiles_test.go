@@ -219,3 +219,21 @@ func TestNewFromProfileRejectsMissingAPIKey(t *testing.T) {
 		t.Fatal("expected missing API key error")
 	}
 }
+
+func TestResolveProfileThinkingDefaults(t *testing.T) {
+	openAI, err := ResolveProfile(config.Config{ProviderType: "openai", ProviderAuthMethod: "api_key", ProviderAPIKey: "test-key"})
+	if err != nil {
+		t.Fatalf("ResolveProfile(openai) error = %v", err)
+	}
+	if openAI.Thinking != string(ThinkingOff) {
+		t.Fatalf("expected openai thinking off by default, got %q", openAI.Thinking)
+	}
+
+	openRouter, err := ResolveProfile(config.Config{ProviderType: "openrouter", ProviderAuthMethod: "api_key", ProviderAPIKey: "test-key"})
+	if err != nil {
+		t.Fatalf("ResolveProfile(openrouter) error = %v", err)
+	}
+	if openRouter.Thinking != string(ThinkingOn) || openRouter.ReasoningEffort != string(ReasoningEffortMedium) {
+		t.Fatalf("expected openrouter thinking defaults, got %#v", openRouter)
+	}
+}

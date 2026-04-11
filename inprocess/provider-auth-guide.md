@@ -210,12 +210,13 @@ Important:
 ## Settings and Onboarding Behavior
 
 Relevant settings sections:
-- `Providers`
-- `Active Provider`
-- `Active Model`
+- `Configure Providers`
+- provider detail editor
 
 Current behavior:
-- `Enter` applies a provider/model switch in place
+- `/onboard` and `/provider` open `Configure Providers`
+- `/model` opens the current provider detail with the `Model` field focused
+- `Enter` on a provider opens its shared config/model detail screen
 - `Esc` goes back one level
 - `F10` fully closes settings
 
@@ -223,6 +224,9 @@ Provider form behavior:
 - saving may persist config and secret state
 - if the edited provider is also the active provider, Shuttle switches the live provider immediately
 - if persistence fails because secure secret storage is unavailable, the provider may still be active for the session and Shuttle shows a warning
+- OpenAI, OpenRouter, Anthropic, and Ollama expose a `Thinking` toggle in the provider detail form
+- OpenAI and OpenRouter also expose `Reasoning Effort` when `Thinking` is enabled
+- `Left`/`Right` or `Space` toggles those radio-style settings without leaving the provider form
 
 Model validation:
 - strict validation happens only when Shuttle can fetch a model catalog for that provider

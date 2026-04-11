@@ -566,7 +566,7 @@ func TestApprovalRefineUsesSeparateNoteFlow(t *testing.T) {
 	}
 }
 
-func TestSlashOnboardOpensProviderOnboarding(t *testing.T) {
+func TestSlashOnboardOpensConfigureProvidersSettings(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.mode = AgentMode
 	model.input = "/onboard"
@@ -589,8 +589,8 @@ func TestSlashOnboardOpensProviderOnboarding(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("expected onboarding command to open synchronously")
 	}
-	if !next.onboardingOpen {
-		t.Fatal("expected /onboard to open provider onboarding")
+	if !next.settingsOpen || next.settingsStep != settingsStepProviders {
+		t.Fatalf("expected /onboard to open configure providers, got open=%t step=%q", next.settingsOpen, next.settingsStep)
 	}
 	if next.input != "" {
 		t.Fatalf("expected composer to clear, got %q", next.input)

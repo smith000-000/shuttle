@@ -1341,12 +1341,51 @@ func humanizeExecutionElapsed(startedAt time.Time) string {
 
 func (m Model) currentProviderChoiceIndex() int {
 	for index, choice := range m.onboardingChoices {
-		if choice.Profile.Preset == m.activeProvider.Preset && choice.Profile.Model == m.activeProvider.Model && choice.Profile.BaseURL == m.activeProvider.BaseURL {
+		if onboardingCandidateMatchesProfile(choice, m.activeProvider) {
 			return index
 		}
 	}
 
 	return 0
+}
+
+func collapseOnboardingChoices(candidates []provider.OnboardingCandidate, active provider.Profile) []provider.OnboardingCandidate {
+	collapsed := make([]provider.OnboardingCandidate, 0, len(candidates))
+	indexByPreset := map[provider.ProviderPreset]int{}
+	selectedCurrent := map[provider.ProviderPreset]bool{}
+
+	for _, candidate := range candidates {
+		preset := candidate.Profile.Preset
+		if preset == "" {
+			continue
+		}
+		current := onboardingCandidateMatchesProfile(candidate, active)
+		index, exists := indexByPreset[preset]
+		if !exists {
+			indexByPreset[preset] = len(collapsed)
+			collapsed = append(collapsed, candidate)
+			selectedCurrent[preset] = current
+			continue
+		}
+		if current && !selectedCurrent[preset] {
+			collapsed[index] = candidate
+			selectedCurrent[preset] = true
+		}
+	}
+
+	return collapsed
+}
+
+func onboardingCandidateMatchesProfile(candidate provider.OnboardingCandidate, profile provider.Profile) bool {
+	if candidate.Profile.Preset == "" || profile.Preset == "" {
+		return false
+	}
+	return candidate.Profile.Preset == profile.Preset &&
+		strings.TrimSpace(candidate.Profile.BaseURL) == strings.TrimSpace(profile.BaseURL) &&
+		strings.TrimSpace(candidate.Profile.Model) == strings.TrimSpace(profile.Model) &&
+		strings.TrimSpace(candidate.Profile.CLICommand) == strings.TrimSpace(profile.CLICommand) &&
+		strings.TrimSpace(candidate.Profile.Thinking) == strings.TrimSpace(profile.Thinking) &&
+		strings.TrimSpace(candidate.Profile.ReasoningEffort) == strings.TrimSpace(profile.ReasoningEffort)
 }
 
 func (m Model) currentProviderModelIndex() int {
@@ -1365,15 +1404,19 @@ func (m Model) currentProviderModelIndex() int {
 }
 
 func (m Model) currentSettingsProviderIndex() int {
+	fallback := 0
 	for index, entry := range m.settingsProviders {
 		if entry.candidate == nil {
 			continue
 		}
-		if entry.candidate.Profile.Preset == m.activeProvider.Preset {
+		if onboardingCandidateMatchesProfile(*entry.candidate, m.activeProvider) {
 			return index
 		}
+		if entry.candidate.Profile.Preset == m.activeProvider.Preset {
+			fallback = index
+		}
 	}
-	return 0
+	return fallback
 }
 
 func currentSettingsApprovalIndex(ctrl controller.Controller) int {
@@ -1390,8 +1433,12 @@ func currentSettingsApprovalIndex(ctrl controller.Controller) int {
 }
 
 func (m Model) currentSettingsModelIndex() int {
+	profile := m.activeProvider
+	if m.settingsConfig != nil {
+		profile = m.settingsConfig.profile
+	}
 	for index, choice := range m.settingsModels {
-		if choice.profile.Preset == m.activeProvider.Preset && choice.model.ID == m.activeProvider.Model {
+		if choice.profile.Preset == profile.Preset && choice.model.ID == profile.Model {
 			return index
 		}
 	}
@@ -1540,7 +1587,11 @@ func (m *Model) applySettingsModelFilter() {
 	}
 
 	m.settingsModelInfo = false
-	m.settingsModels = filterSettingsModels(m.settingsModelCatalog, m.settingsModelFilter)
+	if m.settingsModelBrowseAll {
+		m.settingsModels = append([]settingsModelChoice(nil), m.settingsModelCatalog...)
+	} else {
+		m.settingsModels = filterSettingsModels(m.settingsModelCatalog, m.settingsModelFilter)
+	}
 	switch {
 	case len(m.settingsModels) == 0:
 		m.settingsModelIdx = 0

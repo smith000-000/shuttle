@@ -53,7 +53,6 @@ func (m Model) renderEntryLines(index int, entry Entry, width int) []transcriptR
 	bodyStyle := m.renderBodyStyle(entry)
 	prefixStyle := lipgloss.NewStyle()
 	if selected {
-		bodyStyle = bodyStyle.Copy().Background(lipgloss.Color(transcriptSelectedBackground))
 		prefixStyle = prefixStyle.Background(lipgloss.Color(transcriptSelectedBackground))
 	}
 	indent := strings.Repeat(" ", lipgloss.Width(prefix)+tagWidth+1)
@@ -234,15 +233,6 @@ func (m Model) renderTranscript(width int, height int) string {
 		text := line.text
 		if text == "" {
 			text = strings.Repeat(" ", max(1, width))
-		}
-		if line.entryIndex >= 0 && line.entryIndex == m.selectedEntry {
-			lines = append(lines, lipgloss.PlaceHorizontal(
-				width,
-				lipgloss.Left,
-				text,
-				lipgloss.WithWhitespaceBackground(m.styles.transcriptSelected.GetBackground()),
-			))
-			continue
 		}
 		lines = append(lines, m.styles.transcript.Width(width).MaxWidth(width).Render(text))
 	}

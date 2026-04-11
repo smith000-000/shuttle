@@ -64,6 +64,13 @@ type responsesReasoning struct {
 	Exclude   bool   `json:"exclude,omitempty"`
 }
 
+func responsesReasoningForProfile(profile Profile) *responsesReasoning {
+	if !ThinkingEnabled(profile) || !SupportsReasoningEffort(profile) {
+		return nil
+	}
+	return &responsesReasoning{Effort: string(EffectiveReasoningEffort(profile))}
+}
+
 type responsesAPIResponse struct {
 	Model      string                `json:"model"`
 	Output     []responsesOutputItem `json:"output"`
@@ -147,6 +154,7 @@ func (a *ResponsesAgent) Respond(ctx context.Context, input controller.AgentInpu
 	if err != nil {
 		return controller.AgentResponse{}, err
 	}
+	requestBody.Reasoning = responsesReasoningForProfile(a.profile)
 
 	payload, err := json.Marshal(requestBody)
 	if err != nil {

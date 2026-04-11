@@ -130,6 +130,35 @@ func (m Model) updateOnboarding(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+func (m *Model) focusSettingsModelField() {
+	if m.settingsConfig == nil {
+		return
+	}
+	for index, field := range m.settingsConfig.fields {
+		if field.key == "model" && !field.hidden {
+			m.settingsConfig.index = index
+			return
+		}
+	}
+}
+
+func (m *Model) toggleSettingsModelListMode() {
+	m.focusSettingsModelField()
+	if !m.isSettingsModelFieldFocused() {
+		return
+	}
+	if m.settingsModelListActive {
+		m.settingsModelListActive = false
+		m.settingsModelBrowseAll = false
+		m.settingsModelInfo = false
+		return
+	}
+	m.settingsModelListActive = len(m.settingsModelCatalog) > 0
+	m.settingsModelBrowseAll = strings.TrimSpace(m.settingsModelFilter) != "" && len(m.settingsModels) <= 1 && len(m.settingsModelCatalog) > 1
+	m.applySettingsModelFilter()
+	m.settingsModelInfo = false
+}
+
 func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyCtrlC:
@@ -158,27 +187,34 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.saveSettingsProfile(true)
 		}
 		return m, nil
+	case tea.KeyF5:
+		if m.settingsStep == settingsStepProviderForm && m.isSettingsModelFieldFocused() {
+			m.toggleSettingsModelListMode()
+			return m, nil
+		}
+		return m, nil
 	case tea.KeyEsc:
 		switch m.settingsStep {
 		case settingsStepProviderForm:
-			m.settingsStep = settingsStepProviders
-			m.settingsConfig = nil
-			m.settingsBanner = ""
-		case settingsStepActiveModels:
-			if m.settingsModelFilter != "" {
-				m.settingsModelFilter = ""
+			if m.isSettingsModelListFocused() {
+				m.focusSettingsModelField()
+				m.settingsModelListActive = false
+				m.settingsModelBrowseAll = false
 				m.settingsModelInfo = false
-				m.applySettingsModelFilter()
 				return m, nil
 			}
-			m.settingsStep = settingsStepMenu
+			m.settingsStep = m.settingsDetailReturnStep
+			if m.settingsStep == "" {
+				m.settingsStep = settingsStepProviders
+			}
+			m.settingsConfig = nil
 			m.settingsModelCatalog = nil
 			m.settingsModels = nil
 			m.settingsModelIdx = 0
+			m.settingsModelFilter = ""
 			m.settingsModelInfo = false
-			m.settingsBanner = ""
-		case settingsStepActiveProvider:
-			m.settingsStep = settingsStepMenu
+			m.settingsModelListActive = false
+			m.settingsModelBrowseAll = false
 			m.settingsBanner = ""
 		case settingsStepProviders:
 			m.settingsStep = settingsStepMenu
@@ -191,6 +227,31 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.settingsBanner = ""
 		}
 		return m, nil
+	case tea.KeyLeft:
+		if m.settingsStep == settingsStepProviderForm && m.isSettingsModelListFocused() {
+			m.focusSettingsModelField()
+			m.settingsModelListActive = false
+			m.settingsModelBrowseAll = false
+			m.settingsModelInfo = false
+			return m, nil
+		}
+		if m.settingsStep == settingsStepProviderForm && m.isSettingsChoiceFieldFocused() {
+			m.cycleSettingsChoiceField(-1)
+			return m, nil
+		}
+		return m, nil
+	case tea.KeyRight:
+		if m.settingsStep == settingsStepProviderForm && m.isSettingsModelFieldFocused() {
+			if !m.isSettingsModelListFocused() {
+				m.toggleSettingsModelListMode()
+			}
+			return m, nil
+		}
+		if m.settingsStep == settingsStepProviderForm && m.isSettingsChoiceFieldFocused() {
+			m.cycleSettingsChoiceField(1)
+			return m, nil
+		}
+		return m, nil
 	case tea.KeyUp:
 		switch m.settingsStep {
 		case settingsStepMenu:
@@ -201,18 +262,18 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.settingsApprovalIdx > 0 {
 				m.settingsApprovalIdx--
 			}
-		case settingsStepProviders, settingsStepActiveProvider:
+		case settingsStepProviders:
 			if m.settingsProviderIdx > 0 {
 				m.settingsProviderIdx--
 			}
-		case settingsStepActiveModels:
-			if m.settingsModelIdx > 0 {
-				m.settingsModelIdx--
-				m.settingsModelInfo = false
-			}
 		case settingsStepProviderForm:
-			if m.settingsConfig != nil && m.settingsConfig.index > 0 {
-				m.settingsConfig.index--
+			if m.isSettingsModelListFocused() {
+				if m.settingsModelIdx > 0 {
+					m.settingsModelIdx--
+					m.settingsModelInfo = false
+				}
+			} else {
+				m.moveSettingsFormSelection(-1)
 			}
 		}
 		return m, nil
@@ -226,28 +287,28 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.settingsApprovalIdx < len(settingsApprovalEntries())-1 {
 				m.settingsApprovalIdx++
 			}
-		case settingsStepProviders, settingsStepActiveProvider:
+		case settingsStepProviders:
 			if m.settingsProviderIdx < len(m.settingsProviders)-1 {
 				m.settingsProviderIdx++
 			}
-		case settingsStepActiveModels:
-			if m.settingsModelIdx < len(m.settingsModels)-1 {
-				m.settingsModelIdx++
-				m.settingsModelInfo = false
-			}
 		case settingsStepProviderForm:
-			if m.settingsConfig != nil && m.settingsConfig.index < len(m.settingsConfig.fields)-1 {
-				m.settingsConfig.index++
+			if m.isSettingsModelListFocused() {
+				if m.settingsModelIdx < len(m.settingsModels)-1 {
+					m.settingsModelIdx++
+					m.settingsModelInfo = false
+				}
+			} else {
+				m.moveSettingsFormSelection(1)
 			}
 		}
 		return m, nil
 	case tea.KeyTab:
-		if m.settingsStep == settingsStepProviderForm && m.settingsConfig != nil && len(m.settingsConfig.fields) > 0 {
-			m.settingsConfig.index = (m.settingsConfig.index + 1) % len(m.settingsConfig.fields)
+		if m.settingsStep == settingsStepProviderForm {
+			m.moveSettingsFormSelection(1)
 		}
 		return m, nil
 	case tea.KeyPgUp:
-		if m.settingsStep == settingsStepActiveModels {
+		if m.settingsStep == settingsStepProviderForm && m.isSettingsModelListFocused() {
 			m.settingsModelIdx -= 8
 			if m.settingsModelIdx < 0 {
 				m.settingsModelIdx = 0
@@ -256,7 +317,7 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyPgDown:
-		if m.settingsStep == settingsStepActiveModels {
+		if m.settingsStep == settingsStepProviderForm && m.isSettingsModelListFocused() {
 			m.settingsModelIdx += 8
 			if m.settingsModelIdx >= len(m.settingsModels) {
 				m.settingsModelIdx = max(0, len(m.settingsModels)-1)
@@ -265,48 +326,66 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyBackspace, tea.KeyDelete:
-		if m.settingsStep == settingsStepActiveModels && m.settingsModelFilter != "" {
-			m.settingsModelFilter = trimLastRune(m.settingsModelFilter)
-			m.settingsModelInfo = false
-			m.applySettingsModelFilter()
-			return m, nil
-		}
-		if m.settingsStep == settingsStepProviderForm && m.settingsConfig != nil {
-			field := &m.settingsConfig.fields[m.settingsConfig.index]
-			if len(field.value) > 0 {
-				field.value = field.value[:len(field.value)-1]
+		if m.settingsStep == settingsStepProviderForm {
+			if field := m.currentSettingsField(); field != nil && len(field.options) == 0 {
+				if len(field.value) > 0 {
+					field.value = field.value[:len(field.value)-1]
+				}
+				if field.key == "model" {
+					m.settingsModelListActive = false
+					m.syncSettingsModelFilterFromConfig()
+				}
 			}
 		}
 		return m, nil
 	case tea.KeySpace:
-		if m.settingsStep == settingsStepActiveModels {
-			m.settingsModelFilter += " "
-			m.settingsModelInfo = false
-			m.applySettingsModelFilter()
-			return m, nil
-		}
-		if m.settingsStep == settingsStepProviderForm && m.settingsConfig != nil {
-			m.settingsConfig.fields[m.settingsConfig.index].value += " "
+		if m.settingsStep == settingsStepProviderForm {
+			if m.isSettingsChoiceFieldFocused() {
+				m.cycleSettingsChoiceField(1)
+				return m, nil
+			}
+			if field := m.currentSettingsField(); field != nil {
+				field.value += " "
+				if field.key == "model" {
+					m.settingsModelListActive = false
+					m.syncSettingsModelFilterFromConfig()
+				}
+			}
 		}
 		return m, nil
 	case tea.KeyEnter:
+		if m.settingsStep == settingsStepProviderForm && m.isSettingsModelListFocused() {
+			updated, cmd := m.applySettingsSelection()
+			if next, ok := updated.(Model); ok {
+				next.focusSettingsModelField()
+				next.settingsModelListActive = false
+				next.settingsModelBrowseAll = false
+				next.settingsModelInfo = false
+				return next, cmd
+			}
+			return updated, cmd
+		}
+		if m.settingsStep == settingsStepProviderForm && m.isSettingsChoiceFieldFocused() && !m.isSettingsModelFieldFocused() {
+			m.cycleSettingsChoiceField(1)
+			return m, nil
+		}
 		return m.applySettingsSelection()
 	default:
-		if m.settingsStep == settingsStepActiveModels && msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && msg.Runes[0] == 'I' {
+		if m.settingsStep == settingsStepProviderForm && m.isSettingsModelFieldFocused() && msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && msg.Runes[0] == 'I' {
 			if len(m.settingsModels) > 0 {
 				m.settingsModelInfo = !m.settingsModelInfo
 			}
 			return m, nil
 		}
-		if m.settingsStep == settingsStepActiveModels && !msg.Alt && msg.Type == tea.KeyRunes {
-			m.settingsModelFilter += string(msg.Runes)
-			m.settingsModelInfo = false
-			m.applySettingsModelFilter()
-			return m, nil
-		}
-		if m.settingsStep == settingsStepProviderForm && m.settingsConfig != nil && !msg.Alt && msg.Type == tea.KeyRunes {
-			m.settingsConfig.fields[m.settingsConfig.index].value += string(msg.Runes)
-			return m, nil
+		if m.settingsStep == settingsStepProviderForm && !msg.Alt && msg.Type == tea.KeyRunes {
+			if field := m.currentSettingsField(); field != nil && len(field.options) == 0 {
+				field.value += string(msg.Runes)
+				if field.key == "model" {
+					m.settingsModelListActive = false
+					m.syncSettingsModelFilterFromConfig()
+				}
+				return m, nil
+			}
 		}
 		return m, nil
 	}
@@ -434,14 +513,7 @@ func (m Model) applySettingsSelection() (tea.Model, tea.Cmd) {
 			m.settingsBanner = ""
 			return m, nil
 		}
-		if m.settingsIndex == 2 {
-			m.settingsStep = settingsStepActiveProvider
-			m.settingsProviderIdx = m.currentSettingsProviderIndex()
-			m.settingsBanner = ""
-			return m, nil
-		}
-		m.settingsBanner = ""
-		return m.loadSettingsModels()
+		return m, nil
 	case settingsStepSession:
 		entries := settingsApprovalEntries()
 		if len(entries) == 0 {
@@ -469,33 +541,212 @@ func (m Model) applySettingsSelection() (tea.Model, tea.Cmd) {
 		if entry.disabled || entry.candidate == nil {
 			return m, nil
 		}
-		form := buildOnboardingForm(*entry.candidate)
-		m.settingsStep = settingsStepProviderForm
-		m.settingsConfig = &form
-		return m, nil
-	case settingsStepActiveProvider:
-		if len(m.settingsProviders) == 0 {
-			return m, nil
-		}
-		entry := m.settingsProviders[m.settingsProviderIdx]
-		if entry.disabled || entry.candidate == nil {
-			return m, nil
-		}
-		return m.switchSettingsProfile(entry.candidate.Profile, settingsStepActiveProvider)
-	case settingsStepActiveModels:
-		if len(m.settingsModels) == 0 {
-			return m, nil
-		}
-		choice := m.settingsModels[m.settingsModelIdx]
-		profile := choice.profile
-		model := choice.model
-		profile.Model = model.ID
-		profile.SelectedModel = &model
-		return m.switchSettingsProfile(profile, settingsStepActiveModels)
+		return m.openSettingsProviderDetail(*entry.candidate, settingsStepProviders, false)
 	case settingsStepProviderForm:
+		if m.isSettingsModelFieldFocused() {
+			if len(m.settingsModels) > 0 && m.settingsModelIdx >= 0 && m.settingsModelIdx < len(m.settingsModels) {
+				choice := m.settingsModels[m.settingsModelIdx]
+				m.settingsConfig.fields[m.settingsConfig.index].value = choice.model.ID
+				m.syncSettingsModelFilterFromConfig()
+			}
+			return m.testSettingsProfile()
+		}
 		return m.saveSettingsProfile(false)
 	default:
 		return m, nil
+	}
+}
+
+func visibleFormFieldIndices(form *onboardingFormState) []int {
+	if form == nil {
+		return nil
+	}
+	indexes := make([]int, 0, len(form.fields))
+	for index, field := range form.fields {
+		if field.hidden {
+			continue
+		}
+		indexes = append(indexes, index)
+	}
+	return indexes
+}
+
+func normalizeFormIndex(form *onboardingFormState) {
+	if form == nil {
+		return
+	}
+	visible := visibleFormFieldIndices(form)
+	if len(visible) == 0 {
+		form.index = 0
+		return
+	}
+	for _, index := range visible {
+		if form.index == index {
+			return
+		}
+	}
+	form.index = visible[0]
+}
+
+func (m *Model) moveSettingsFormSelection(delta int) {
+	if m.settingsConfig == nil {
+		return
+	}
+	visible := visibleFormFieldIndices(m.settingsConfig)
+	if len(visible) == 0 {
+		m.settingsConfig.index = 0
+		return
+	}
+	current := 0
+	for i, index := range visible {
+		if index == m.settingsConfig.index {
+			current = i
+			break
+		}
+	}
+	current = (current + delta + len(visible)) % len(visible)
+	m.settingsConfig.index = visible[current]
+	if m.isSettingsModelFieldFocused() {
+		m.settingsModelListActive = false
+		m.syncSettingsModelFilterFromConfig()
+	}
+}
+
+func (m Model) currentSettingsField() *onboardingField {
+	if m.settingsConfig == nil || m.settingsConfig.index < 0 || m.settingsConfig.index >= len(m.settingsConfig.fields) {
+		return nil
+	}
+	field := &m.settingsConfig.fields[m.settingsConfig.index]
+	if field.hidden {
+		return nil
+	}
+	return field
+}
+
+func (m Model) settingsCurrentFieldKey() string {
+	field := m.currentSettingsField()
+	if field == nil {
+		return ""
+	}
+	return field.key
+}
+
+func (m Model) isSettingsChoiceFieldFocused() bool {
+	field := m.currentSettingsField()
+	return m.settingsStep == settingsStepProviderForm && field != nil && len(field.options) > 0
+}
+
+func (m Model) isSettingsModelFieldFocused() bool {
+	return m.settingsStep == settingsStepProviderForm && m.settingsCurrentFieldKey() == "model"
+}
+
+func (m Model) isSettingsModelListFocused() bool {
+	return m.isSettingsModelFieldFocused() && m.settingsModelListActive && len(m.settingsModels) > 0
+}
+
+func (m *Model) cycleSettingsChoiceField(delta int) bool {
+	field := m.currentSettingsField()
+	if field == nil || len(field.options) == 0 {
+		return false
+	}
+	current := 0
+	for index, option := range field.options {
+		if option == field.value {
+			current = index
+			break
+		}
+	}
+	current = (current + delta + len(field.options)) % len(field.options)
+	field.value = field.options[current]
+	m.applySettingsFormVisibility()
+	return true
+}
+
+func (m *Model) applySettingsFormVisibility() {
+	if m.settingsConfig == nil {
+		return
+	}
+	applyProviderFormVisibility(m.settingsConfig)
+	if m.isSettingsModelFieldFocused() {
+		m.settingsModelListActive = false
+		m.syncSettingsModelFilterFromConfig()
+	}
+}
+
+func (m *Model) syncSettingsModelFilterFromConfig() {
+	if m.settingsConfig == nil {
+		m.settingsModelFilter = ""
+		return
+	}
+	for _, field := range m.settingsConfig.fields {
+		if field.key == "model" {
+			m.settingsModelFilter = strings.TrimSpace(field.value)
+			m.settingsConfig.profile.Model = m.settingsModelFilter
+			m.applySettingsModelFilter()
+			return
+		}
+	}
+	m.settingsModelFilter = ""
+}
+
+func (m Model) openSettingsProviderDetail(choice provider.OnboardingCandidate, returnStep settingsStep, focusModel bool) (tea.Model, tea.Cmd) {
+	form := buildOnboardingForm(choice)
+	next := m
+	next.settingsStep = settingsStepProviderForm
+	next.settingsConfig = &form
+	next.settingsDetailReturnStep = returnStep
+	next.settingsModelCatalog = nil
+	next.settingsModels = nil
+	next.settingsModelIdx = 0
+	next.settingsModelInfo = false
+	next.settingsModelListActive = false
+	next.settingsModelBrowseAll = false
+	next.settingsBanner = ""
+	next.applySettingsFormVisibility()
+	next.syncSettingsModelFilterFromConfig()
+	if focusModel {
+		for index, field := range next.settingsConfig.fields {
+			if field.key == "model" {
+				next.settingsConfig.index = index
+				break
+			}
+		}
+	}
+	profile, err := next.resolveSettingsFormProfile()
+	if err != nil || next.loadModels == nil {
+		return next, nil
+	}
+	return next.loadSettingsModelsForProfile(profile)
+}
+
+func (m Model) loadSettingsModelsForProfile(profile provider.Profile) (tea.Model, tea.Cmd) {
+	if m.loadModels == nil {
+		return m, nil
+	}
+
+	m.busy = true
+	m.busyStartedAt = time.Now()
+	return m, func() tea.Msg {
+		if m.testProvider != nil {
+			if err := m.testProvider(profile); err != nil {
+				return settingsModelsLoadedMsg{profile: profile, err: err}
+			}
+		}
+		models, err := m.loadModels(profile)
+		if err != nil {
+			return settingsModelsLoadedMsg{profile: profile, err: err}
+		}
+		if strings.TrimSpace(profile.Model) != "" && !containsModelOption(models, profile.Model) {
+			models = append([]provider.ModelOption{{
+				ID:          profile.Model,
+				Description: "currently saved model",
+			}}, models...)
+		}
+		choices := make([]settingsModelChoice, 0, len(models))
+		for _, model := range models {
+			choices = append(choices, settingsModelChoice{profile: profile, model: model})
+		}
+		return settingsModelsLoadedMsg{profile: profile, choices: choices}
 	}
 }
 
@@ -638,6 +889,60 @@ func (m Model) resolveOnboardingFormProfile() (provider.Profile, error) {
 	return resolveFormProfile(*m.onboardingForm)
 }
 
+func providerThinkingField(profile provider.Profile) onboardingField {
+	value := strings.TrimSpace(profile.Thinking)
+	if value == "" {
+		value = string(provider.DefaultThinkingMode(profile))
+	}
+	return onboardingField{
+		key:     "thinking",
+		label:   "Thinking",
+		value:   value,
+		options: []string{"on", "off"},
+	}
+}
+
+func providerReasoningEffortField(profile provider.Profile) onboardingField {
+	value := strings.TrimSpace(profile.ReasoningEffort)
+	if value == "" {
+		value = string(provider.NormalizeReasoningEffort(""))
+	}
+	return onboardingField{
+		key:     "reasoning_effort",
+		label:   "Reasoning Effort",
+		value:   value,
+		options: []string{"low", "medium", "high", "xhigh"},
+	}
+}
+
+func formFieldValue(form onboardingFormState, key string) string {
+	for _, field := range form.fields {
+		if field.key == key {
+			return strings.TrimSpace(field.value)
+		}
+	}
+	return ""
+}
+
+func applyProviderFormVisibility(form *onboardingFormState) {
+	if form == nil {
+		return
+	}
+	if provider.SupportsThinking(form.profile) {
+		form.profile.Thinking = formFieldValue(*form, "thinking")
+	}
+	if provider.SupportsReasoningEffort(form.profile) {
+		form.profile.ReasoningEffort = formFieldValue(*form, "reasoning_effort")
+	}
+	showEffort := strings.EqualFold(formFieldValue(*form, "thinking"), string(provider.ThinkingOn)) && provider.SupportsReasoningEffort(form.profile)
+	for index := range form.fields {
+		if form.fields[index].key == "reasoning_effort" {
+			form.fields[index].hidden = !showEffort
+		}
+	}
+	normalizeFormIndex(form)
+}
+
 func buildOnboardingForm(choice provider.OnboardingCandidate) onboardingFormState {
 	profile := choice.Profile
 	form := onboardingFormState{
@@ -647,10 +952,19 @@ func buildOnboardingForm(choice provider.OnboardingCandidate) onboardingFormStat
 	}
 
 	switch profile.Preset {
-	case provider.PresetOpenAI, provider.PresetOpenRouter, provider.PresetAnthropic:
+	case provider.PresetOpenAI, provider.PresetOpenRouter:
 		form.fields = []onboardingField{
 			{key: "base_url", label: "Base URL", value: profile.BaseURL, required: true},
 			{key: "model", label: "Model", value: profile.Model, required: true},
+			providerThinkingField(profile),
+			providerReasoningEffortField(profile),
+			providerAPIKeyField(profile, true),
+		}
+	case provider.PresetAnthropic:
+		form.fields = []onboardingField{
+			{key: "base_url", label: "Base URL", value: profile.BaseURL, required: true},
+			{key: "model", label: "Model", value: profile.Model, required: true},
+			providerThinkingField(profile),
 			providerAPIKeyField(profile, true),
 		}
 	case provider.PresetOpenWebUI:
@@ -663,6 +977,7 @@ func buildOnboardingForm(choice provider.OnboardingCandidate) onboardingFormStat
 		form.fields = []onboardingField{
 			{key: "base_url", label: "Base URL", value: profile.BaseURL, required: true},
 			{key: "model", label: "Model", value: profile.Model, required: true},
+			providerThinkingField(profile),
 			providerAPIKeyField(profile, false),
 		}
 	case provider.PresetCustom:
@@ -678,11 +993,10 @@ func buildOnboardingForm(choice provider.OnboardingCandidate) onboardingFormStat
 		}
 		form.intro = "Use an installed Codex CLI and the existing local login."
 	default:
-		form.fields = []onboardingField{
-			{key: "model", label: "Model", value: profile.Model},
-		}
+		form.fields = []onboardingField{{key: "model", label: "Model", value: profile.Model}}
 	}
 
+	applyProviderFormVisibility(&form)
 	return form
 }
 
@@ -698,12 +1012,14 @@ func resolveFormProfile(form onboardingFormState) (provider.Profile, error) {
 	profile := form.profile
 	apiKeyValue := values["api_key"]
 	cfg := config.Config{
-		ProviderType:       string(profile.Preset),
-		ProviderAuthMethod: onboardingAuthMethod(profile.Preset, apiKeyValue, profile),
-		ProviderBaseURL:    values["base_url"],
-		ProviderModel:      values["model"],
-		ProviderAPIKey:     apiKeyValue,
-		ProviderCLICommand: values["cli_command"],
+		ProviderType:            string(profile.Preset),
+		ProviderAuthMethod:      onboardingAuthMethod(profile.Preset, apiKeyValue, profile),
+		ProviderBaseURL:         values["base_url"],
+		ProviderModel:           values["model"],
+		ProviderThinking:        values["thinking"],
+		ProviderReasoningEffort: values["reasoning_effort"],
+		ProviderAPIKey:          apiKeyValue,
+		ProviderCLICommand:      values["cli_command"],
 	}
 
 	resolved, err := provider.ResolveProfile(cfg)

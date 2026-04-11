@@ -201,13 +201,13 @@ Important rule:
 Current fallback ladder:
 - use the controller's currently tracked execution when one exists
 - on `F2` return, reconcile prompt state against the controller-selected take-control target for the active execution
-- when the post-handoff prompt text is not parseable, handoff reconciliation may still settle from observed shell-wrapper state plus semantic exit metadata or explicit interrupt evidence such as `^C`
+- when the post-handoff prompt text is not parseable, handoff reconciliation may still settle from shell-observed wrapper state plus semantic exit metadata or explicit interrupt evidence such as `^C`, but the controller must not synthesize a fake prompt context from that evidence
 - for `exit` / `logout`, reconciliation may also settle from tracked-pane respawn or disconnect-tail evidence before waiting forever on a fresh prompt parse
 - if no execution reconciles, ask the controller to attach to a manually started foreground command
 - if neither applies, treat the shell as having no active tracked command
 
 Important correctness rule:
-- prompt context is only accepted when Shuttle can see a current trailing prompt
+- prompt context is only accepted when Shuttle can see a current trailing prompt; shell-location updates and semantic exit evidence must remain separate from prompt-context acceptance
 - prompt-looking lines buried earlier in pane scrollback do not count as proof that a quiet foreground command has completed
 - this prevents false `exit=0` reconciliation for handoff cases like `sleep 20`
 

@@ -65,21 +65,23 @@ type CapabilitySet struct {
 }
 
 type Profile struct {
-	ID            string
-	Name          string
-	BackendFamily BackendFamily
-	Preset        ProviderPreset
-	AuthMethod    AuthMethod
-	BaseURL       string
-	Model         string
-	APIKey        string
-	APIKeyEnvVar  string
-	CLICommand    string
-	CLIArgs       []string
-	SelectedModel *ModelOption
-	Capabilities  CapabilitySet
-	Source        ProfileSource
-	HealthStatus  HealthStatus
+	ID              string
+	Name            string
+	BackendFamily   BackendFamily
+	Preset          ProviderPreset
+	AuthMethod      AuthMethod
+	BaseURL         string
+	Model           string
+	Thinking        string
+	ReasoningEffort string
+	APIKey          string
+	APIKeyEnvVar    string
+	CLICommand      string
+	CLIArgs         []string
+	SelectedModel   *ModelOption
+	Capabilities    CapabilitySet
+	Source          ProfileSource
+	HealthStatus    HealthStatus
 }
 
 var ErrMissingAPIKey = errors.New("provider API key is not configured")
@@ -87,7 +89,7 @@ var ErrMissingAPIKey = errors.New("provider API key is not configured")
 func ResolveProfile(cfg config.Config) (Profile, error) {
 	switch normalizePreset(cfg.ProviderType) {
 	case PresetMock:
-		return Profile{
+		return applyInteractiveProviderSettings(Profile{
 			ID:            "mock",
 			Name:          "Mock Provider",
 			BackendFamily: BackendBuiltin,
@@ -99,22 +101,26 @@ func ResolveProfile(cfg config.Config) (Profile, error) {
 				StructuredOutput: true,
 				ApprovalFlow:     true,
 			},
-		}, nil
+		}, cfg), nil
 	case PresetOpenAI:
 		defaults := responsesPresetDefaults(PresetOpenAI)
-		return resolveResponsesProfile(cfg, defaults), nil
+		return applyInteractiveProviderSettings(resolveResponsesProfile(cfg, defaults), cfg), nil
 	case PresetOpenRouter:
 		defaults := responsesPresetDefaults(PresetOpenRouter)
-		return resolveResponsesProfile(cfg, defaults), nil
+		return applyInteractiveProviderSettings(resolveResponsesProfile(cfg, defaults), cfg), nil
 	case PresetOpenWebUI:
 		defaults := responsesPresetDefaults(PresetOpenWebUI)
-		return resolveResponsesProfile(cfg, defaults), nil
+		return applyInteractiveProviderSettings(resolveResponsesProfile(cfg, defaults), cfg), nil
 	case PresetAnthropic:
-		return resolveAnthropicProfile(cfg), nil
+		return applyInteractiveProviderSettings(resolveAnthropicProfile(cfg), cfg), nil
 	case PresetOllama:
-		return resolveOllamaProfile(cfg)
+		profile, err := resolveOllamaProfile(cfg)
+		if err != nil {
+			return Profile{}, err
+		}
+		return applyInteractiveProviderSettings(profile, cfg), nil
 	case PresetCodexCLI:
-		return resolveCodexCLIProfile(cfg), nil
+		return applyInteractiveProviderSettings(resolveCodexCLIProfile(cfg), cfg), nil
 	case PresetCustom:
 		if strings.TrimSpace(cfg.ProviderBaseURL) == "" {
 			return Profile{}, errors.New("custom provider requires --base-url")
@@ -122,7 +128,7 @@ func ResolveProfile(cfg config.Config) (Profile, error) {
 		defaults := responsesPresetDefaults(PresetCustom)
 		defaults.baseURL = cfg.ProviderBaseURL
 		defaults.model = defaultModel(cfg.ProviderModel, defaults.model)
-		return resolveResponsesProfile(cfg, defaults), nil
+		return applyInteractiveProviderSettings(resolveResponsesProfile(cfg, defaults), cfg), nil
 	default:
 		return Profile{}, fmt.Errorf("unsupported provider preset %q", cfg.ProviderType)
 	}
@@ -219,6 +225,21 @@ func resolveResponsesProfile(cfg config.Config, defaults responsesDefaults) Prof
 			ApprovalFlow:     true,
 		},
 	}
+}
+
+func applyInteractiveProviderSettings(profile Profile, cfg config.Config) Profile {
+	if !SupportsThinking(profile) {
+		profile.Thinking = ""
+		profile.ReasoningEffort = ""
+		return profile
+	}
+	profile.Thinking = string(NormalizeThinkingMode(cfg.ProviderThinking, profile))
+	if SupportsReasoningEffort(profile) {
+		profile.ReasoningEffort = string(NormalizeReasoningEffort(cfg.ProviderReasoningEffort))
+	} else {
+		profile.ReasoningEffort = ""
+	}
+	return profile
 }
 
 func resolveCodexCLIProfile(cfg config.Config) Profile {

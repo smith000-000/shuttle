@@ -512,3 +512,39 @@ func jsonResponse(statusCode int, body string) *http.Response {
 		Body:       io.NopCloser(strings.NewReader(body)),
 	}
 }
+
+func TestResponsesAgentIncludesConfiguredReasoningEffort(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("ReadAll() error = %v", err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("Unmarshal() error = %v", err)
+		}
+		reasoning, ok := payload["reasoning"].(map[string]any)
+		if !ok || reasoning["effort"] != "high" {
+			t.Fatalf("expected reasoning.effort=high, got %#v", payload["reasoning"])
+		}
+		return jsonResponse(http.StatusOK, `{"model":"gpt-5.4","output_text":"{\"message\":\"ok\"}"}`), nil
+	})}
+
+	agent, err := NewResponsesAgent(Profile{
+		BackendFamily:   BackendResponsesHTTP,
+		Preset:          PresetOpenAI,
+		AuthMethod:      AuthAPIKey,
+		BaseURL:         "https://provider.test/v1",
+		Model:           "gpt-5.4",
+		Thinking:        string(ThinkingOn),
+		ReasoningEffort: string(ReasoningEffortHigh),
+		APIKey:          "test-key",
+		APIKeyEnvVar:    "OPENAI_API_KEY",
+	}, client)
+	if err != nil {
+		t.Fatalf("NewResponsesAgent() error = %v", err)
+	}
+	if _, err := agent.Respond(context.Background(), controller.AgentInput{Prompt: "hello"}); err != nil {
+		t.Fatalf("Respond() error = %v", err)
+	}
+}

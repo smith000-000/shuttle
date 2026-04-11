@@ -204,6 +204,69 @@ func TestLocalControllerContinueAfterCommandRequiresNextActionAfterInspectionFai
 	}
 }
 
+func TestBuildAutoContinuePromptForcesNextActionAfterFailedInvestigativeInspection(t *testing.T) {
+	task := TaskContext{
+		PriorTranscript: []TranscriptEvent{
+			{Kind: EventUserMessage, Payload: TextPayload{Text: "can you figure out how and where orcaslicer was installed?"}},
+		},
+		LastCommandResult: &CommandResultSummary{
+			Command: "which orcaslicer",
+			State:   CommandExecutionFailed,
+			Summary: "orcaslicer not found",
+		},
+	}
+
+	prompt := buildAutoContinuePrompt(task)
+	if !strings.Contains(prompt, autoContinuePromptChecklistSuffix) {
+		t.Fatalf("expected checklist continuation guidance, got %q", prompt)
+	}
+	if !strings.Contains(prompt, autoContinuePromptUnresolvedInspectionSuffix) {
+		t.Fatalf("expected unresolved investigative guidance, got %q", prompt)
+	}
+}
+
+func TestBuildAutoContinuePromptForcesNextActionAfterFailedInvestigativeDebugInspection(t *testing.T) {
+	task := TaskContext{
+		PriorTranscript: []TranscriptEvent{
+			{Kind: EventUserMessage, Payload: TextPayload{Text: "can you figure out why nginx is listening on this port?"}},
+		},
+		LastCommandResult: &CommandResultSummary{
+			Command: "ss -ltnp | grep :8080",
+			State:   CommandExecutionFailed,
+			Summary: "no matches found",
+		},
+	}
+
+	prompt := buildAutoContinuePrompt(task)
+	if !strings.Contains(prompt, autoContinuePromptChecklistSuffix) {
+		t.Fatalf("expected checklist continuation guidance, got %q", prompt)
+	}
+	if !strings.Contains(prompt, autoContinuePromptUnresolvedInspectionSuffix) {
+		t.Fatalf("expected unresolved investigative guidance, got %q", prompt)
+	}
+}
+
+func TestBuildAutoContinuePromptForcesNextActionAfterInconclusiveInvestigativeInspection(t *testing.T) {
+	task := TaskContext{
+		PriorTranscript: []TranscriptEvent{
+			{Kind: EventUserMessage, Payload: TextPayload{Text: "determine which file is loading this environment variable"}},
+		},
+		LastCommandResult: &CommandResultSummary{
+			Command: "rg FOO_ENABLED /etc ~/.config",
+			State:   CommandExecutionCompleted,
+			Summary: "no results",
+		},
+	}
+
+	prompt := buildAutoContinuePrompt(task)
+	if !strings.Contains(prompt, autoContinuePromptChecklistSuffix) {
+		t.Fatalf("expected checklist continuation guidance, got %q", prompt)
+	}
+	if !strings.Contains(prompt, autoContinuePromptUnresolvedInspectionSuffix) {
+		t.Fatalf("expected unresolved investigative guidance, got %q", prompt)
+	}
+}
+
 func TestBuildAutoContinuePromptForcesPatchRebaseAfterInspection(t *testing.T) {
 	task := TaskContext{
 		LastCommandResult: &CommandResultSummary{

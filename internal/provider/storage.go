@@ -34,13 +34,15 @@ var (
 )
 
 type persistedProviderConfig struct {
-	Version    int    `json:"version"`
-	Provider   string `json:"provider"`
-	AuthMethod string `json:"auth_method"`
-	BaseURL    string `json:"base_url"`
-	Model      string `json:"model"`
-	APIKeyRef  string `json:"api_key_ref,omitempty"`
-	CLICommand string `json:"cli_command,omitempty"`
+	Version         int    `json:"version"`
+	Provider        string `json:"provider"`
+	AuthMethod      string `json:"auth_method"`
+	BaseURL         string `json:"base_url"`
+	Model           string `json:"model"`
+	Thinking        string `json:"thinking,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	APIKeyRef       string `json:"api_key_ref,omitempty"`
+	CLICommand      string `json:"cli_command,omitempty"`
 }
 
 type SecretStoreOptions struct {
@@ -190,13 +192,15 @@ func persistableProviderConfig(stateDir string, profile Profile, opts SecretStor
 	}
 
 	return persistedProviderConfig{
-		Version:    storedProviderVersion,
-		Provider:   string(profile.Preset),
-		AuthMethod: string(profile.AuthMethod),
-		BaseURL:    strings.TrimSpace(profile.BaseURL),
-		Model:      strings.TrimSpace(profile.Model),
-		APIKeyRef:  apiKeyRef,
-		CLICommand: strings.TrimSpace(profile.CLICommand),
+		Version:         storedProviderVersion,
+		Provider:        string(profile.Preset),
+		AuthMethod:      string(profile.AuthMethod),
+		BaseURL:         strings.TrimSpace(profile.BaseURL),
+		Model:           strings.TrimSpace(profile.Model),
+		Thinking:        strings.TrimSpace(profile.Thinking),
+		ReasoningEffort: strings.TrimSpace(profile.ReasoningEffort),
+		APIKeyRef:       apiKeyRef,
+		CLICommand:      strings.TrimSpace(profile.CLICommand),
 	}, nil
 }
 
@@ -205,6 +209,8 @@ func applyPersistedConfig(cfg config.Config, stored persistedProviderConfig) (co
 	cfg.ProviderAuthMethod = stored.AuthMethod
 	cfg.ProviderBaseURL = stored.BaseURL
 	cfg.ProviderModel = stored.Model
+	cfg.ProviderThinking = stored.Thinking
+	cfg.ProviderReasoningEffort = stored.ReasoningEffort
 	cfg.ProviderCLICommand = stored.CLICommand
 	cfg.ProviderAPIKey = ""
 	cfg.ProviderAPIKeyEnvVar = stored.APIKeyRef

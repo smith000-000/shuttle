@@ -32,7 +32,16 @@ type OnboardingCandidate struct {
 	Reason     string
 	AuthSource string
 	Manual     bool
+	Source     OnboardingCandidateSource
 }
+
+type OnboardingCandidateSource string
+
+const (
+	OnboardingCandidateDetected OnboardingCandidateSource = "detected"
+	OnboardingCandidateStored   OnboardingCandidateSource = "stored"
+	OnboardingCandidateManual   OnboardingCandidateSource = "manual"
+)
 
 func BuildOnboardingCandidates(stateDir string) ([]OnboardingCandidate, error) {
 	candidates := make([]OnboardingCandidate, 0, 8)
@@ -58,6 +67,7 @@ func BuildOnboardingCandidates(stateDir string) ([]OnboardingCandidate, error) {
 		candidates = appendCandidate(candidates, seen, candidate)
 	}
 
+	sortOnboardingCandidates(candidates)
 	return candidates, nil
 }
 
@@ -121,6 +131,7 @@ func DetectOnboardingCandidates() ([]OnboardingCandidate, error) {
 	}
 
 	if len(candidates) > 0 {
+		sortOnboardingCandidates(candidates)
 		return candidates, nil
 	}
 
@@ -152,13 +163,12 @@ func DetectOnboardingCandidates() ([]OnboardingCandidate, error) {
 		return nil, err
 	}
 
-	return []OnboardingCandidate{
-		{
-			Profile:    profile,
-			Reason:     fmt.Sprintf("Detected %s for the %s preset.", genericSource, profile.Preset),
-			AuthSource: genericSource,
-		},
-	}, nil
+	return []OnboardingCandidate{{
+		Profile:    profile,
+		Reason:     fmt.Sprintf("Detected %s for the %s preset.", genericSource, profile.Preset),
+		AuthSource: genericSource,
+		Source:     OnboardingCandidateDetected,
+	}}, nil
 }
 
 func detectResponsesCandidate(preset ProviderPreset, specificEnvVar string) (OnboardingCandidate, bool, error) {
@@ -181,6 +191,7 @@ func detectResponsesCandidate(preset ProviderPreset, specificEnvVar string) (Onb
 		Profile:    profile,
 		Reason:     fmt.Sprintf("Detected %s for the %s preset.", apiKeySource, profile.Preset),
 		AuthSource: apiKeySource,
+		Source:     OnboardingCandidateDetected,
 	}, true, nil
 }
 
@@ -217,6 +228,7 @@ func detectCustomCandidate() (OnboardingCandidate, bool, error) {
 		Profile:    profile,
 		Reason:     reason,
 		AuthSource: apiKeySource,
+		Source:     OnboardingCandidateDetected,
 	}, true, nil
 }
 
@@ -242,6 +254,7 @@ func detectCodexCLICandidate() (OnboardingCandidate, bool, error) {
 		Profile:    profile,
 		Reason:     "Detected an authenticated local Codex CLI session.",
 		AuthSource: "codex login",
+		Source:     OnboardingCandidateDetected,
 	}, true, nil
 }
 
@@ -263,6 +276,7 @@ func detectOllamaCandidate() (OnboardingCandidate, bool, error) {
 		Profile:    profile,
 		Reason:     fmt.Sprintf("Detected a reachable Ollama server at %s.", profile.BaseURL),
 		AuthSource: "local/network",
+		Source:     OnboardingCandidateDetected,
 	}, true, nil
 }
 
@@ -300,6 +314,7 @@ func loadStoredOnboardingCandidates(stateDir string) ([]OnboardingCandidate, Pro
 			Profile:    profile,
 			Reason:     reason,
 			AuthSource: authSource,
+			Source:     OnboardingCandidateStored,
 		})
 	}
 
@@ -351,6 +366,7 @@ func manualOnboardingCandidates() []OnboardingCandidate {
 			Profile: profile,
 			Reason:  "Manual setup. Enter provider settings and store them for future sessions.",
 			Manual:  true,
+			Source:  OnboardingCandidateManual,
 		})
 	}
 
@@ -389,4 +405,61 @@ func prioritizeStoredCandidates(candidates []OnboardingCandidate, selectedPreset
 		return candidates[i].Profile.Name < candidates[j].Profile.Name
 	})
 	return candidates
+}
+
+func sortOnboardingCandidates(candidates []OnboardingCandidate) {
+	sort.SliceStable(candidates, func(i int, j int) bool {
+		left := onboardingCandidateRank(candidates[i])
+		right := onboardingCandidateRank(candidates[j])
+		if left != right {
+			return left < right
+		}
+
+		leftCurrent := strings.Contains(candidates[i].Reason, "Currently selected")
+		rightCurrent := strings.Contains(candidates[j].Reason, "Currently selected")
+		if leftCurrent != rightCurrent {
+			return leftCurrent
+		}
+
+		if candidates[i].Profile.Name != candidates[j].Profile.Name {
+			return candidates[i].Profile.Name < candidates[j].Profile.Name
+		}
+		return onboardingCandidateKey(candidates[i]) < onboardingCandidateKey(candidates[j])
+	})
+}
+
+func onboardingCandidateRank(candidate OnboardingCandidate) int {
+	if candidate.Manual || candidate.Source == OnboardingCandidateManual {
+		return 1000 + onboardingPresetRank(candidate.Profile.Preset)
+	}
+
+	switch candidate.Source {
+	case OnboardingCandidateDetected:
+		return onboardingPresetRank(candidate.Profile.Preset)
+	case OnboardingCandidateStored:
+		return 500 + onboardingPresetRank(candidate.Profile.Preset)
+	default:
+		return 800 + onboardingPresetRank(candidate.Profile.Preset)
+	}
+}
+
+func onboardingPresetRank(preset ProviderPreset) int {
+	switch preset {
+	case PresetCodexCLI:
+		return 0
+	case PresetOpenAI:
+		return 10
+	case PresetOpenRouter:
+		return 20
+	case PresetAnthropic:
+		return 30
+	case PresetOpenWebUI:
+		return 40
+	case PresetOllama:
+		return 50
+	case PresetCustom:
+		return 90
+	default:
+		return 200
+	}
 }

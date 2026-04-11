@@ -26,6 +26,7 @@ The old implementation plans were useful to get here, but most of them now descr
 - Shell lifecycle regression coverage: keep expanding non-interactive coverage for remote transitions and interactive recovery edge cases, and keep the manual checklist in sync with the real product behavior.
 - Provider extensibility cleanup: reduce provider registration wiring, expose richer provider capabilities, and keep the current built-in backends behind the same abstraction boundary.
 - Execution-pane visibility and handoff UX: add a controller-level overview of active tmux panes/executions, and use it to support a clearer tracked-command view flow such as an `F3` shortcut when a live owned execution pane exists.
+- Transcript shell rendering regression: selected-command transcript view still leaks grey selection background into ANSI-preserved shell output instead of confining the indicator to the left gutter.
 
 ### P2
 - Release and install polish: package-manager distribution, remaining platform packaging cleanup, and operator-facing install/runtime docs.

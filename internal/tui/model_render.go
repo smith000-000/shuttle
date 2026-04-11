@@ -1257,19 +1257,13 @@ func (m Model) renderSettingsView() string {
 		lines = append(lines, m.styles.detailBody.Render("Configure Providers"))
 		lines = append(lines, m.styles.detailMeta.Render("Edit provider settings and save them for future sessions."))
 		lines = append(lines, m.renderSettingsProviders(contentWidth)...)
-	case settingsStepActiveProvider:
-		lines = append(lines, m.styles.detailBody.Render("Change Active Provider"))
-		lines = append(lines, m.styles.detailMeta.Render("Choose which configured provider Shuttle should use right now."))
-		lines = append(lines, m.renderSettingsProviders(contentWidth)...)
-	case settingsStepActiveModels:
-		lines = append(lines, m.styles.detailBody.Render("Select Model"))
-		lines = append(lines, m.styles.detailMeta.Render("Choose the provider/model Shuttle should use right now."))
-		lines = append(lines, m.renderSettingsModels(contentWidth)...)
 	case settingsStepProviderForm:
 		if m.settingsConfig != nil {
 			lines = append(lines, m.styles.detailBody.Render(m.settingsConfig.title))
-			lines = append(lines, m.styles.detailMeta.Render(m.settingsConfig.intro))
+			lines = append(lines, m.styles.detailMeta.Render("Edit provider settings and select a model on the same page."))
 			lines = append(lines, m.renderSettingsConfig(contentWidth)...)
+			lines = append(lines, "", m.styles.detailMeta.Render("Models"))
+			lines = append(lines, m.renderSettingsModels(contentWidth)...)
 		}
 	default:
 		lines = append(lines, m.styles.detailBody.Render("Current"))
@@ -1277,7 +1271,7 @@ func (m Model) renderSettingsView() string {
 		lines = append(lines, m.renderSettingsMenu(contentWidth)...)
 	}
 
-	lines = append(lines, "", m.styles.detailMeta.Render(settingsFooter(width, m.settingsStep)))
+	lines = append(lines, "", m.styles.detailMeta.Render(settingsFooter(width, m.settingsStep, m)))
 	return m.styles.detail.Width(contentWidth).Height(height).Render(strings.Join(lines, "\n"))
 }
 
@@ -1291,9 +1285,9 @@ func helpContentLines(width int, mode Mode, canSendKeys bool) []string {
 		"/approvals dangerous: disable Shuttle approval gating for agent commands and patches in this session",
 		"/new: start a fresh task without restarting Shuttle or losing shell continuity",
 		"/compact: summarize older task context and keep a shorter live context window",
-		"/onboard or /onboarding: open provider onboarding",
-		"/provider or /providers: open the active provider picker",
-		"/model or /models: open the active model picker",
+		"/onboard or /onboarding: open Configure Providers in settings",
+		"/provider or /providers: open Configure Providers in settings",
+		"/model or /models: open the current provider detail focused on model selection",
 		"/quit or /exit: leave Shuttle",
 		"> Slash commands only trigger in agent mode. In shell mode, leading / stays a path.",
 		"",
@@ -1412,7 +1406,10 @@ func (m Model) renderSettingsProviders(contentWidth int) []string {
 		if entry.disabled {
 			label += " (coming soon)"
 		}
-		current := entry.candidate != nil && entry.candidate.Profile.Preset == m.activeProvider.Preset
+		current := entry.candidate != nil && onboardingCandidateMatchesProfile(*entry.candidate, m.activeProvider)
+		if current {
+			label += " (current)"
+		}
 		lines = append(lines, m.renderSettingsRow(label, index == m.settingsProviderIdx, current, entry.disabled))
 		if entry.detail != "" {
 			for _, line := range wrapParagraphs(entry.detail, max(10, contentWidth-2)) {
@@ -1427,16 +1424,23 @@ func (m Model) renderSettingsProviders(contentWidth int) []string {
 }
 
 func (m Model) renderSettingsModels(contentWidth int) []string {
-	lines := []string{m.renderSettingsCurrentLine("Current: " + currentProviderModelLabel(m.activeProvider))}
-	filterLine := "Filter: type to search models"
-	if m.settingsModelScope != "" {
-		filterLine = fmt.Sprintf("Provider: %s  %s", settingsProviderLabel(m.settingsModelScope), filterLine)
+	profile := m.activeProvider
+	if m.settingsConfig != nil {
+		profile = m.settingsConfig.profile
 	}
-	if strings.TrimSpace(m.settingsModelFilter) != "" {
-		filterLine = fmt.Sprintf("Filter: %s  (%d matches)", m.settingsModelFilter, len(m.settingsModels))
-		if m.settingsModelScope != "" {
-			filterLine = fmt.Sprintf("Provider: %s  %s", settingsProviderLabel(m.settingsModelScope), filterLine)
+	lines := []string{m.renderSettingsCurrentLine("Current: " + currentProviderModelLabel(profile))}
+	filterLine := "Type a model slug, or press Right Arrow to browse the model catalog."
+	if m.isSettingsModelListFocused() {
+		filterLine = "Enter to select  Esc to go back"
+		if m.settingsModelBrowseAll {
+			filterLine = fmt.Sprintf("Browsing full model list  (%d models)  Enter to select  Esc to go back", len(m.settingsModels))
+		} else if strings.TrimSpace(m.settingsModelFilter) != "" {
+			filterLine = fmt.Sprintf("Model filter: %s  (%d matches)  Enter to select  Esc to go back", m.settingsModelFilter, len(m.settingsModels))
 		}
+	} else if m.settingsModelBrowseAll {
+		filterLine = fmt.Sprintf("Browsing full model list  (%d models)", len(m.settingsModels))
+	} else if strings.TrimSpace(m.settingsModelFilter) != "" {
+		filterLine = fmt.Sprintf("Model filter: %s  (%d matches)", m.settingsModelFilter, len(m.settingsModels))
 	}
 	lines = append(lines, m.styles.detailMeta.Render(filterLine))
 	lines = append(lines, m.styles.detailMeta.Render("Shift+I shows extra model details for the highlighted row."))
@@ -1456,11 +1460,11 @@ func (m Model) renderSettingsModels(contentWidth int) []string {
 	lastProvider := ""
 	for index := start; index < end; index++ {
 		choice := m.settingsModels[index]
-		if choice.profile.Name != lastProvider {
+		if choice.profile.Name != lastProvider && m.settingsStep != settingsStepProviderForm {
 			lines = append(lines, m.styles.detailMeta.Render(choice.profile.Name))
 			lastProvider = choice.profile.Name
 		}
-		current := choice.profile.Preset == m.activeProvider.Preset && choice.model.ID == m.activeProvider.Model
+		current := choice.profile.Preset == profile.Preset && choice.model.ID == profile.Model
 		label := fmt.Sprintf("%s / %s", settingsProviderLabel(choice.profile.Preset), choice.model.ID)
 		lines = append(lines, m.renderSettingsRow(label, index == m.settingsModelIdx, current, false))
 		detail := modelSummaryLine(choice.model)
@@ -1551,40 +1555,32 @@ func (m Model) renderSettingsConfig(contentWidth int) []string {
 
 	lines := []string{m.styles.detailMeta.Render(providerSummaryLine(m.settingsConfig.profile))}
 	for index, field := range m.settingsConfig.fields {
-		value := field.value
-		switch {
-		case field.secret && strings.TrimSpace(value) != "":
-			value = strings.Repeat("*", min(12, len(value)))
-		case strings.TrimSpace(value) == "" && field.placeholder != "":
-			value = "<" + field.placeholder + ">"
-		case strings.TrimSpace(value) == "":
-			value = "<empty>"
+		if field.hidden {
+			continue
 		}
-
+		value := settingsFieldDisplayValue(field)
 		lines = append(lines, m.renderSettingsRow(fmt.Sprintf("%s: %s", field.label, value), index == m.settingsConfig.index, false, false))
 	}
+	lines = append(lines, m.styles.detailMeta.Render("Use Left/Right or Space to toggle radio settings like Thinking."))
 	lines = append(lines, m.styles.detailMeta.Render("API keys entered here are stored in the OS keyring."))
 	return lines
 }
 
 func (m Model) renderOnboardingProviders(contentWidth int) []string {
-	lines := make([]string, 0, len(m.onboardingChoices)*4)
+	lines := make([]string, 0, len(m.onboardingChoices)*5)
 	for index, choice := range m.onboardingChoices {
 		prefix := "  "
 		if index == m.onboardingIndex {
 			prefix = "› "
 		}
 
-		label := fmt.Sprintf("%s%s", prefix, choice.Profile.Name)
-		if choice.Profile.Preset == m.activeProvider.Preset && choice.Profile.Preset != "" {
-			label += " (current)"
-		}
+		current := onboardingCandidateMatchesProfile(choice, m.activeProvider)
+		recommended := index == 0 && !current
+		label := fmt.Sprintf("%s%s", prefix, onboardingCandidateLabel(choice, current, recommended))
 
 		lines = append(lines, m.styles.detailBody.Render(label))
 		lines = append(lines, m.styles.detailMeta.Render("   "+providerSummaryLine(choice.Profile)))
-		if choice.Manual {
-			lines = append(lines, m.styles.detailMeta.Render("   setup: manual entry"))
-		}
+		lines = append(lines, m.styles.detailMeta.Render("   status: "+onboardingCandidateStatus(choice, current, recommended)))
 		if choice.AuthSource != "" {
 			lines = append(lines, m.styles.detailMeta.Render("   auth source: "+choice.AuthSource))
 		}
@@ -1615,22 +1611,14 @@ func (m Model) renderOnboardingConfig(contentWidth int) []string {
 
 	lines = append(lines, m.styles.detailMeta.Render(providerSummaryLine(m.onboardingForm.profile)), "")
 	for index, field := range m.onboardingForm.fields {
+		if field.hidden {
+			continue
+		}
 		prefix := "  "
 		if index == m.onboardingForm.index {
 			prefix = "› "
 		}
-
-		value := field.value
-		switch {
-		case field.secret && strings.TrimSpace(value) != "":
-			value = strings.Repeat("*", min(12, len(value)))
-		case strings.TrimSpace(value) == "" && field.placeholder != "":
-			value = "<" + field.placeholder + ">"
-		case strings.TrimSpace(value) == "":
-			value = "<empty>"
-		}
-
-		label := fmt.Sprintf("%s%s: %s", prefix, field.label, value)
+		label := fmt.Sprintf("%s%s: %s", prefix, field.label, settingsFieldDisplayValue(field))
 		lines = append(lines, m.styles.detailBody.Render(label))
 	}
 
@@ -1724,6 +1712,47 @@ func (m Model) settingsRowStyle(selected bool, current bool, disabled bool) lipg
 	}
 }
 
+func settingsChoiceOptionLabel(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "on":
+		return "On"
+	case "off":
+		return "Off"
+	case "xhigh":
+		return "XHigh"
+	default:
+		if value == "" {
+			return ""
+		}
+		return strings.ToUpper(value[:1]) + value[1:]
+	}
+}
+
+func settingsFieldDisplayValue(field onboardingField) string {
+	if len(field.options) > 0 {
+		parts := make([]string, 0, len(field.options))
+		for _, option := range field.options {
+			marker := "( )"
+			if option == field.value {
+				marker = "(*)"
+			}
+			parts = append(parts, marker+" "+settingsChoiceOptionLabel(option))
+		}
+		return strings.Join(parts, "  ")
+	}
+	value := field.value
+	switch {
+	case field.secret && strings.TrimSpace(value) != "":
+		return strings.Repeat("*", min(12, len(value)))
+	case strings.TrimSpace(value) == "" && field.placeholder != "":
+		return "<" + field.placeholder + ">"
+	case strings.TrimSpace(value) == "":
+		return "<empty>"
+	default:
+		return value
+	}
+}
+
 func providerSummaryLine(profile provider.Profile) string {
 	if profile.Preset == "" {
 		return "provider not configured"
@@ -1733,7 +1762,52 @@ func providerSummaryLine(profile provider.Profile) string {
 	if strings.TrimSpace(auth) == "" {
 		auth = "unknown"
 	}
-	return fmt.Sprintf("preset=%s  model=%s  base=%s  auth=%s", profile.Preset, profile.Model, profile.BaseURL, auth)
+	parts := []string{fmt.Sprintf("preset=%s", profile.Preset), fmt.Sprintf("model=%s", profile.Model), fmt.Sprintf("base=%s", profile.BaseURL), fmt.Sprintf("auth=%s", auth)}
+	if provider.SupportsThinking(profile) {
+		parts = append(parts, fmt.Sprintf("thinking=%s", profile.Thinking))
+	}
+	if provider.SupportsReasoningEffort(profile) && provider.ThinkingEnabled(profile) {
+		parts = append(parts, fmt.Sprintf("effort=%s", profile.ReasoningEffort))
+	}
+	return strings.Join(parts, "  ")
+}
+
+func onboardingCandidateLabel(candidate provider.OnboardingCandidate, current bool, recommended bool) string {
+	flags := make([]string, 0, 2)
+	if recommended {
+		flags = append(flags, "recommended")
+	}
+	if current {
+		flags = append(flags, "current")
+	}
+	if len(flags) == 0 {
+		return candidate.Profile.Name
+	}
+	return candidate.Profile.Name + " (" + strings.Join(flags, ", ") + ")"
+}
+
+func onboardingCandidateStatus(candidate provider.OnboardingCandidate, current bool, recommended bool) string {
+	status := onboardingCandidateSourceLabel(candidate)
+	if current {
+		status = "active " + status
+	}
+	if recommended {
+		status = "best first-run match; " + status
+	}
+	return status
+}
+
+func onboardingCandidateSourceLabel(candidate provider.OnboardingCandidate) string {
+	switch {
+	case candidate.Manual || candidate.Source == provider.OnboardingCandidateManual:
+		return "manual entry"
+	case candidate.Source == provider.OnboardingCandidateStored:
+		return "saved profile"
+	case candidate.Source == provider.OnboardingCandidateDetected:
+		return "detected working path"
+	default:
+		return "provider option"
+	}
 }
 
 func providerAuthSourceLabel(profile provider.Profile) string {
@@ -1786,8 +1860,6 @@ func settingsMenuEntries() []settingsMenuEntry {
 	return []settingsMenuEntry{
 		{label: "Session Settings"},
 		{label: "Configure Providers"},
-		{label: "Change Active Provider"},
-		{label: "Select Model"},
 	}
 }
 
@@ -1799,10 +1871,10 @@ func settingsApprovalEntries() []settingsApprovalEntry {
 	}
 }
 
-func buildSettingsProviderEntries(candidates []provider.OnboardingCandidate) []settingsProviderEntry {
+func buildSettingsProviderEntries(candidates []provider.OnboardingCandidate, active provider.Profile) []settingsProviderEntry {
 	chosen := map[provider.ProviderPreset]provider.OnboardingCandidate{}
 	for _, preset := range settingsProviderOrder() {
-		if candidate, ok := chooseSettingsCandidate(candidates, preset); ok {
+		if candidate, ok := chooseSettingsCandidate(candidates, preset, active); ok {
 			chosen[preset] = candidate
 		}
 	}
@@ -1831,19 +1903,42 @@ func buildSettingsProviderEntries(candidates []provider.OnboardingCandidate) []s
 	return entries
 }
 
-func chooseSettingsCandidate(candidates []provider.OnboardingCandidate, preset provider.ProviderPreset) (provider.OnboardingCandidate, bool) {
+func chooseSettingsCandidate(candidates []provider.OnboardingCandidate, preset provider.ProviderPreset, active provider.Profile) (provider.OnboardingCandidate, bool) {
+	var detected *provider.OnboardingCandidate
+	var stored *provider.OnboardingCandidate
 	var manual *provider.OnboardingCandidate
 	for _, candidate := range candidates {
 		if candidate.Profile.Preset != preset {
 			continue
 		}
-		if !candidate.Manual {
+		if onboardingCandidateMatchesProfile(candidate, active) {
 			return candidate, true
 		}
-		if manual == nil {
-			candidateCopy := candidate
-			manual = &candidateCopy
+		candidateCopy := candidate
+		switch candidate.Source {
+		case provider.OnboardingCandidateStored:
+			if stored == nil {
+				stored = &candidateCopy
+			}
+		case provider.OnboardingCandidateManual:
+			if manual == nil {
+				manual = &candidateCopy
+			}
+		default:
+			if candidate.Manual {
+				if manual == nil {
+					manual = &candidateCopy
+				}
+			} else if detected == nil {
+				detected = &candidateCopy
+			}
 		}
+	}
+	if detected != nil {
+		return *detected, true
+	}
+	if stored != nil {
+		return *stored, true
 	}
 	if manual != nil {
 		return *manual, true
@@ -1885,10 +1980,7 @@ func settingsProviderLabel(preset provider.ProviderPreset) string {
 }
 
 func settingsProviderDetail(candidate provider.OnboardingCandidate) string {
-	status := "manual setup"
-	if !candidate.Manual {
-		status = "configured"
-	}
+	status := onboardingCandidateSourceLabel(candidate)
 	if candidate.AuthSource != "" {
 		status += " via " + candidate.AuthSource
 	}
@@ -1899,7 +1991,7 @@ func settingsProviderDetail(candidate provider.OnboardingCandidate) string {
 }
 
 func settingsProfileKey(profile provider.Profile) string {
-	return fmt.Sprintf("%s|%s|%s", profile.Preset, profile.BaseURL, profile.CLICommand)
+	return fmt.Sprintf("%s|%s|%s|%s|%s", profile.Preset, profile.BaseURL, profile.CLICommand, profile.Thinking, profile.ReasoningEffort)
 }
 
 func settingsModelChoiceKey(choice settingsModelChoice) string {
@@ -2106,19 +2198,15 @@ func onboardingFooter(width int, step onboardingStep) string {
 	return "Enter inspect models  Esc close  Up/Down move  F2 shell"
 }
 
-func settingsFooter(width int, step settingsStep) string {
+func settingsFooter(width int, step settingsStep, m Model) string {
 	if width < 72 {
 		switch step {
 		case settingsStepSession:
 			return "Enter set mode  Esc back  Up/Down move  F2 shell  F10 close"
 		case settingsStepProviders:
 			return "Enter edit  Esc back  Up/Down move  F2 shell  F10 close"
-		case settingsStepActiveProvider:
-			return "Enter switch  Esc back  Up/Down move  F2 shell  F10 close"
-		case settingsStepActiveModels:
-			return "Type filter  Shift+I info  Enter activate  Esc clear/back  Pg page  F2 shell  F10 close"
 		case settingsStepProviderForm:
-			return "Type edit  Tab next  Enter save  F7 test  F8 save+activate  Esc back  F2 shell  F10 close"
+			return "Type edit  Left/Right toggle  Tab next  Enter pick/test  F7 test  F8 save+activate  Esc back  Pg page  F2 shell  F10 close"
 		default:
 			return "Enter open  Esc close  Up/Down move  F2 shell  F10 close"
 		}
@@ -2129,12 +2217,8 @@ func settingsFooter(width int, step settingsStep) string {
 		return "Enter set session approval mode  Esc back  Up/Down move  F2 shell  F10 close"
 	case settingsStepProviders:
 		return "Enter edit provider settings  Esc back  Up/Down move  F2 shell  F10 close"
-	case settingsStepActiveProvider:
-		return "Enter switch active provider  Esc back  Up/Down move  F2 shell  F10 close"
-	case settingsStepActiveModels:
-		return "Type to filter models  Shift+I toggle info  Enter switch active model  Esc clear filter/back  Up/Down move  PgUp/PgDn page  F2 shell  F10 close"
 	case settingsStepProviderForm:
-		return "Type to edit fields  Tab/Up/Down move  Enter save settings  F7 test provider  F8 save and activate  Esc back  F2 shell  F10 close"
+		return "Type to edit fields  Left/Right or Space toggle radios  Tab/Up/Down move  Enter on Model to pick and test  F7 test provider  F8 save and activate  Esc back  PgUp/PgDn page  F2 shell  F10 close"
 	default:
 		return "Enter open section  Esc close  Up/Down move  F2 shell  F10 close"
 	}

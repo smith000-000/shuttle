@@ -429,6 +429,9 @@ func TestLocalControllerResumeAfterTakeControlReconcilesCtrlCWithUnparseableLoca
 	if result.State != CommandExecutionCanceled || result.ExitCode != shell.InterruptedExitCode {
 		t.Fatalf("expected canceled handoff reconcile, got %#v", result)
 	}
+	if result.ShellContext != nil {
+		t.Fatalf("expected no fabricated shell context, got %#v", result.ShellContext)
+	}
 	if controller.ActiveExecution() != nil {
 		t.Fatal("expected active execution to clear after local ctrl-c reconcile")
 	}
@@ -485,6 +488,9 @@ func TestLocalControllerResumeAfterTakeControlReconcilesCtrlCInRemoteShellWrappe
 	}
 	if result.State != CommandExecutionCanceled || result.ExitCode != shell.InterruptedExitCode {
 		t.Fatalf("expected canceled remote handoff reconcile, got %#v", result)
+	}
+	if result.ShellContext != nil {
+		t.Fatalf("expected no fabricated remote shell context, got %#v", result.ShellContext)
 	}
 	if controller.ActiveExecution() != nil {
 		t.Fatal("expected active execution to clear after remote ctrl-c reconcile")

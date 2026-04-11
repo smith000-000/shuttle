@@ -981,3 +981,89 @@ func TestMouseClickProposalSendKeysRunsKeySend(t *testing.T) {
 		t.Fatalf("expected key proposal to clear after click, got %#v", next.pendingProposal)
 	}
 }
+
+func mouseYForSettingsModel(t *testing.T, model Model, modelIndex int) int {
+	t.Helper()
+	for y := 0; y < 240; y++ {
+		if index, ok := model.settingsModelIndexAtMouse(y); ok && index == modelIndex {
+			return y
+		}
+	}
+	t.Fatalf("no mouse Y for model index %d", modelIndex)
+	return -1
+}
+
+func TestMouseClickProviderRowOpensProviderDetail(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5", BaseURL: "https://api.openai.com/v1", APIKeyEnvVar: "OPENAI_API_KEY"},
+		func() ([]provider.OnboardingCandidate, error) {
+			return []provider.OnboardingCandidate{
+				{Profile: provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5", BaseURL: "https://api.openai.com/v1", APIKeyEnvVar: "OPENAI_API_KEY"}},
+				{Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openai/gpt-5", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"}},
+			}, nil
+		},
+		func(profile provider.Profile) ([]provider.ModelOption, error) {
+			return []provider.ModelOption{{ID: profile.Model}}, nil
+		},
+		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+			return &fakeController{}, profile, nil
+		},
+		func(provider.Profile) error { return nil },
+	)
+	model.width = 120
+	model.height = 40
+	updated, _ := model.openOnboarding()
+	model = updated.(Model)
+	y := model.settingsHeaderLineCount() + 3
+	updated, cmd := model.Update(tea.MouseMsg{X: 4, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	next := updated.(Model)
+	if !next.settingsOpen || next.settingsStep != settingsStepProviderForm {
+		t.Fatalf("expected provider detail after click, got open=%t step=%q", next.settingsOpen, next.settingsStep)
+	}
+	if cmd == nil {
+		t.Fatal("expected model load command from provider click")
+	}
+}
+
+func TestMouseClickModelRowSelectsAndTestsModel(t *testing.T) {
+	var tested provider.Profile
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openrouter/auto", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"},
+		func() ([]provider.OnboardingCandidate, error) {
+			return []provider.OnboardingCandidate{{Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openrouter/auto", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"}}}, nil
+		},
+		func(profile provider.Profile) ([]provider.ModelOption, error) {
+			return []provider.ModelOption{{ID: "openrouter/auto"}, {ID: "qwen/qwen3.5-9b"}}, nil
+		},
+		nil,
+		func(provider.Profile) error { return nil },
+	).WithProviderTester(func(profile provider.Profile) error {
+		tested = profile
+		return nil
+	})
+	model.width = 140
+	model.height = 40
+	updated, cmd := model.openActiveModelSettings()
+	model = updated.(Model)
+	loaded := cmd().(settingsModelsLoadedMsg)
+	updated, _ = model.Update(loaded)
+	model = updated.(Model)
+	model.settingsConfig.fields[settingsFormFieldIndexByKey(model.settingsConfig, "model")].value = ""
+	model.syncSettingsModelFilterFromConfig()
+	y := mouseYForSettingsModel(t, model, 1)
+	updated, cmd = model.Update(tea.MouseMsg{X: 8, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected mouse model click to trigger provider test")
+	}
+	testMsg, ok := cmd().(settingsProviderTestedMsg)
+	if !ok {
+		t.Fatalf("expected settingsProviderTestedMsg, got %T", cmd())
+	}
+	if testMsg.err != nil {
+		t.Fatalf("expected successful provider test, got %v", testMsg.err)
+	}
+	if tested.Model != "qwen/qwen3.5-9b" {
+		t.Fatalf("expected clicked model to be tested, got %#v", tested)
+	}
+}

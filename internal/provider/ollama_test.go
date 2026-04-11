@@ -84,3 +84,25 @@ func TestNewOllamaAgentRequiresModel(t *testing.T) {
 		t.Fatal("expected missing model error")
 	}
 }
+
+func TestOllamaAgentIncludesThinkToggle(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		if payload["think"] != true {
+			t.Fatalf("expected think=true, got %#v", payload["think"])
+		}
+		io.WriteString(w, `{"model":"qwen2.5-coder:7b","message":{"role":"assistant","content":"{\"message\":\"ok\"}"}}`)
+	}))
+	defer server.Close()
+
+	agent, err := NewOllamaAgent(Profile{BackendFamily: BackendOllama, Preset: PresetOllama, AuthMethod: AuthNone, BaseURL: server.URL + "/api", Model: "qwen2.5-coder:7b", Thinking: string(ThinkingOn)}, server.Client())
+	if err != nil {
+		t.Fatalf("NewOllamaAgent() error = %v", err)
+	}
+	if _, err := agent.Respond(context.Background(), controller.AgentInput{Prompt: "hello"}); err != nil {
+		t.Fatalf("Respond() error = %v", err)
+	}
+}

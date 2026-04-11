@@ -692,6 +692,9 @@ func shouldRequestChecklistForPrompt(prompt string) bool {
 	) {
 		return true
 	}
+	if shouldRequestChecklistForInvestigativePrompt(prompt) {
+		return true
+	}
 
 	sequenceSignals := 0
 	for _, needle := range []string{
@@ -716,13 +719,19 @@ func shouldRequestChecklistForPrompt(prompt string) bool {
 
 func shouldForceNextActionAfterInspection(task TaskContext) bool {
 	result := task.LastCommandResult
-	if result == nil || result.State != CommandExecutionCompleted {
+	if result == nil {
+		return false
+	}
+	if result.State != CommandExecutionCompleted && result.State != CommandExecutionFailed {
 		return false
 	}
 	if !isReadOnlyInspectionCommand(result.Command) {
 		return false
 	}
-	return transcriptShowsRecentUnresolvedFailure(task.PriorTranscript)
+	if transcriptShowsRecentUnresolvedFailure(task.PriorTranscript) {
+		return true
+	}
+	return shouldContinueUnresolvedReadOnlyTask(task)
 }
 
 func shouldForcePatchRebaseAfterInspection(task TaskContext) bool {
@@ -740,6 +749,107 @@ func shouldForcePatchRebaseAfterInspection(task TaskContext) bool {
 	return strings.Contains(strings.ToLower(strings.TrimSpace(lastPatch.Error)), "conflict: fragment line does not match src line")
 }
 
+func shouldRequestChecklistForInvestigativePrompt(prompt string) bool {
+	if containsAnySubstring(prompt,
+		"figure out",
+		"find out",
+		"determine",
+		"track down",
+		"investigate",
+		"diagnose",
+		"debug",
+	) {
+		return true
+	}
+
+	if containsAnySubstring(prompt,
+		"how was",
+		"where was",
+		"why is",
+		"why was",
+		"which process",
+		"which service",
+		"what process",
+		"what service",
+		"what file",
+		"what config",
+		"what configuration",
+		"what env",
+		"what environment variable",
+	) {
+		return true
+	}
+
+	return containsAnySubstring(prompt,
+		"installed",
+		"installation",
+		"configured",
+		"configuration",
+		"running",
+		"started",
+		"listening",
+		"using this port",
+		"binding this port",
+		"loading this",
+		"setting this",
+		"coming from",
+	)
+}
+
+func shouldContinueUnresolvedReadOnlyTask(task TaskContext) bool {
+	if task.ActivePlan != nil {
+		return false
+	}
+	userPrompt := strings.ToLower(strings.TrimSpace(latestUserTranscriptMessage(task.PriorTranscript)))
+	if !shouldRequestChecklistForInvestigativePrompt(userPrompt) {
+		return false
+	}
+	result := task.LastCommandResult
+	if result == nil {
+		return false
+	}
+	if result.State == CommandExecutionFailed {
+		return true
+	}
+	if result.State != CommandExecutionCompleted {
+		return false
+	}
+	return commandResultLooksInconclusive(result)
+}
+
+func controllerCommandResultSummary(result *CommandResultSummary) string {
+	if result == nil {
+		return ""
+	}
+	if strings.TrimSpace(result.DisplaySummary) != "" {
+		return result.DisplaySummary
+	}
+	return result.Summary
+}
+
+func commandResultLooksInconclusive(result *CommandResultSummary) bool {
+	if result == nil {
+		return false
+	}
+	summary := strings.ToLower(strings.TrimSpace(controllerCommandResultSummary(result)))
+	if summary == "" {
+		return true
+	}
+	return containsAnySubstring(summary,
+		"not found",
+		"no such file",
+		"not installed",
+		"unable to locate",
+		"no packages found",
+		"no matches found",
+		"no results",
+		"not running",
+		"inactive",
+		"unknown",
+		"permission denied",
+	)
+}
+
 func isReadOnlyInspectionCommand(command string) bool {
 	fields := strings.Fields(strings.TrimSpace(command))
 	if len(fields) == 0 {
@@ -747,8 +857,22 @@ func isReadOnlyInspectionCommand(command string) bool {
 	}
 
 	switch fields[0] {
-	case "cat", "sed", "grep", "rg", "find", "ls", "head", "tail", "nl":
+	case "cat", "sed", "grep", "rg", "find", "ls", "head", "tail", "nl", "which", "whereis", "ss", "ps", "lsof", "env", "printenv":
 		return true
+	case "command":
+		return len(fields) >= 2 && fields[1] == "-v"
+	case "dpkg":
+		return len(fields) >= 2 && (fields[1] == "-l" || fields[1] == "-s")
+	case "rpm":
+		return len(fields) >= 2 && fields[1] == "-q"
+	case "flatpak", "snap", "brew":
+		return true
+	case "pacman":
+		return len(fields) >= 2 && strings.HasPrefix(fields[1], "-Q")
+	case "systemctl":
+		return len(fields) >= 2 && (fields[1] == "status" || fields[1] == "show" || fields[1] == "cat")
+	case "launchctl":
+		return len(fields) >= 2 && (fields[1] == "list" || fields[1] == "print")
 	case "git":
 		if len(fields) < 2 {
 			return false

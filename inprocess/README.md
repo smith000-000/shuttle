@@ -38,11 +38,15 @@ What is working now:
 - foreground attach and handoff reconciliation for manually started shell commands
 - tracked `ssh` and similar transport transitions now surface password/confirmation waits as `awaiting_input`, distinguish the outer transport from the inner remote command, and reconcile `F2` return from observed shell state even when prompt text is incomplete
 - real OpenAI Responses API path with API-key auth
-- provider settings UI with:
+- provider onboarding and settings UI with:
+  - one shared provider settings flow behind `F10`, `/onboard`, `/provider`, and `/model`
+  - `/onboard` and `/provider` jumping straight to `Configure Providers`
+  - `/model` jumping to the current provider detail with the model field focused
+  - provider detail editing with the discovered model list on the same screen
+  - provider detail `Thinking` controls for OpenAI, OpenRouter, Anthropic, and Ollama
+  - conditional `Reasoning Effort` controls for OpenAI and OpenRouter when `Thinking` is enabled
+  - clearer auth-source and provider-test feedback during provider/settings flows
   - session-local approval-mode selection
-  - active provider switching
-  - active model switching
-  - provider detail editing
   - `F7` provider health/auth test from provider details
   - `F8` save-and-activate from provider details
 - saved provider profiles and startup reloading
@@ -61,7 +65,7 @@ What is working now:
 What is still in progress:
 - broader semantic shell integration (`OSC 133` / `OSC 7`) consumption and subshell/bootstrap support
 - deeper shell-transition verification for more interactive and nested remote cases beyond the current prompt-plus-probe state machine
-- provider onboarding polish and provider-auth validation
+- broader provider onboarding polish for additional backends and more proactive pre-selection health probes
 - provider registry/plugin architecture instead of static first-class wiring
 - any richer shell bootstrap/helper mode beyond those standards
 - transcript/UI cleanup and continued TUI/controller decomposition
@@ -313,7 +317,7 @@ Slash commands in agent mode:
 - `/approvals`: show or change the current session approval mode
 - `/new`: start a fresh task without restarting Shuttle or losing shell continuity
 - `/compact`: summarize older task context and keep a shorter live context window
-- `/onboard`, `/provider`, `/model`, `/quit`: existing provider/settings/session commands
+- `/onboard`, `/provider`, `/model`, `/quit`: provider/settings/session commands; `/onboard` and `/provider` open `Configure Providers`, and `/model` opens the current provider detail focused on model selection
 
 Approval modes:
 - `confirm`: current default; safe commands stay as explicit proposals and risky actions still require approval
@@ -322,8 +326,11 @@ Approval modes:
 - `/approvals` without an argument shows the current session mode; `/approvals confirm`, `/approvals auto`, and `/approvals dangerous` switch it
 
 Settings notes:
-- `F10` opens a menu with `Session Settings`, `Configure Providers`, `Change Active Provider`, and `Select Model`
-- provider detail editing supports `F7` to test the provider config and `F8` to save and activate it immediately
+- `F10` opens settings with `Session Settings` and `Configure Providers`; selecting a provider opens the shared provider detail screen that also contains model selection
+- provider detail editing supports `F7` to test the provider config, automatic provider validation when loading that provider's model list, and `F8` to save and activate it immediately
+- supported providers expose a `Thinking` radio control; OpenAI and OpenRouter also expose `Reasoning Effort` when `Thinking` is on
+- the provider list and model list support direct mouse clicks; `Thinking` and `Reasoning Effort` stay keyboard toggles via `Space` or `Left`/`Right`
+- pressing `Enter` on the `Model` field selects the highlighted filtered model result and runs a provider/model test without saving immediately
 - multiline composer rendering is capped to 15 visible lines and scrolls older lines off the top as you keep inserting newlines
 
 Terminal selection notes:

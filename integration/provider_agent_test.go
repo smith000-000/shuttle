@@ -155,7 +155,7 @@ func TestOpenRouterAgentOneShotEndToEnd(t *testing.T) {
 				if !ok {
 					t.Fatalf("expected reasoning config, got %#v", captured["reasoning"])
 				}
-				if reasoning["max_tokens"] != float64(64) || reasoning["exclude"] != true {
+				if reasoning["effort"] != "medium" || reasoning["exclude"] != true {
 					t.Fatalf("unexpected reasoning config %#v", reasoning)
 				}
 			} else if _, ok := captured["reasoning"]; ok {

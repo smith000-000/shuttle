@@ -193,10 +193,12 @@ func openRouterPolicyForProfile(profile Profile) openRouterRequestPolicy {
 		UseStructuredOutputs: true,
 		RequireParameters:    true,
 		MaxOutputTokens:      1200,
-		Reasoning: &responsesReasoning{
-			MaxTokens: 64,
-			Exclude:   true,
-		},
+	}
+	if ThinkingEnabled(profile) {
+		policy.Reasoning = &responsesReasoning{
+			Effort:  string(EffectiveReasoningEffort(profile)),
+			Exclude: true,
+		}
 	}
 
 	selectedModel := profile.SelectedModel

@@ -232,7 +232,7 @@ func (s *stubContextReader) CaptureObservedShellState(ctx context.Context, paneI
 	if s.err != nil {
 		return shell.ObservedShellState{}, s.err
 	}
-	if s.observed.PromptContext.PromptLine() != "" || s.observed.Location.Kind != "" || s.observed.HasPromptContext || s.observed.HasSemanticState {
+	if s.observed.PromptContext.PromptLine() != "" || s.observed.Location.Kind != "" || s.observed.HasPromptContext || s.observed.HasSemanticState || strings.TrimSpace(s.observed.CurrentPaneCommand) != "" || strings.TrimSpace(s.observed.SemanticSource) != "" {
 		return s.observed, nil
 	}
 	context, err := s.CaptureShellContext(ctx, paneID)

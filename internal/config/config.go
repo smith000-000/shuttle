@@ -49,6 +49,8 @@ type Config struct {
 	ProviderAuthMethod            string
 	ProviderModel                 string
 	ProviderBaseURL               string
+	ProviderThinking              string
+	ProviderReasoningEffort       string
 	ProviderAPIKey                string
 	ProviderAPIKeyEnvVar          string
 	ProviderCLICommand            string
@@ -84,6 +86,8 @@ func Parse(args []string) (Config, error) {
 	providerAuthMethod := envOrDefault("SHUTTLE_AUTH", "auto")
 	providerModel := os.Getenv("SHUTTLE_MODEL")
 	providerBaseURL := os.Getenv("SHUTTLE_BASE_URL")
+	providerThinking := os.Getenv("SHUTTLE_THINKING")
+	providerReasoningEffort := os.Getenv("SHUTTLE_REASONING_EFFORT")
 	runtimeType := envOrDefault("SHUTTLE_RUNTIME", "builtin")
 	runtimeCommand := os.Getenv("SHUTTLE_RUNTIME_COMMAND")
 	traceMode, err := resolveTraceMode(os.Getenv("SHUTTLE_TRACE"), os.Getenv("SHUTTLE_TRACE_MODE"))
@@ -117,6 +121,8 @@ func Parse(args []string) (Config, error) {
 	fs.StringVar(&cfg.ProviderAuthMethod, "auth", providerAuthMethod, "auth method for the selected provider: auto, api_key, codex_login, inherited_env, or none")
 	fs.StringVar(&cfg.ProviderModel, "model", providerModel, "model name for the selected provider")
 	fs.StringVar(&cfg.ProviderBaseURL, "base-url", providerBaseURL, "base URL for the selected provider API")
+	fs.StringVar(&cfg.ProviderThinking, "thinking", providerThinking, "thinking mode for supported providers: on or off")
+	fs.StringVar(&cfg.ProviderReasoningEffort, "reasoning-effort", providerReasoningEffort, "reasoning effort for supported providers: low, medium, high, or xhigh")
 	fs.StringVar(&cfg.ProviderCLICommand, "cli-command", providerCLICommand, "CLI command path for CLI-backed providers")
 	fs.StringVar(&cfg.RuntimeType, "runtime", runtimeType, "coding runtime to use: builtin, pi, codex_sdk, or auto")
 	fs.StringVar(&cfg.RuntimeCommand, "runtime-command", runtimeCommand, "command path for selected coding runtime")
@@ -127,7 +133,7 @@ func Parse(args []string) (Config, error) {
 	}
 	fs.Visit(func(flag *flag.Flag) {
 		switch flag.Name {
-		case "provider", "auth", "model", "base-url", "cli-command", "runtime", "runtime-command":
+		case "provider", "auth", "model", "base-url", "thinking", "reasoning-effort", "cli-command", "runtime", "runtime-command":
 			cfg.ProviderFlagsSet = true
 		}
 	})

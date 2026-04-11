@@ -228,6 +228,8 @@ type onboardingField struct {
 	placeholder string
 	required    bool
 	secret      bool
+	options     []string
+	hidden      bool
 }
 
 type onboardingFormState struct {
@@ -241,12 +243,10 @@ type onboardingFormState struct {
 type settingsStep string
 
 const (
-	settingsStepMenu           settingsStep = "menu"
-	settingsStepSession        settingsStep = "session"
-	settingsStepProviders      settingsStep = "providers"
-	settingsStepActiveProvider settingsStep = "active_provider"
-	settingsStepActiveModels   settingsStep = "active_models"
-	settingsStepProviderForm   settingsStep = "provider_form"
+	settingsStepMenu         settingsStep = "menu"
+	settingsStepSession      settingsStep = "session"
+	settingsStepProviders    settingsStep = "providers"
+	settingsStepProviderForm settingsStep = "provider_form"
 )
 
 type settingsMenuEntry struct {
@@ -271,6 +271,7 @@ type settingsModelChoice struct {
 }
 
 type settingsModelsLoadedMsg struct {
+	profile provider.Profile
 	choices []settingsModelChoice
 	err     error
 }
@@ -399,7 +400,10 @@ type Model struct {
 	settingsModelFilter          string
 	settingsModelScope           provider.ProviderPreset
 	settingsModelInfo            bool
+	settingsModelListActive      bool
+	settingsModelBrowseAll       bool
 	settingsBanner               string
+	settingsDetailReturnStep     settingsStep
 	lastModelInfo                *controller.AgentModelInfo
 	pendingContextAction         contextActionKind
 	pendingDangerousConfirm      *dangerousApprovalConfirm
@@ -852,7 +856,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.entries = append(m.entries, Entry{
 				Title: "error",
-				Body:  fmt.Sprintf("switch provider: %v", msg.err),
+				Body:  fmt.Sprintf("switch provider to %s (%s, base %s, auth %s): %v", msg.profile.Name, msg.profile.Preset, msg.profile.BaseURL, providerAuthSourceLabel(msg.profile), msg.err),
 			})
 			m.selectedEntry = len(m.entries) - 1
 			m.clampSelection()
@@ -884,10 +888,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.settingsStep = msg.settingsStep
 			m.settingsConfig = nil
 			m.settingsProviderIdx = m.currentSettingsProviderIndex()
-			m.settingsBanner = fmt.Sprintf("Active provider switched to %s.", msg.profile.Name)
-			if msg.settingsStep == settingsStepActiveModels {
-				m.applySettingsModelFilter()
-			}
+			m.settingsBanner = fmt.Sprintf("Active provider switched to %s (%s).", msg.profile.Name, providerAuthSourceLabel(msg.profile))
 		} else {
 			m.settingsOpen = false
 			m.settingsStep = settingsStepMenu
@@ -912,7 +913,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.directShellPending = false
 		m.entries = append(m.entries, Entry{
 			Title: "system",
-			Body:  fmt.Sprintf("Provider switched to %s (%s, %s, auth %s).", msg.profile.Name, msg.profile.Preset, msg.profile.Model, providerAuthSourceLabel(msg.profile)),
+			Body:  fmt.Sprintf("Provider switched to %s (%s, model %s, base %s, auth %s).", msg.profile.Name, msg.profile.Preset, msg.profile.Model, msg.profile.BaseURL, providerAuthSourceLabel(msg.profile)),
 		})
 		if msg.persistErr != nil {
 			m.entries = append(m.entries, Entry{
@@ -930,7 +931,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.entries = append(m.entries, Entry{
 				Title: "error",
-				Body:  fmt.Sprintf("load models for %s: %v", msg.candidate.Profile.Name, msg.err),
+				Body:  fmt.Sprintf("load models for %s (%s, base %s, auth %s): %v", msg.candidate.Profile.Name, msg.candidate.Profile.Preset, msg.candidate.Profile.BaseURL, providerAuthSourceLabel(msg.candidate.Profile), msg.err),
 			})
 			m.selectedEntry = len(m.entries) - 1
 			m.clampSelection()
@@ -947,6 +948,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busyStartedAt = time.Time{}
 		m.inFlightCancel = nil
 		if msg.err != nil {
+			if m.settingsStep == settingsStepProviderForm {
+				m.settingsBanner = fmt.Sprintf("Model list/test failed for %s (%s, auth %s): %v", msg.profile.Name, msg.profile.BaseURL, providerAuthSourceLabel(msg.profile), msg.err)
+				return m, nil
+			}
 			m.entries = append(m.entries, Entry{
 				Title: "error",
 				Body:  fmt.Sprintf("load active models: %v", msg.err),
@@ -955,11 +960,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.clampSelection()
 			return m, nil
 		}
-		m.settingsStep = settingsStepActiveModels
 		m.settingsModelCatalog = append([]settingsModelChoice(nil), msg.choices...)
-		m.settingsModelFilter = ""
 		m.settingsModelInfo = false
-		m.settingsBanner = ""
+		if m.settingsStep == settingsStepProviderForm {
+			m.syncSettingsModelFilterFromConfig()
+			m.settingsBanner = fmt.Sprintf("Loaded %d models for %s.", len(msg.choices), msg.profile.Name)
+			return m, nil
+		}
+		m.settingsModelFilter = ""
+		m.settingsBanner = fmt.Sprintf("Loaded %d models for %s.", len(msg.choices), msg.profile.Name)
 		m.applySettingsModelFilter()
 		return m, nil
 	case settingsProviderSavedMsg:
@@ -1025,10 +1034,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busyStartedAt = time.Time{}
 		m.inFlightCancel = nil
 		if msg.err != nil {
-			m.settingsBanner = fmt.Sprintf("Provider test failed for %s: %v", msg.profile.Name, msg.err)
+			m.settingsBanner = fmt.Sprintf("Provider test failed for %s (%s, auth %s): %v", msg.profile.Name, msg.profile.BaseURL, providerAuthSourceLabel(msg.profile), msg.err)
 			return m, nil
 		}
-		m.settingsBanner = fmt.Sprintf("Provider test succeeded for %s.", msg.profile.Name)
+		m.settingsBanner = fmt.Sprintf("Provider test succeeded for %s (%s, auth %s).", msg.profile.Name, msg.profile.BaseURL, providerAuthSourceLabel(msg.profile))
 		return m, nil
 	case busyTickMsg:
 		if !m.busy && m.activeExecution == nil {
@@ -1042,8 +1051,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(tickShellContext(), m.refreshShellContextCmd())
 	case tea.MouseMsg:
-		if m.helpOpen || m.settingsOpen || m.onboardingOpen || m.detailOpen {
+		if m.helpOpen || m.onboardingOpen || m.detailOpen {
 			return m, nil
+		}
+		if m.settingsOpen {
+			return m.handleSettingsMouse(msg)
 		}
 		return m.handleMouse(msg)
 	case tea.KeyMsg:
@@ -2102,45 +2114,22 @@ func (m Model) interruptInFlight() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) openOnboarding() (tea.Model, tea.Cmd) {
-	if m.loadOnboarding == nil || m.switchProvider == nil {
-		m.entries = append(m.entries, Entry{
-			Title: "error",
-			Body:  "provider onboarding is not configured in this session",
-		})
-		m.selectedEntry = len(m.entries) - 1
-		m.clampSelection()
-		return m, nil
+	nextAny, cmd := m.openSettings()
+	next := nextAny.(Model)
+	if cmd != nil || !next.settingsOpen {
+		return next, cmd
 	}
-
-	choices, err := m.loadOnboarding()
-	if err != nil {
-		m.entries = append(m.entries, Entry{
-			Title: "error",
-			Body:  fmt.Sprintf("load provider onboarding candidates: %v", err),
-		})
-		m.selectedEntry = len(m.entries) - 1
-		m.clampSelection()
-		return m, nil
-	}
-	if len(choices) == 0 {
-		m.entries = append(m.entries, Entry{
-			Title: "system",
-			Body:  "No provider onboarding candidates detected. Set OPENAI_API_KEY, OPENROUTER_API_KEY, or SHUTTLE_BASE_URL and try again.",
-		})
-		m.selectedEntry = len(m.entries) - 1
-		m.clampSelection()
-		return m, nil
-	}
-
-	m.onboardingChoices = append([]provider.OnboardingCandidate(nil), choices...)
-	m.onboardingStep = onboardingStepProviders
-	m.onboardingIndex = m.currentProviderChoiceIndex()
-	m.onboardingSelected = nil
-	m.onboardingForm = nil
-	m.onboardingModels = nil
-	m.onboardingModelIdx = 0
-	m.onboardingOpen = true
-	return m, nil
+	next.settingsStep = settingsStepProviders
+	next.settingsProviderIdx = next.currentSettingsProviderIndex()
+	next.settingsConfig = nil
+	next.settingsModelCatalog = nil
+	next.settingsModels = nil
+	next.settingsModelIdx = 0
+	next.settingsModelFilter = ""
+	next.settingsModelInfo = false
+	next.settingsBanner = ""
+	next.settingsDetailReturnStep = settingsStepMenu
+	return next, nil
 }
 
 func (m Model) openSettings() (tea.Model, tea.Cmd) {
@@ -2169,7 +2158,7 @@ func (m Model) openSettings() (tea.Model, tea.Cmd) {
 	m.settingsStep = settingsStepMenu
 	m.settingsIndex = 0
 	m.settingsApprovalIdx = currentSettingsApprovalIndex(m.ctrl)
-	m.settingsProviders = buildSettingsProviderEntries(choices)
+	m.settingsProviders = buildSettingsProviderEntries(choices, m.activeProvider)
 	m.settingsProviderIdx = m.currentSettingsProviderIndex()
 	m.settingsConfig = nil
 	m.settingsModelCatalog = nil
@@ -2179,20 +2168,12 @@ func (m Model) openSettings() (tea.Model, tea.Cmd) {
 	m.settingsModelScope = ""
 	m.settingsModelInfo = false
 	m.settingsBanner = ""
+	m.settingsDetailReturnStep = settingsStepMenu
 	return m, nil
 }
 
 func (m Model) openActiveProviderSettings() (tea.Model, tea.Cmd) {
-	nextAny, cmd := m.openSettings()
-	next := nextAny.(Model)
-	if cmd != nil || !next.settingsOpen {
-		return next, cmd
-	}
-
-	next.settingsStep = settingsStepActiveProvider
-	next.settingsIndex = 2
-	next.settingsProviderIdx = next.currentSettingsProviderIndex()
-	return next, nil
+	return m.openOnboarding()
 }
 
 func (m Model) openActiveModelSettings() (tea.Model, tea.Cmd) {
@@ -2201,11 +2182,14 @@ func (m Model) openActiveModelSettings() (tea.Model, tea.Cmd) {
 	if cmd != nil || !next.settingsOpen {
 		return next, cmd
 	}
-
-	next.settingsStep = settingsStepActiveModels
-	next.settingsIndex = 3
-	next.settingsModelScope = next.activeProvider.Preset
-	return next.loadSettingsModels()
+	if len(next.settingsProviders) == 0 {
+		return next, nil
+	}
+	entry := next.settingsProviders[next.currentSettingsProviderIndex()]
+	if entry.candidate == nil || entry.disabled {
+		return next, nil
+	}
+	return next.openSettingsProviderDetail(*entry.candidate, settingsStepProviders, true)
 }
 
 func (m Model) runProposalCommand() (tea.Model, tea.Cmd) {

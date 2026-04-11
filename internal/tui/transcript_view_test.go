@@ -190,6 +190,23 @@ func TestTranscriptPinnedStateControlsAutoFollow(t *testing.T) {
 	}
 }
 
+func TestSelectedTranscriptEntryDoesNotTintBodyOrFillWhitespace(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.width = 80
+	model.height = 20
+	model.entries = []Entry{{Title: "shell", Body: "ls -lah"}}
+	model.selectedEntry = 0
+
+	selectedLines := model.renderEntryLines(0, model.entries[0], model.currentTranscriptWidth())
+	unselectedLines := model.renderEntryLines(1, model.entries[0], model.currentTranscriptWidth())
+	if len(selectedLines) == 0 || len(unselectedLines) == 0 {
+		t.Fatal("expected rendered transcript lines")
+	}
+	if selectedLines[0].text != unselectedLines[0].text {
+		t.Fatalf("expected selection not to alter shell body rendering, selected=%q unselected=%q", selectedLines[0].text, unselectedLines[0].text)
+	}
+}
+
 func TestMainViewDoesNotRenderHeaderOrSideRails(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.width = 80

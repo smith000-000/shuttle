@@ -206,6 +206,40 @@ func TestLocalControllerSubmitAgentPromptAddsChecklistGuidanceForOrderedWorkflow
 	}
 }
 
+func TestLocalControllerSubmitAgentPromptAddsChecklistGuidanceForInvestigativeInstallPrompt(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "I will inspect the likely install sources.",
+		},
+	}
+	controller := New(agent, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+
+	prompt := "can you figure out how and where orcaslicer was installed?"
+	if _, err := controller.SubmitAgentPrompt(context.Background(), prompt); err != nil {
+		t.Fatalf("SubmitAgentPrompt() error = %v", err)
+	}
+
+	if !strings.Contains(agent.lastInput.Prompt, initialChecklistPromptSuffix) {
+		t.Fatalf("expected investigative checklist guidance, got %q", agent.lastInput.Prompt)
+	}
+}
+
+func TestLocalControllerSubmitAgentPromptAddsChecklistGuidanceForInvestigativeDebugPrompt(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{Message: "I will inspect the likely sources."},
+	}
+	controller := New(agent, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+
+	prompt := "can you figure out why nginx is listening on this port?"
+	if _, err := controller.SubmitAgentPrompt(context.Background(), prompt); err != nil {
+		t.Fatalf("SubmitAgentPrompt() error = %v", err)
+	}
+
+	if !strings.Contains(agent.lastInput.Prompt, initialChecklistPromptSuffix) {
+		t.Fatalf("expected investigative checklist guidance, got %q", agent.lastInput.Prompt)
+	}
+}
+
 func TestLocalControllerSubmitAgentPromptAddsRerunGuidanceForExplicitRetry(t *testing.T) {
 	agent := &stubAgent{
 		response: AgentResponse{
