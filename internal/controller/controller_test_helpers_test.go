@@ -91,12 +91,14 @@ func (b *blockingRunner) RunTrackedCommand(_ context.Context, _ string, _ string
 }
 
 type monitoringRunner struct {
-	monitor       *manualMonitor
-	attachMonitor *manualMonitor
-	attachFunc    func(context.Context, string) (shell.CommandMonitor, error)
-	attachCalls   int
-	commands      []string
-	started       chan struct{}
+	monitor        *manualMonitor
+	attachMonitor  *manualMonitor
+	attachFunc     func(context.Context, string) (shell.CommandMonitor, error)
+	attachCalls    int
+	commands       []string
+	started        chan struct{}
+	resolvedPaneID string
+	attachPaneIDs  []string
 }
 
 func (m *monitoringRunner) RunTrackedCommand(_ context.Context, _ string, _ string, _ time.Duration) (shell.TrackedExecution, error) {
@@ -116,6 +118,7 @@ func (m *monitoringRunner) StartTrackedCommand(_ context.Context, _ string, comm
 
 func (m *monitoringRunner) AttachForegroundCommand(ctx context.Context, paneID string) (shell.CommandMonitor, error) {
 	m.attachCalls++
+	m.attachPaneIDs = append(m.attachPaneIDs, paneID)
 	if m.attachFunc != nil {
 		return m.attachFunc(ctx, paneID)
 	}
@@ -123,6 +126,13 @@ func (m *monitoringRunner) AttachForegroundCommand(ctx context.Context, paneID s
 		return nil, nil
 	}
 	return m.attachMonitor, nil
+}
+
+func (m *monitoringRunner) ResolveTrackedPane(_ context.Context, paneID string) (string, error) {
+	if strings.TrimSpace(m.resolvedPaneID) != "" {
+		return m.resolvedPaneID, nil
+	}
+	return paneID, nil
 }
 
 func (m *monitoringRunner) waitForStart(t *testing.T) {
@@ -178,15 +188,16 @@ func (m *manualMonitor) finish(result shell.TrackedExecution, err error) {
 }
 
 type stubContextReader struct {
-	output         string
-	snapshot       string
-	context        shell.PromptContext
-	contexts       []shell.PromptContext
-	observed       shell.ObservedShellState
-	err            error
-	resolvedPaneID string
-	paneIDs        []string
-	contextCalls   int
+	output          string
+	snapshot        string
+	context         shell.PromptContext
+	contexts        []shell.PromptContext
+	observed        shell.ObservedShellState
+	err             error
+	resolvedPaneID  string
+	paneIDs         []string
+	observedPaneIDs []string
+	contextCalls    int
 }
 
 func (s *stubContextReader) CaptureRecentOutput(_ context.Context, paneID string, _ int) (string, error) {
@@ -229,6 +240,7 @@ func (s *stubContextReader) CaptureShellContext(context.Context, string) (shell.
 }
 
 func (s *stubContextReader) CaptureObservedShellState(ctx context.Context, paneID string) (shell.ObservedShellState, error) {
+	s.observedPaneIDs = append(s.observedPaneIDs, paneID)
 	if s.err != nil {
 		return shell.ObservedShellState{}, s.err
 	}

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"time"
 
 	"aiterm/internal/agentruntime"
 	"aiterm/internal/shell"
@@ -122,6 +123,21 @@ type ContextWindowUsage struct {
 	ApproxPromptTokens int
 }
 
+type ActiveExecutionOverview struct {
+	ID                         string
+	Command                    string
+	Origin                     CommandOrigin
+	State                      CommandExecutionState
+	StartedAt                  time.Time
+	UsesTrackedShell           bool
+	ExecutionTakeControlTarget TrackedShellTarget
+}
+
+type ExecutionOverview struct {
+	TrackedShell    TrackedShellTarget
+	ActiveExecution *ActiveExecutionOverview
+}
+
 type Controller interface {
 	SubmitAgentPrompt(ctx context.Context, prompt string) ([]TranscriptEvent, error)
 	SubmitRefinement(ctx context.Context, approval ApprovalRequest, note string) ([]TranscriptEvent, error)
@@ -145,6 +161,7 @@ type Controller interface {
 	EstimateContextUsage(prompt string) ContextWindowUsage
 	ApprovalMode() ApprovalMode
 	ActiveExecution() *CommandExecution
+	ExecutionOverview() ExecutionOverview
 	AbandonActiveExecution(reason string) *CommandExecution
 	TakeControlTarget() TrackedShellTarget
 	TrackedShellTarget() TrackedShellTarget

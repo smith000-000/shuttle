@@ -237,3 +237,13 @@ func TestResolveProfileThinkingDefaults(t *testing.T) {
 		t.Fatalf("expected openrouter thinking defaults, got %#v", openRouter)
 	}
 }
+
+func TestResolveProfileOpenAIUsesDescriptorResolverPath(t *testing.T) {
+	profile, err := resolveProfileForPreset(PresetOpenAI, config.Config{ProviderType: "openai", ProviderAuthMethod: "api_key", ProviderAPIKey: "test-key", ProviderAPIKeyEnvVar: "OPENAI_API_KEY"})
+	if err != nil {
+		t.Fatalf("resolveProfileForPreset() error = %v", err)
+	}
+	if profile.Preset != PresetOpenAI || profile.BackendFamily != BackendResponsesHTTP {
+		t.Fatalf("expected descriptor-backed OpenAI profile, got %#v", profile)
+	}
+}

@@ -87,9 +87,18 @@ type Profile struct {
 var ErrMissingAPIKey = errors.New("provider API key is not configured")
 
 func ResolveProfile(cfg config.Config) (Profile, error) {
-	switch normalizePreset(cfg.ProviderType) {
+	preset := normalizePreset(cfg.ProviderType)
+	profile, err := resolveProfileForPreset(preset, cfg)
+	if err != nil {
+		return Profile{}, err
+	}
+	return applyInteractiveProviderSettings(profile, cfg), nil
+}
+
+func resolveProfileForPreset(preset ProviderPreset, cfg config.Config) (Profile, error) {
+	switch preset {
 	case PresetMock:
-		return applyInteractiveProviderSettings(Profile{
+		return Profile{
 			ID:            "mock",
 			Name:          "Mock Provider",
 			BackendFamily: BackendBuiltin,
@@ -97,133 +106,47 @@ func ResolveProfile(cfg config.Config) (Profile, error) {
 			AuthMethod:    AuthNone,
 			Source:        SourceFlags,
 			HealthStatus:  HealthUnknown,
-			Capabilities: CapabilitySet{
-				StructuredOutput: true,
-				ApprovalFlow:     true,
-			},
-		}, cfg), nil
-	case PresetOpenAI:
-		defaults := responsesPresetDefaults(PresetOpenAI)
-		return applyInteractiveProviderSettings(resolveResponsesProfile(cfg, defaults), cfg), nil
-	case PresetOpenRouter:
-		defaults := responsesPresetDefaults(PresetOpenRouter)
-		return applyInteractiveProviderSettings(resolveResponsesProfile(cfg, defaults), cfg), nil
-	case PresetOpenWebUI:
-		defaults := responsesPresetDefaults(PresetOpenWebUI)
-		return applyInteractiveProviderSettings(resolveResponsesProfile(cfg, defaults), cfg), nil
-	case PresetAnthropic:
-		return applyInteractiveProviderSettings(resolveAnthropicProfile(cfg), cfg), nil
+			Capabilities:  defaultProviderCapabilities(),
+		}, nil
 	case PresetOllama:
-		profile, err := resolveOllamaProfile(cfg)
-		if err != nil {
-			return Profile{}, err
-		}
-		return applyInteractiveProviderSettings(profile, cfg), nil
+		return resolveOllamaProfile(cfg)
 	case PresetCodexCLI:
-		return applyInteractiveProviderSettings(resolveCodexCLIProfile(cfg), cfg), nil
+		return resolveCodexCLIProfile(cfg), nil
 	case PresetCustom:
 		if strings.TrimSpace(cfg.ProviderBaseURL) == "" {
 			return Profile{}, errors.New("custom provider requires --base-url")
 		}
-		defaults := responsesPresetDefaults(PresetCustom)
-		defaults.baseURL = cfg.ProviderBaseURL
-		defaults.model = defaultModel(cfg.ProviderModel, defaults.model)
-		return applyInteractiveProviderSettings(resolveResponsesProfile(cfg, defaults), cfg), nil
+		descriptor := DescriptorForPreset(PresetCustom)
+		descriptor.DefaultBaseURL = strings.TrimSpace(cfg.ProviderBaseURL)
+		descriptor.DefaultModel = defaultModel(cfg.ProviderModel, descriptor.DefaultModel)
+		return resolveDescriptorProfile(cfg, descriptor), nil
 	default:
-		return Profile{}, fmt.Errorf("unsupported provider preset %q", cfg.ProviderType)
+		descriptor := DescriptorForPreset(preset)
+		if descriptor.BackendFamily == "" {
+			return Profile{}, fmt.Errorf("unsupported provider preset %q", cfg.ProviderType)
+		}
+		return resolveDescriptorProfile(cfg, descriptor), nil
 	}
 }
 
-type responsesDefaults struct {
-	preset        ProviderPreset
-	name          string
-	backendFamily BackendFamily
-	baseURL       string
-	model         string
+func defaultProviderCapabilities() CapabilitySet {
+	return CapabilitySet{StructuredOutput: true, ApprovalFlow: true}
 }
 
-func responsesPresetDefaults(preset ProviderPreset) responsesDefaults {
-	switch preset {
-	case PresetOpenAI:
-		return responsesDefaults{
-			preset:        PresetOpenAI,
-			name:          "OpenAI Responses",
-			backendFamily: BackendResponsesHTTP,
-			baseURL:       "https://api.openai.com/v1",
-			model:         "gpt-5-nano-2025-08-07",
-		}
-	case PresetOpenRouter:
-		return responsesDefaults{
-			preset:        PresetOpenRouter,
-			name:          "OpenRouter Responses",
-			backendFamily: BackendOpenRouter,
-			baseURL:       "https://openrouter.ai/api/v1",
-			model:         "openai/gpt-5",
-		}
-	case PresetOpenWebUI:
-		return responsesDefaults{
-			preset:        PresetOpenWebUI,
-			name:          "OpenWebUI",
-			backendFamily: BackendResponsesHTTP,
-			baseURL:       "http://localhost:3000/api/v1",
-			model:         "",
-		}
-	case PresetOllama:
-		return responsesDefaults{
-			preset:        PresetOllama,
-			name:          "Ollama Chat",
-			backendFamily: BackendOllama,
-			baseURL:       "http://localhost:11434/api",
-		}
-	case PresetCustom:
-		return responsesDefaults{
-			preset:        PresetCustom,
-			name:          "Custom Responses Endpoint",
-			backendFamily: BackendResponsesHTTP,
-			model:         "gpt-5-nano-2025-08-07",
-		}
-	default:
-		return responsesDefaults{preset: preset}
-	}
-}
-
-func resolveAnthropicProfile(cfg config.Config) Profile {
+func resolveDescriptorProfile(cfg config.Config, descriptor ProviderDescriptor) Profile {
 	return Profile{
-		ID:            string(PresetAnthropic),
-		Name:          "Anthropic Messages",
-		BackendFamily: BackendAnthropic,
-		Preset:        PresetAnthropic,
+		ID:            string(descriptor.Preset),
+		Name:          descriptor.Name,
+		BackendFamily: descriptor.BackendFamily,
+		Preset:        descriptor.Preset,
 		AuthMethod:    resolveAuthMethod(cfg.ProviderAuthMethod),
-		BaseURL:       defaultValue(cfg.ProviderBaseURL, "https://api.anthropic.com"),
-		Model:         defaultModel(cfg.ProviderModel, "claude-sonnet-4-6"),
+		BaseURL:       defaultValue(cfg.ProviderBaseURL, descriptor.DefaultBaseURL),
+		Model:         defaultModel(cfg.ProviderModel, descriptor.DefaultModel),
 		APIKey:        cfg.ProviderAPIKey,
 		APIKeyEnvVar:  cfg.ProviderAPIKeyEnvVar,
 		Source:        SourceFlags,
 		HealthStatus:  HealthUnknown,
-		Capabilities: CapabilitySet{
-			StructuredOutput: true,
-			ApprovalFlow:     true,
-		},
-	}
-}
-
-func resolveResponsesProfile(cfg config.Config, defaults responsesDefaults) Profile {
-	return Profile{
-		ID:            string(defaults.preset),
-		Name:          defaults.name,
-		BackendFamily: defaults.backendFamily,
-		Preset:        defaults.preset,
-		AuthMethod:    resolveAuthMethod(cfg.ProviderAuthMethod),
-		BaseURL:       defaultValue(cfg.ProviderBaseURL, defaults.baseURL),
-		Model:         defaultModel(cfg.ProviderModel, defaults.model),
-		APIKey:        cfg.ProviderAPIKey,
-		APIKeyEnvVar:  cfg.ProviderAPIKeyEnvVar,
-		Source:        SourceFlags,
-		HealthStatus:  HealthUnknown,
-		Capabilities: CapabilitySet{
-			StructuredOutput: true,
-			ApprovalFlow:     true,
-		},
+		Capabilities:  defaultProviderCapabilities(),
 	}
 }
 
@@ -250,26 +173,24 @@ func resolveCodexCLIProfile(cfg config.Config) Profile {
 	case "codex_login", "auto", "", "api_key":
 		authMethod = AuthCodexLogin
 	}
-
+	descriptor := DescriptorForPreset(PresetCodexCLI)
 	return Profile{
 		ID:            string(PresetCodexCLI),
-		Name:          "Codex CLI",
-		BackendFamily: BackendCLIAgent,
+		Name:          descriptor.Name,
+		BackendFamily: descriptor.BackendFamily,
 		Preset:        PresetCodexCLI,
 		AuthMethod:    authMethod,
 		Model:         strings.TrimSpace(cfg.ProviderModel),
 		CLICommand:    defaultValue(strings.TrimSpace(cfg.ProviderCLICommand), defaultCodexCLICommand),
 		Source:        SourceFlags,
 		HealthStatus:  HealthUnknown,
-		Capabilities: CapabilitySet{
-			StructuredOutput: true,
-			ApprovalFlow:     true,
-		},
+		Capabilities:  defaultProviderCapabilities(),
 	}
 }
 
 func resolveOllamaProfile(cfg config.Config) (Profile, error) {
-	baseURL, err := normalizeOllamaBaseURL(firstNonEmpty(strings.TrimSpace(cfg.ProviderBaseURL), strings.TrimSpace(os.Getenv("OLLAMA_HOST")), "http://localhost:11434"))
+	descriptor := DescriptorForPreset(PresetOllama)
+	baseURL, err := normalizeOllamaBaseURL(firstNonEmpty(strings.TrimSpace(cfg.ProviderBaseURL), strings.TrimSpace(os.Getenv("OLLAMA_HOST")), descriptor.DefaultBaseURL))
 	if err != nil {
 		return Profile{}, err
 	}
@@ -281,8 +202,8 @@ func resolveOllamaProfile(cfg config.Config) (Profile, error) {
 
 	return Profile{
 		ID:            string(PresetOllama),
-		Name:          "Ollama Chat",
-		BackendFamily: BackendOllama,
+		Name:          descriptor.Name,
+		BackendFamily: descriptor.BackendFamily,
 		Preset:        PresetOllama,
 		AuthMethod:    authMethod,
 		BaseURL:       baseURL,
@@ -291,10 +212,7 @@ func resolveOllamaProfile(cfg config.Config) (Profile, error) {
 		APIKeyEnvVar:  cfg.ProviderAPIKeyEnvVar,
 		Source:        SourceFlags,
 		HealthStatus:  HealthUnknown,
-		Capabilities: CapabilitySet{
-			StructuredOutput: true,
-			ApprovalFlow:     true,
-		},
+		Capabilities:  defaultProviderCapabilities(),
 	}, nil
 }
 

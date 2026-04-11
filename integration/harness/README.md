@@ -17,6 +17,12 @@ Current coverage:
 - command proposal -> run -> auto-continue
 - checklist plan -> command -> eval -> command -> completion without `Ctrl+G`
 
+Still covered primarily by noninteractive unit/integration tests:
+- remote transition settlement and tracked-pane migration
+- disconnect-tail and respawn settlement
+- awaiting-input and interactive/fullscreen recovery heuristics
+- `F2` tracked-shell vs `F3` owned-pane reconciliation
+
 Artifacts:
 - each test writes trace, pane captures, and provider request logs into a temp
   artifact directory
@@ -37,3 +43,6 @@ SHUTTLE_RUN_INTERACTIVE_HARNESS=1 ./integration/harness/run_patch_tests.sh
 Requirements:
 - `tmux`
 - `go`
+
+Operator note:
+- use this harness for real tty validation when changing handoff/fullscreen UX, but keep ordinary recovery-state regressions covered in the default `go test ./internal/...` suite first

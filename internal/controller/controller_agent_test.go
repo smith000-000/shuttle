@@ -185,6 +185,80 @@ func TestLocalControllerSubmitAgentPromptPreservesActivePlanForContinuationPromp
 	}
 }
 
+func TestLocalControllerSubmitProposalRefinementClearsActivePlanForExplicitResetNote(t *testing.T) {
+	agent := &stubAgent{response: AgentResponse{Message: "I will stop here and let you run it elsewhere."}}
+	controller := New(agent, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	controller.task.ActivePlan = &ActivePlan{
+		Summary: "Fix the reported SnapRAID sync errors, then verify the array returns to a clean state.",
+		Steps: []PlanStep{
+			{Text: "Apply the required repair.", Status: PlanStepDone},
+			{Text: "Rerun sync and verify the array is clean.", Status: PlanStepInProgress},
+		},
+	}
+
+	proposal := ProposalPayload{Kind: ProposalCommand, Command: "snapraid sync"}
+	note := "No, don't run a sync here. I will run it in another tmux shell."
+	if _, err := controller.SubmitProposalRefinement(context.Background(), proposal, note); err != nil {
+		t.Fatalf("SubmitProposalRefinement() error = %v", err)
+	}
+
+	if agent.lastInput.Task.ActivePlan != nil {
+		t.Fatalf("expected explicit reset note to clear active plan for refinement, got %#v", agent.lastInput.Task.ActivePlan)
+	}
+	if controller.task.ActivePlan != nil {
+		t.Fatalf("expected controller active plan to clear for explicit reset note, got %#v", controller.task.ActivePlan)
+	}
+}
+
+func TestLocalControllerSubmitProposalRefinementPreservesActivePlanForRoutineNote(t *testing.T) {
+	agent := &stubAgent{response: AgentResponse{Message: "I can revise the command."}}
+	controller := New(agent, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	controller.task.ActivePlan = &ActivePlan{
+		Summary: "Inspect the current system state.",
+		Steps: []PlanStep{
+			{Text: "Check the current status.", Status: PlanStepInProgress},
+			{Text: "Summarize the result.", Status: PlanStepPending},
+		},
+	}
+
+	proposal := ProposalPayload{Kind: ProposalCommand, Command: "cat /tmp/huge.log"}
+	note := "Use snapraid status instead."
+	if _, err := controller.SubmitProposalRefinement(context.Background(), proposal, note); err != nil {
+		t.Fatalf("SubmitProposalRefinement() error = %v", err)
+	}
+
+	if agent.lastInput.Task.ActivePlan == nil {
+		t.Fatal("expected routine refinement note to preserve active plan context")
+	}
+	if controller.task.ActivePlan == nil {
+		t.Fatal("expected controller active plan to remain set for routine refinement note")
+	}
+}
+
+func TestLocalControllerSubmitRefinementClearsActivePlanForExplicitResetNote(t *testing.T) {
+	agent := &stubAgent{response: AgentResponse{Message: "Understood. I will not run it here."}}
+	controller := New(agent, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	controller.task.ActivePlan = &ActivePlan{
+		Summary: "Finish the repair flow.",
+		Steps: []PlanStep{
+			{Text: "Run the repair command.", Status: PlanStepInProgress},
+		},
+	}
+
+	approval := ApprovalRequest{ID: "approval-1", Kind: ApprovalCommand, Command: "snapraid sync"}
+	note := "Abandon the plan here. I will run the long command manually in another shell."
+	if _, err := controller.SubmitRefinement(context.Background(), approval, note); err != nil {
+		t.Fatalf("SubmitRefinement() error = %v", err)
+	}
+
+	if agent.lastInput.Task.ActivePlan != nil {
+		t.Fatalf("expected explicit reset note to clear active plan for approval refinement, got %#v", agent.lastInput.Task.ActivePlan)
+	}
+	if controller.task.ActivePlan != nil {
+		t.Fatalf("expected controller active plan to clear for approval refinement, got %#v", controller.task.ActivePlan)
+	}
+}
+
 func TestLocalControllerSubmitAgentPromptAddsChecklistGuidanceForOrderedWorkflow(t *testing.T) {
 	agent := &stubAgent{
 		response: AgentResponse{

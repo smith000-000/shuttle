@@ -3,7 +3,6 @@ package tui
 import (
 	"strings"
 
-	"aiterm/internal/provider"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -164,7 +163,7 @@ func (m Model) settingsModelIndexAtMouse(y int) (int, bool) {
 	line += 2
 	line += 2
 	line++
-	if settingsModelChoicesContainPreset(m.settingsModelCatalog, provider.PresetCodexCLI) {
+	if settingsModelCatalogHelpText(m.settingsModelCatalog) != "" {
 		line++
 	}
 	start, end := onboardingModelWindow(len(m.settingsModels), m.settingsModelIdx, 12)

@@ -47,3 +47,44 @@ func TestInferPromptReturnResultPrefersPromptExitCode(t *testing.T) {
 		t.Fatalf("expected strong non-inferred result, got confidence=%s inferred=%v", confidence, inferred)
 	}
 }
+
+func TestHandoffPromptReturnReasonPrefersSemanticExitWithoutPromptContext(t *testing.T) {
+	exitCode := 17
+	reason := HandoffPromptReturnReason(ObservedShellState{
+		CurrentPaneCommand: "ssh",
+		SemanticState:      semanticShellState{ExitCode: &exitCode},
+	}, "partial output", nil)
+	if reason != "semantic_exit" {
+		t.Fatalf("expected semantic_exit reason, got %q", reason)
+	}
+}
+
+func TestHandoffPromptReturnReasonUsesFallbackPromptTailForRemoteTransport(t *testing.T) {
+	fallback := PromptContext{
+		User:         "jsmith",
+		Host:         "linuxdesktop",
+		Directory:    "~/source/repos/aiterm",
+		PromptSymbol: "%",
+		RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+	}
+	tail := "logout\nConnection to openclaw closed.\n" + fallback.PromptLine()
+	reason := HandoffPromptReturnReason(ObservedShellState{CurrentPaneCommand: "ssh"}, tail, &fallback)
+	if reason != "fallback_prompt_tail" {
+		t.Fatalf("expected fallback_prompt_tail reason, got %q", reason)
+	}
+}
+
+func TestHandoffPromptReturnReasonDoesNotUseFallbackPromptTailForAwaitingInput(t *testing.T) {
+	fallback := PromptContext{
+		User:         "jsmith",
+		Host:         "linuxdesktop",
+		Directory:    "~/source/repos/aiterm",
+		PromptSymbol: "%",
+		RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+	}
+	tail := "openclaw@openclaw's password:\n" + fallback.PromptLine()
+	reason := HandoffPromptReturnReason(ObservedShellState{CurrentPaneCommand: "ssh"}, tail, &fallback)
+	if reason != "" {
+		t.Fatalf("expected awaiting-input tail not to reconcile, got %q", reason)
+	}
+}

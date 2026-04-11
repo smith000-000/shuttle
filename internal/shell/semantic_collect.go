@@ -3,13 +3,15 @@ package shell
 import (
 	"context"
 	"strings"
+	"time"
 )
 
 const (
-	semanticSourceNone       = ""
-	semanticSourceStream     = "osc_stream"
-	semanticSourceOSCCapture = "osc_capture"
-	semanticSourceState      = "state_file"
+	semanticSourceNone              = ""
+	semanticSourceStream            = "osc_stream"
+	semanticSourceOSCCapture        = "osc_capture"
+	semanticSourceState             = "state_file"
+	semanticStateCommandStaleWindow = 5 * time.Second
 )
 
 type semanticObservation struct {
@@ -41,9 +43,16 @@ type stateFileSemanticCollector struct {
 	stateDir string
 }
 
-func (c stateFileSemanticCollector) Collect(_ context.Context, _ string, paneTTY string, _ string, _ PromptContext) (semanticObservation, bool) {
+func (c stateFileSemanticCollector) Collect(_ context.Context, _ string, paneTTY string, currentPaneCommand string, _ PromptContext) (semanticObservation, bool) {
 	state, ok := readSemanticShellState(c.stateDir, paneTTY)
 	if !ok {
+		return semanticObservation{}, false
+	}
+	currentShell := strings.TrimSpace(strings.ToLower(currentPaneCommand))
+	if currentShell != "" && state.Shell != "" && currentShell != state.Shell {
+		return semanticObservation{}, false
+	}
+	if state.Event == semanticEventCommand && semanticStateNow().Sub(state.UpdatedAt) > semanticStateCommandStaleWindow {
 		return semanticObservation{}, false
 	}
 	return semanticObservation{State: state, Source: semanticSourceState}, true

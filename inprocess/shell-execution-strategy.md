@@ -87,12 +87,14 @@ Shuttle now has a usable first pass of the redesigned execution stack on `main`:
 - serial execution ownership enforcement plus an internal execution registry so future multi-card work has a stable base without allowing overlap yet
 - serial auto-continue hardening so ordered one-command-at-a-time workflows can keep progressing without an extra user "go"
 - plan cards demoted to informational state instead of approval-like control flow, with continuation turns now suppressing stale replacement plans and emitting explicit plan-complete state when needed
+- proposal and approval refinement notes can now explicitly retire the active plan when the user abandons that path or chooses to run the remaining long step outside Shuttle
 - quiet commands like `sleep 20` no longer reconcile as completed from stale prompt scrollback after `F2`
 - transcript result entries now reflect exit status instead of always presenting a green success result
 - transcript and active-execution views now preserve ANSI-colored shell output for display while keeping sanitized plain-text summaries for controller state and prompt reconciliation
 - prompt-inference transport commands such as `ssh` now distinguish the outer transport from the inner remote command, surface auth waits as `awaiting_input`, and settle more reliably after `F2` return
 - tracked-shell recovery now rewrites any live user-shell execution to the new pane target when tmux respawns the tracked shell, instead of leaving active execution state bound to a dead pane ID
 - `exit` / `logout` transitions now have fallback settlement when Shuttle can see either a disconnect tail or a respawned tracked shell even if the prompt parser never produces one final clean trailing prompt line
+- TUI shutdown now cleans up against the final recovered tracked-shell session from the live model instead of assuming the originally bootstrapped workspace session is still current after `F2` recovery
 
 What is still not done:
 - fullscreen/interactive detection still needs stronger terminal-behavior signals beyond current tmux metadata heuristics
@@ -110,7 +112,8 @@ What is still not done:
 
 Recent direction change that is now the baseline on `main`:
 - keep one persistent user shell pane as the continuity surface for cwd, `$>`, and recent manual shell history
-- keep `F2` permanently bound to that persistent tracked shell and use `F3` for a separate active owned execution pane when one exists
+- keep `F2` permanently bound to that persistent tracked shell and use `F3` only for a separate active owned execution pane when one exists
+- expose that `F2`/`F3` split from a controller-owned execution overview instead of re-deriving it from raw pane IDs inside the TUI
 - run approved agent shell commands in owned tmux execution panes by default
 - exception: when the tracked user shell is remote, keep agent shell execution in that tracked remote shell instead of opening a local owned pane
 - feed the agent structured recent manual commands/actions plus full command results, instead of forcing both concerns through one shared pane
@@ -205,6 +208,12 @@ Before changing subshell/bootstrap behavior, manually verify:
   - tracked commands still complete normally
 
 This checklist is also the manual hardening gate for shell-tracking refactors that touch prompt-return reconciliation, attached foreground monitoring, or remote transition settling, even when they are not changing bootstrap behavior directly.
+
+Manual hardening checklist for the current baseline:
+- verify remote transition settlement after `ssh`, auth waits, and remote prompt reuse
+- verify tracked-pane migration and disconnect/respawn settlement after `exit` / `logout` or shell respawn
+- verify awaiting-input and interactive/fullscreen recovery after `F2` return
+- verify `F2` always returns to the persistent tracked shell and `F3` only appears for a distinct owned execution pane
 
 ### 1. Introduce First-Class Command Executions
 Every shell command should create a tracked execution record.

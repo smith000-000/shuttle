@@ -163,11 +163,12 @@ func listOpenAICodexSuggestions(profile Profile, client *http.Client) ([]ModelOp
 		return nil, nil
 	}
 
+	openAIDescriptor := DescriptorForPreset(PresetOpenAI)
 	openAIProfile := Profile{
-		BackendFamily: BackendResponsesHTTP,
+		BackendFamily: openAIDescriptor.BackendFamily,
 		Preset:        PresetOpenAI,
 		AuthMethod:    AuthAPIKey,
-		BaseURL:       firstNonEmpty(strings.TrimSpace(profile.BaseURL), "https://api.openai.com/v1"),
+		BaseURL:       firstNonEmpty(strings.TrimSpace(profile.BaseURL), openAIDescriptor.DefaultBaseURL),
 		APIKey:        apiKey,
 	}
 	models, err := listResponsesModels(openAIProfile, client)
@@ -180,10 +181,15 @@ func listOpenAICodexSuggestions(profile Profile, client *http.Client) ([]ModelOp
 		if !isSuggestedCodexModelID(model.ID) {
 			continue
 		}
+		detailSuffix := strings.TrimSpace(SuggestedModelDetailSuffix(PresetCodexCLI))
+		if detailSuffix == "" {
+			detailSuffix = "Codex CLI's own picker may differ; manual entry is still allowed."
+		}
+		suggestion := "Suggested from the OpenAI model catalog. " + detailSuffix
 		if strings.TrimSpace(model.Description) == "" {
-			model.Description = "Suggested from the OpenAI model catalog. Codex CLI's own picker may differ; manual entry is still allowed."
+			model.Description = suggestion
 		} else {
-			model.Description = strings.TrimSpace(model.Description) + " Suggested from the OpenAI model catalog. Codex CLI's own picker may differ; manual entry is still allowed."
+			model.Description = strings.TrimSpace(model.Description) + " " + suggestion
 		}
 		suggestions = append(suggestions, model)
 	}

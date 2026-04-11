@@ -19,30 +19,15 @@ const (
 )
 
 func SupportsThinking(profile Profile) bool {
-	switch profile.Preset {
-	case PresetOpenAI, PresetOpenRouter, PresetAnthropic, PresetOllama:
-		return true
-	default:
-		return false
-	}
+	return DescriptorForPreset(profile.Preset).SupportsThinking
 }
 
 func SupportsReasoningEffort(profile Profile) bool {
-	switch profile.Preset {
-	case PresetOpenAI, PresetOpenRouter:
-		return true
-	default:
-		return false
-	}
+	return DescriptorForPreset(profile.Preset).SupportsReasoningEffort
 }
 
 func DefaultThinkingMode(profile Profile) ThinkingMode {
-	switch profile.Preset {
-	case PresetOpenRouter:
-		return ThinkingOn
-	default:
-		return ThinkingOff
-	}
+	return DescriptorForPreset(profile.Preset).DefaultThinking
 }
 
 func NormalizeThinkingMode(value string, profile Profile) ThinkingMode {

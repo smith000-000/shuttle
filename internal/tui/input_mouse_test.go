@@ -1067,3 +1067,20 @@ func TestMouseClickModelRowSelectsAndTestsModel(t *testing.T) {
 		t.Fatalf("expected clicked model to be tested, got %#v", tested)
 	}
 }
+
+func TestHelpFooterOmitsF3WhenNoOwnedExecutionPaneExists(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	wide := model.renderHelpFooter(80)
+	if strings.Contains(wide, "F3") {
+		t.Fatalf("expected help footer without F3 when no owned execution pane exists, got %q", wide)
+	}
+}
+
+func TestHelpFooterIncludesF3WhenOwnedExecutionPaneExists(t *testing.T) {
+	ctrl := &fakeController{activeExecution: &controller.CommandExecution{ID: "cmd-1", Command: "top", Origin: controller.CommandOriginAgentProposal, State: controller.CommandExecutionRunning, StartedAt: time.Now(), TrackedShell: controller.TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%9"}}}
+	model := NewModel(fakeWorkspace(), ctrl)
+	wide := model.renderHelpFooter(80)
+	if !strings.Contains(wide, "F3") {
+		t.Fatalf("expected help footer with F3 when owned execution pane exists, got %q", wide)
+	}
+}

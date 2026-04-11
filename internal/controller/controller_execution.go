@@ -910,6 +910,7 @@ func (c *LocalController) RefreshActiveExecution(ctx context.Context) ([]Transcr
 		logging.TraceError("controller.refresh_active_execution.error", err)
 		return nil, nil, err
 	}
+	events = prependTranscriptEvent(events, trackedShellEvent)
 	if !attached {
 		logging.Trace("controller.refresh_active_execution", "outcome", "no_attach")
 		return events, nil, nil

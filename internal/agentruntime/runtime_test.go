@@ -86,3 +86,75 @@ func TestBuiltinRuntimeRepairsInvalidPatchOnce(t *testing.T) {
 		t.Fatalf("expected invalid patch notice, got %#v", outcome.Message)
 	}
 }
+
+func TestNewSelectedRuntimeBuiltinReturnsBuiltinRuntime(t *testing.T) {
+	runtime := NewSelectedRuntime(RuntimeMetadata{Type: RuntimeBuiltin})
+	if _, ok := runtime.(BuiltinRuntime); !ok {
+		t.Fatalf("expected builtin runtime, got %T", runtime)
+	}
+}
+
+func TestNewSelectedRuntimePiAnnotatesOutcome(t *testing.T) {
+	host := &stubHost{responses: []Outcome{{Message: "ready"}}}
+
+	runtime := NewSelectedRuntime(RuntimeMetadata{
+		Type:           RuntimePi,
+		Command:        "/usr/local/bin/pi",
+		ProviderPreset: "openai",
+		Model:          "gpt-5",
+	})
+	if _, ok := runtime.(piRuntime); !ok {
+		t.Fatalf("expected pi runtime adapter, got %T", runtime)
+	}
+
+	outcome, err := runtime.Handle(context.Background(), host, Request{Kind: RequestUserTurn, Prompt: "help"})
+	if err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if !strings.Contains(outcome.Message, "[runtime=pi") {
+		t.Fatalf("expected pi runtime prefix, got %q", outcome.Message)
+	}
+	if outcome.ModelInfo == nil || outcome.ModelInfo.ProviderPreset != "openai" || outcome.ModelInfo.RequestedModel != "gpt-5" {
+		t.Fatalf("expected model metadata to be populated, got %#v", outcome.ModelInfo)
+	}
+}
+
+func TestWrapRuntimeUsesCodexSDKAdapter(t *testing.T) {
+	runtime := WrapRuntime(NewBuiltin(), RuntimeMetadata{Type: RuntimeCodexSDK, Command: "codex"})
+	if _, ok := runtime.(codexSDKRuntime); !ok {
+		t.Fatalf("expected codex sdk runtime adapter, got %T", runtime)
+	}
+}
+
+func TestMetadataRuntimePreservesExistingResponseModelInfo(t *testing.T) {
+	host := &stubHost{responses: []Outcome{{
+		Message: "ready",
+		ModelInfo: &ModelInfo{
+			ProviderPreset:  "anthropic",
+			RequestedModel:  "claude-opus",
+			ResponseModel:   "claude-opus-live",
+			ResponseBaseURL: "https://api.anthropic.com",
+		},
+	}}}
+
+	runtime := WrapRuntime(NewBuiltin(), RuntimeMetadata{
+		Type:           RuntimePi,
+		Command:        "/usr/local/bin/pi",
+		ProviderPreset: "openai",
+		Model:          "gpt-5",
+	})
+
+	outcome, err := runtime.Handle(context.Background(), host, Request{Kind: RequestUserTurn, Prompt: "help"})
+	if err != nil {
+		t.Fatalf("Handle() error = %v", err)
+	}
+	if outcome.ModelInfo == nil {
+		t.Fatal("expected model info")
+	}
+	if outcome.ModelInfo.ProviderPreset != "anthropic" || outcome.ModelInfo.RequestedModel != "claude-opus" {
+		t.Fatalf("expected runtime metadata not to overwrite explicit response model info, got %#v", outcome.ModelInfo)
+	}
+	if outcome.ModelInfo.ResponseModel != "claude-opus-live" || outcome.ModelInfo.ResponseBaseURL != "https://api.anthropic.com" {
+		t.Fatalf("expected response model details preserved, got %#v", outcome.ModelInfo)
+	}
+}

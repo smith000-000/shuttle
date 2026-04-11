@@ -17,10 +17,13 @@ import (
 type semanticShellEvent string
 
 const (
-	semanticEventUnknown semanticShellEvent = ""
-	semanticEventPrompt  semanticShellEvent = "prompt"
-	semanticEventCommand semanticShellEvent = "command"
+	semanticEventUnknown      semanticShellEvent = ""
+	semanticEventPrompt       semanticShellEvent = "prompt"
+	semanticEventCommand      semanticShellEvent = "command"
+	semanticShellStateVersion                    = 1
 )
+
+var semanticStateNow = time.Now
 
 type semanticShellState struct {
 	Event     semanticShellEvent
@@ -31,6 +34,10 @@ type semanticShellState struct {
 }
 
 func semanticStatePath(stateDir string, paneTTY string) string {
+	return filepath.Join(stateDir, "shell-state", semanticStateFileName(paneTTY))
+}
+
+func semanticStateFileName(paneTTY string) string {
 	safeTTY := strings.TrimSpace(paneTTY)
 	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", " ", "_")
 	safeTTY = replacer.Replace(safeTTY)
@@ -38,7 +45,7 @@ func semanticStatePath(stateDir string, paneTTY string) string {
 	if safeTTY == "" {
 		safeTTY = "unknown"
 	}
-	return filepath.Join(stateDir, "shell-state", safeTTY+".state")
+	return safeTTY + ".state"
 }
 
 func readSemanticShellState(stateDir string, paneTTY string) (semanticShellState, bool) {
@@ -52,12 +59,28 @@ func readSemanticShellState(stateDir string, paneTTY string) (semanticShellState
 		return semanticShellState{}, false
 	}
 
-	state, ok := parseSemanticShellState(string(data))
+	state, ok := parseSemanticShellStateFile(data)
 	if !ok {
 		return semanticShellState{}, false
 	}
 	state.UpdatedAt = info.ModTime()
 	return state, true
+}
+
+func parseSemanticShellStateFile(data []byte) (semanticShellState, bool) {
+	raw := string(data)
+	if strings.TrimSpace(raw) == "" || !strings.HasSuffix(raw, "\n") {
+		return semanticShellState{}, false
+	}
+	lines := strings.Split(raw, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		return parseSemanticShellState(line)
+	}
+	return semanticShellState{}, false
 }
 
 func parseSemanticShellState(raw string) (semanticShellState, bool) {
@@ -67,21 +90,40 @@ func parseSemanticShellState(raw string) (semanticShellState, bool) {
 	}
 
 	var payload struct {
-		Event string `json:"event"`
-		Exit  *int   `json:"exit"`
-		Cwd   string `json:"cwd"`
-		Shell string `json:"shell"`
+		Version int    `json:"version"`
+		Event   string `json:"event"`
+		Exit    *int   `json:"exit"`
+		Cwd     string `json:"cwd"`
+		Shell   string `json:"shell"`
 	}
 	if err := json.Unmarshal([]byte(line), &payload); err != nil {
 		return semanticShellState{}, false
 	}
-	var state semanticShellState
-	state.Event = semanticShellEvent(strings.TrimSpace(payload.Event))
-	state.ExitCode = payload.Exit
-	state.Directory = payload.Cwd
-	state.Shell = strings.TrimSpace(payload.Shell)
+	if payload.Version != 0 && payload.Version != semanticShellStateVersion {
+		return semanticShellState{}, false
+	}
 
-	if state.Event == semanticEventUnknown {
+	state := semanticShellState{
+		Event:     semanticShellEvent(strings.TrimSpace(payload.Event)),
+		ExitCode:  payload.Exit,
+		Directory: strings.TrimSpace(payload.Cwd),
+		Shell:     strings.TrimSpace(strings.ToLower(payload.Shell)),
+	}
+	if state.Directory == "" {
+		return semanticShellState{}, false
+	}
+	switch state.Shell {
+	case "bash", "zsh":
+	default:
+		return semanticShellState{}, false
+	}
+	switch state.Event {
+	case semanticEventPrompt:
+	case semanticEventCommand:
+		if state.ExitCode != nil {
+			return semanticShellState{}, false
+		}
+	default:
 		return semanticShellState{}, false
 	}
 	return state, true
@@ -243,7 +285,7 @@ __shuttle_semantic_write_state() {
   if [ -n "$exit_code" ]; then
     exit_json="$exit_code"
   fi
-  printf '{"event":"%s","exit":%s,"cwd":"%s","shell":"bash"}\n' "$event" "$exit_json" "$cwd_json" >| "$SHUTTLE_SEMANTIC_SHELL_STATE_FILE"
+  printf '{"version":1,"event":"%s","exit":%s,"cwd":"%s","shell":"bash"}\n' "$event" "$exit_json" "$cwd_json" >| "$SHUTTLE_SEMANTIC_SHELL_STATE_FILE"
 }
 __shuttle_semantic_preexec() {
   [ "${__shuttle_semantic_in_precmd:-0}" = "1" ] && return
@@ -297,7 +339,7 @@ __shuttle_semantic_write_state() {
   if [ -n "$exit_code" ]; then
     exit_json="$exit_code"
   fi
-  printf '{"event":"%s","exit":%s,"cwd":"%s","shell":"zsh"}\n' "$event" "$exit_json" "$cwd_json" >| "$SHUTTLE_SEMANTIC_SHELL_STATE_FILE"
+  printf '{"version":1,"event":"%s","exit":%s,"cwd":"%s","shell":"zsh"}\n' "$event" "$exit_json" "$cwd_json" >| "$SHUTTLE_SEMANTIC_SHELL_STATE_FILE"
 }
 __shuttle_semantic_preexec() {
   __shuttle_semantic_emit_osc133 "B"

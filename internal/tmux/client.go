@@ -134,6 +134,15 @@ func (c *Client) ListPanes(ctx context.Context, target string) ([]Pane, error) {
 	return parsePanesOutput(output)
 }
 
+func (c *Client) ListAllPanes(ctx context.Context) ([]Pane, error) {
+	output, err := c.run(ctx, "list-panes", "-a", "-F", paneFormat)
+	if err != nil {
+		return nil, err
+	}
+
+	return parsePanesOutput(output)
+}
+
 func (c *Client) PaneInfo(ctx context.Context, target string) (Pane, error) {
 	panes, err := c.ListPanes(ctx, target)
 	if err != nil {

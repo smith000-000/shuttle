@@ -5,10 +5,12 @@ Define how Shuttle should integrate with an agent runtime without turning the pr
 
 Current implementation note:
 - the first extraction seam now lives in `internal/agentruntime`
-- Shuttle still owns execution, approvals, patch application, and state mutation
-- the built-in runtime currently handles response normalization, patch-repair retry, structured-edit synthesis, and inspect-context recursion through a controller-owned host
+- Shuttle still owns execution, approvals, patch application, transcript mutation, and all session/task state changes
+- the built-in runtime currently handles request-kind orchestration, inspect-context recursion, patch-payload normalization, invalid-patch repair retry, and structured-edit synthesis through a controller-owned host
 - the controller no longer stores a direct provider/model agent dependency; provider-backed response generation now sits behind the runtime host adapter
-- interchangeable external runtimes remain follow-on work after this seam stabilizes
+- Shuttle now resolves `builtin`, `auto`, `pi`, and `codex_sdk` selections consistently
+- current `pi` and `codex_sdk` selections are metadata-bearing runtime adapters around the same host contract, not alternate state authorities or alternate execution controllers
+- interchangeable fully delegated external runtimes remain follow-on work after this seam stabilizes
 
 This document is the implementation-facing design note for Milestone 4 and Milestone 5:
 - Milestone 4: mock provider and controller-driven approval flow
@@ -66,6 +68,38 @@ This keeps the product boundary clean:
    - a framework such as `pi`
    - later, an ACP-backed tool runtime if needed
 
+## 2.1.1 Current Runtime Selection Status
+
+Current shipped behavior:
+- `builtin` uses the built-in runtime directly
+- `auto` picks the first installed supported runtime in the current priority order, then falls back to `builtin` when none are available
+- explicit `pi` and `codex_sdk` selections carry runtime metadata and command selection through the runtime seam
+- controller ownership does not change when an external runtime is selected today; Shuttle still owns execution, approvals, patch validation/application, transcript updates, and session/task state
+
+This means the selection seam is live, but full external runtime delegation is still follow-on work.
+
+## 2.1.2 Shipped Runtime Workflow
+
+Today the runtime seam is best understood as a strict workflow boundary, not a transfer of product ownership:
+
+1. The controller builds a product-owned `agentruntime.Request`.
+2. The selected runtime decides how to handle that request kind:
+   - one-shot response
+   - inspect-context loop
+   - patch-repair retry
+   - structured-edit synthesis
+3. The runtime calls back into a controller-owned `agentruntime.Host` for every privileged action.
+4. The host is the only layer allowed to:
+   - refresh tracked shell and local host context
+   - read or mutate task/session state
+   - validate patches
+   - synthesize structured edit proposals from Shuttle state
+   - invoke the underlying provider/model agent
+5. The runtime returns a normalized `agentruntime.Outcome`.
+6. The controller translates that outcome into transcript events, approval state, auto-run/auto-apply behavior, and any subsequent shell or patch action.
+
+That means current external runtime selection changes turn policy and metadata, not product authority. Shuttle remains the sole owner of shell reality, approvals, execution, and persistence.
+
 ## 2.2 Design Rule
 
 The controller should only depend on a narrow `Agent` interface.
@@ -81,6 +115,24 @@ Those details belong in adapters behind the `Agent` interface.
 ---
 
 # 3. Controller and Agent Interface
+
+## 2.3 External Runtime Contract
+
+For the current seam, an external runtime adapter is allowed to own:
+- request-kind specific prompting/orchestration strategy
+- model-facing response normalization rules
+- adapter metadata such as runtime type, selected command path, provider preset, and requested model
+
+It is not allowed to own:
+- tmux interaction
+- shell reads or shell writes
+- approval gating decisions
+- patch application
+- transcript mutation
+- task/session persistence
+- command execution lifecycle
+
+If a future runtime needs broader authority, that should be introduced as a new host capability contract explicitly, not by letting an adapter reach around the controller.
 
 ## 3.1 Agent Interface
 
@@ -144,6 +196,31 @@ Notes:
 - `RecentManualCommands` and `RecentManualActions` let the runtime resolve prompts like "see the file I just renamed".
 - `ApprovalMode` is Shuttle-owned session policy; it informs the runtime, but the controller remains authoritative about whether a command can auto-run or must stay gated.
 - `TrackedShell` and `CurrentShell` describe the persistent user shell context; approved agent commands may still run in owned execution panes tracked separately in `ExecutionRegistry`.
+
+## 3.2.1 Runtime Request and Host Boundary
+
+The shipped `agentruntime` seam is slightly richer than the original `Agent` sketch. The effective contract is now:
+
+```go
+type Runtime interface {
+    Handle(ctx context.Context, host Host, req Request) (Outcome, error)
+}
+
+type Host interface {
+    Respond(ctx context.Context, req Request) (Outcome, error)
+    InspectContext(ctx context.Context, req Request) error
+    SynthesizeStructuredEdit(ctx context.Context, outcome Outcome) (Outcome, error)
+    ValidatePatch(ctx context.Context, patch string, target string) error
+}
+```
+
+Interpretation:
+- `Runtime` owns turn-level policy.
+- `Host` owns every controller-privileged operation.
+- `Respond` is the only path that reaches the underlying provider/model agent.
+- `InspectContext`, `SynthesizeStructuredEdit`, and `ValidatePatch` are controller-owned side channels that keep shell, patch, and edit semantics inside Shuttle.
+
+This is the contract external runtimes should target in P1. They should not expect direct access to tmux panes, controller internals, or mutable transcript state.
 
 ## 3.3 Agent Response
 

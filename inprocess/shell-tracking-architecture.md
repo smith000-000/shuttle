@@ -110,6 +110,12 @@ Semantic shell state is consumed from multiple sources with explicit precedence:
 
 Current preferred source is `osc_stream`, backed by `tmux pipe-pane -O`.
 
+State-file fallback remains last priority and is now intentionally stricter than before:
+- only newline-terminated payloads are accepted from the file-backed fallback
+- payloads must validate the expected shell/event shape
+- stale `command` file-state is discarded, while older `prompt` state can still represent an idle local shell
+- live `osc_stream` and `osc_capture` observations still win over the file-backed fallback
+
 Important detail:
 - `pipe-pane -O` produces a cumulative stream
 - Shuttle reduces that stream incrementally instead of rescanning the full output buffer snapshot-style

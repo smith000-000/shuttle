@@ -331,6 +331,8 @@ Expected:
 - Provider registration is still static, not plugin-driven.
 - Codex CLI model suggestions are only a best-effort proxy from OpenAI's model catalog.
 - Safe trace mode protects local trace logs, but it does not stop normal provider context flow needed for agent operation.
+- `shuttle.log` is operational-only and redacts raw commands, prompts, key input, and provider payloads; trace-detail behavior remains isolated to `trace.log`.
+- Local semantic shell state is versioned on write, while legacy unversioned state remains readable for compatibility.
 - There is not yet a dedicated end-user screen that fully explains secret persistence decisions after every save; some of this is still inferred from the auth-source label and warning messages.
 
 ## Files That Define This Behavior

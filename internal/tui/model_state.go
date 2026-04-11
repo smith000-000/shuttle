@@ -379,6 +379,46 @@ func activeExecutionID(execution *controller.CommandExecution) string {
 	return execution.ID
 }
 
+func (m Model) currentExecutionOverview() controller.ExecutionOverview {
+	localOverview := controller.ExecutionOverview{TrackedShell: controller.TrackedShellTarget{SessionName: strings.TrimSpace(m.takeControl.SessionName), PaneID: m.persistentTrackedPaneID()}}
+	if m.activeExecution != nil {
+		usesTrackedShell := true
+		executionPane := strings.TrimSpace(m.activeExecution.TrackedShell.PaneID)
+		if executionPane != "" && executionPane != m.persistentTrackedPaneID() {
+			usesTrackedShell = false
+		}
+		active := controller.ActiveExecutionOverview{
+			ID:               m.activeExecution.ID,
+			Command:          m.activeExecution.Command,
+			Origin:           m.activeExecution.Origin,
+			State:            m.activeExecution.State,
+			StartedAt:        m.activeExecution.StartedAt,
+			UsesTrackedShell: usesTrackedShell,
+		}
+		if !usesTrackedShell && executionPane != "" {
+			sessionName := strings.TrimSpace(m.activeExecution.TrackedShell.SessionName)
+			if sessionName == "" {
+				sessionName = strings.TrimSpace(localOverview.TrackedShell.SessionName)
+			}
+			active.ExecutionTakeControlTarget = controller.TrackedShellTarget{SessionName: sessionName, PaneID: executionPane}
+		}
+		localOverview.ActiveExecution = &active
+	}
+	if m.ctrl == nil {
+		return localOverview
+	}
+	overview := m.ctrl.ExecutionOverview()
+	if localOverview.ActiveExecution != nil {
+		if overview.ActiveExecution == nil || strings.TrimSpace(overview.ActiveExecution.ID) != strings.TrimSpace(localOverview.ActiveExecution.ID) {
+			return localOverview
+		}
+	}
+	if overview.ActiveExecution != nil || strings.TrimSpace(overview.TrackedShell.PaneID) != "" {
+		return overview
+	}
+	return localOverview
+}
+
 func (m Model) activeExecutionPaneID() string {
 	if m.activeExecution != nil && strings.TrimSpace(m.activeExecution.TrackedShell.PaneID) != "" {
 		return strings.TrimSpace(m.activeExecution.TrackedShell.PaneID)
@@ -394,14 +434,8 @@ func (m Model) persistentTrackedPaneID() string {
 }
 
 func (m Model) activeExecutionUsesTrackedShell() bool {
-	if m.activeExecution == nil {
-		return false
-	}
-	executionPane := strings.TrimSpace(m.activeExecution.TrackedShell.PaneID)
-	if executionPane == "" {
-		return true
-	}
-	return executionPane == m.persistentTrackedPaneID()
+	overview := m.currentExecutionOverview()
+	return overview.ActiveExecution != nil && overview.ActiveExecution.UsesTrackedShell
 }
 
 func (m Model) takeControlTargetsActiveExecution() bool {
@@ -409,17 +443,11 @@ func (m Model) takeControlTargetsActiveExecution() bool {
 }
 
 func (m Model) activeExecutionTakeControlPaneID() string {
-	if m.activeExecution == nil {
+	overview := m.currentExecutionOverview()
+	if overview.ActiveExecution == nil {
 		return ""
 	}
-	executionPane := strings.TrimSpace(m.activeExecution.TrackedShell.PaneID)
-	if executionPane == "" {
-		return ""
-	}
-	if executionPane == m.persistentTrackedPaneID() {
-		return ""
-	}
-	return executionPane
+	return strings.TrimSpace(overview.ActiveExecution.ExecutionTakeControlTarget.PaneID)
 }
 
 func errString(err error) string {

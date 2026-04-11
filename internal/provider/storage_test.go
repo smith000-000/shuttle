@@ -352,3 +352,48 @@ func withTestKeyring(t *testing.T) map[string]string {
 
 	return store
 }
+
+func TestPlaintextProviderSecretFallbackUsesPrivatePermissions(t *testing.T) {
+	tempDir := t.TempDir()
+	previousSet := keyringSet
+	previousGet := keyringGet
+	previousDelete := keyringDelete
+	keyringSet = func(service, user, password string) error {
+		return errors.New("keyring backend unavailable")
+	}
+	keyringGet = func(service, user string) (string, error) {
+		return "", errors.New("keyring backend unavailable")
+	}
+	keyringDelete = func(service, user string) error { return nil }
+	t.Cleanup(func() {
+		keyringSet = previousSet
+		keyringGet = previousGet
+		keyringDelete = previousDelete
+	})
+
+	profile := Profile{
+		Preset:     PresetAnthropic,
+		AuthMethod: AuthAPIKey,
+		BaseURL:    "https://api.anthropic.com",
+		Model:      "claude-sonnet-4-6",
+		APIKey:     "manual-secret",
+	}
+	if err := SaveStoredProviderConfigWithOptions(tempDir, profile, SecretStoreOptions{AllowPlaintextFallback: true}); err != nil {
+		t.Fatalf("SaveStoredProviderConfigWithOptions() error = %v", err)
+	}
+
+	secretDirInfo, err := os.Stat(providerSecretsDirPath(tempDir))
+	if err != nil {
+		t.Fatalf("Stat(providerSecretsDirPath) error = %v", err)
+	}
+	if secretDirInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("expected provider secrets dir perms 0700, got %#o", secretDirInfo.Mode().Perm())
+	}
+	secretInfo, err := os.Stat(providerSecretPath(tempDir, PresetAnthropic))
+	if err != nil {
+		t.Fatalf("Stat(providerSecretPath) error = %v", err)
+	}
+	if secretInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("expected provider secret perms 0600, got %#o", secretInfo.Mode().Perm())
+	}
+}

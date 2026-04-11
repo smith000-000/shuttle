@@ -12,7 +12,7 @@ import (
 
 func (c *LocalController) SubmitAgentPrompt(ctx context.Context, prompt string) ([]TranscriptEvent, error) {
 	c.mu.Lock()
-	if shouldReplaceActivePlanForUserPrompt(c.task.ActivePlan, prompt) {
+	if ShouldReplaceActivePlanForUserPrompt(c.task.ActivePlan, prompt) {
 		c.task.ActivePlan = nil
 	}
 	c.mu.Unlock()
@@ -21,11 +21,21 @@ func (c *LocalController) SubmitAgentPrompt(ctx context.Context, prompt string) 
 }
 
 func (c *LocalController) SubmitRefinement(ctx context.Context, approval ApprovalRequest, note string) ([]TranscriptEvent, error) {
+	c.mu.Lock()
+	if ShouldReplaceActivePlanForRefinement(c.task.ActivePlan, note) {
+		c.task.ActivePlan = nil
+	}
+	c.mu.Unlock()
 	logging.Trace("controller.submit_refinement", "approval_id", approval.ID, "note", note)
 	return c.submitAgentTurn(ctx, note, note, &approval, true)
 }
 
 func (c *LocalController) SubmitProposalRefinement(ctx context.Context, proposal ProposalPayload, note string) ([]TranscriptEvent, error) {
+	c.mu.Lock()
+	if ShouldReplaceActivePlanForRefinement(c.task.ActivePlan, note) {
+		c.task.ActivePlan = nil
+	}
+	c.mu.Unlock()
 	logging.Trace(
 		"controller.submit_proposal_refinement",
 		"proposal_kind", proposal.Kind,
@@ -221,7 +231,7 @@ func normalizeComparableShellDirectory(directory string, location shell.ShellLoc
 	return normalizeWorkingDirectory(directory)
 }
 
-func shouldReplaceActivePlanForUserPrompt(activePlan *ActivePlan, prompt string) bool {
+func ShouldReplaceActivePlanForUserPrompt(activePlan *ActivePlan, prompt string) bool {
 	if activePlan == nil {
 		return false
 	}
@@ -229,6 +239,10 @@ func shouldReplaceActivePlanForUserPrompt(activePlan *ActivePlan, prompt string)
 	prompt = strings.ToLower(strings.TrimSpace(prompt))
 	if prompt == "" {
 		return false
+	}
+
+	if activePlanResetRequested(prompt) {
+		return true
 	}
 
 	for _, marker := range []string{
@@ -252,6 +266,64 @@ func shouldReplaceActivePlanForUserPrompt(activePlan *ActivePlan, prompt string)
 	}
 
 	return true
+}
+
+func ShouldReplaceActivePlanForRefinement(activePlan *ActivePlan, note string) bool {
+	if activePlan == nil {
+		return false
+	}
+
+	return activePlanResetRequested(note)
+}
+
+func activePlanResetRequested(prompt string) bool {
+	prompt = strings.ToLower(strings.TrimSpace(prompt))
+	if prompt == "" {
+		return false
+	}
+
+	if containsAnySubstring(
+		prompt,
+		"abandon the plan",
+		"drop the plan",
+		"old plan",
+		"wrong plan",
+		"stuck in the old plan",
+		"stop following",
+		"don't follow",
+		"do not follow",
+		"replan",
+		"re-plan",
+		"switch plans",
+		"change the plan",
+		"different plan",
+	) {
+		return true
+	}
+
+	doNotRun := containsAnySubstring(
+		prompt,
+		"don't run",
+		"do not run",
+		"not run here",
+		"won't run",
+		"will not run",
+		"defer",
+		"deferred",
+	)
+	externalRun := containsAnySubstring(
+		prompt,
+		"another shell",
+		"another tmux shell",
+		"different shell",
+		"outside shuttle",
+		"outside this shell",
+		"i will run",
+		"i'll run",
+		"you can stop here",
+		"manually",
+	)
+	return doNotRun && externalRun
 }
 
 func (c *LocalController) validatePatchPayload(ctx context.Context, patch string, target PatchTarget) error {

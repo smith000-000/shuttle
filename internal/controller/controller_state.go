@@ -265,6 +265,34 @@ func shouldSyncExecutionIntoUserShellSession(execution *CommandExecution, sessio
 	return sameTrackedShellTarget(executionTarget(execution, session.TrackedShell), session.TrackedShell)
 }
 
+func buildExecutionOverview(execution *CommandExecution, trackedShell TrackedShellTarget) ExecutionOverview {
+	overview := ExecutionOverview{TrackedShell: trackedShell}
+	if execution == nil {
+		return overview
+	}
+	target := executionTarget(execution, trackedShell)
+	takeControlTarget := TrackedShellTarget{}
+	if executionSupportsDirectTakeControl(execution) && !sameTrackedShellTarget(target, trackedShell) {
+		takeControlTarget = target
+	}
+	overview.ActiveExecution = &ActiveExecutionOverview{
+		ID:                         execution.ID,
+		Command:                    execution.Command,
+		Origin:                     execution.Origin,
+		State:                      execution.State,
+		StartedAt:                  execution.StartedAt,
+		UsesTrackedShell:           sameTrackedShellTarget(target, trackedShell),
+		ExecutionTakeControlTarget: takeControlTarget,
+	}
+	return overview
+}
+
+func (c *LocalController) ExecutionOverview() ExecutionOverview {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return buildExecutionOverview(c.primaryExecutionLocked(), c.session.TrackedShell)
+}
+
 func (c *LocalController) TakeControlTarget() TrackedShellTarget {
 	c.mu.Lock()
 	defer c.mu.Unlock()

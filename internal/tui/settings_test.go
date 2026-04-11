@@ -1180,3 +1180,15 @@ func TestProviderSummaryLineShowsPlaintextFallbackSource(t *testing.T) {
 		t.Fatalf("expected plaintext fallback auth source in summary, got %q", line)
 	}
 }
+
+func TestProviderTestFailureBannerIncludesHealthGuidance(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	updated, _ := model.Update(settingsProviderTestedMsg{
+		profile: provider.Profile{Preset: provider.PresetOllama, Name: "Ollama Chat", BaseURL: "http://localhost:11434/api"},
+		err:     errors.New("dial tcp timeout"),
+	})
+	model = updated.(Model)
+	if !strings.Contains(model.settingsBanner, "Verify the Ollama server is reachable") {
+		t.Fatalf("expected guided failure banner, got %q", model.settingsBanner)
+	}
+}

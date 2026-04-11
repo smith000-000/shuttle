@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -125,5 +126,95 @@ func TestRefreshLocalHostContextUpdatesWorkingDirectory(t *testing.T) {
 	}
 	if controller.session.LocalWorkingDirectory != current {
 		t.Fatalf("expected controller session local cwd %q, got %#v", current, controller.session)
+	}
+}
+
+func TestRefreshShellContextUsesResolvedTrackedPaneAndProbeAuthoritativeRemoteDirectory(t *testing.T) {
+	reader := &stubContextReader{
+		resolvedPaneID: "%5",
+		observed: shell.ObservedShellState{
+			HasPromptContext: true,
+			PromptContext: shell.PromptContext{
+				User:         "openclaw",
+				Host:         "openclaw",
+				Directory:    "~",
+				PromptSymbol: "$",
+				RawLine:      "openclaw@openclaw ~ $",
+				Remote:       true,
+			},
+			Location: shell.ShellLocation{
+				Kind:                shell.ShellLocationRemote,
+				User:                "openclaw",
+				Host:                "openclaw",
+				Directory:           "/srv/app",
+				DirectorySource:     shell.ShellDirectorySourceProbe,
+				DirectoryConfidence: shell.ConfidenceStrong,
+			},
+		},
+	}
+	controller := New(nil, nil, reader, SessionContext{
+		SessionName:  "shuttle-test",
+		TrackedShell: TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
+	})
+
+	context, err := controller.RefreshShellContext(context.Background())
+	if err != nil {
+		t.Fatalf("RefreshShellContext() error = %v", err)
+	}
+	if context == nil || !context.Remote || context.Host != "openclaw" {
+		t.Fatalf("expected refreshed remote prompt context, got %#v", context)
+	}
+	if controller.session.TrackedShell.PaneID != "%5" {
+		t.Fatalf("expected resolved tracked shell pane %%5, got %#v", controller.session.TrackedShell)
+	}
+	if controller.session.CurrentShellLocation == nil || controller.session.CurrentShellLocation.Kind != shell.ShellLocationRemote {
+		t.Fatalf("expected remote shell location, got %#v", controller.session.CurrentShellLocation)
+	}
+	if controller.session.CurrentShellLocation.Directory != "/srv/app" || controller.session.CurrentShellLocation.DirectorySource != shell.ShellDirectorySourceProbe {
+		t.Fatalf("expected authoritative remote probe directory, got %#v", controller.session.CurrentShellLocation)
+	}
+	if controller.session.WorkingDirectory != "/srv/app" {
+		t.Fatalf("expected working directory from remote probe, got %q", controller.session.WorkingDirectory)
+	}
+}
+
+func TestRefreshShellContextFallsBackToObservedRemoteLocationWithoutPrompt(t *testing.T) {
+	reader := &stubContextReader{
+		resolvedPaneID: "%5",
+		observed: shell.ObservedShellState{
+			CurrentPaneCommand: "ssh",
+			Location: shell.ShellLocation{
+				Kind:                shell.ShellLocationRemote,
+				User:                "openclaw",
+				Host:                "openclaw",
+				Directory:           "/srv/app",
+				DirectorySource:     shell.ShellDirectorySourceProbe,
+				DirectoryConfidence: shell.ConfidenceStrong,
+			},
+		},
+	}
+	controller := New(nil, nil, reader, SessionContext{
+		SessionName:  "shuttle-test",
+		TrackedShell: TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
+	})
+
+	context, err := controller.RefreshShellContext(context.Background())
+	if err != nil {
+		t.Fatalf("RefreshShellContext() error = %v", err)
+	}
+	if context != nil {
+		t.Fatalf("expected no prompt context yet, got %#v", context)
+	}
+	if controller.session.TrackedShell.PaneID != "%5" {
+		t.Fatalf("expected resolved tracked shell pane %%5, got %#v", controller.session.TrackedShell)
+	}
+	if controller.session.CurrentShellLocation == nil || controller.session.CurrentShellLocation.Kind != shell.ShellLocationRemote {
+		t.Fatalf("expected remote shell location, got %#v", controller.session.CurrentShellLocation)
+	}
+	if controller.session.CurrentShellLocation.Directory != "/srv/app" {
+		t.Fatalf("expected remote directory from observed location, got %#v", controller.session.CurrentShellLocation)
+	}
+	if controller.session.WorkingDirectory != "/srv/app" {
+		t.Fatalf("expected working directory from observed location, got %q", controller.session.WorkingDirectory)
 	}
 }

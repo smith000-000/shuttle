@@ -864,6 +864,18 @@ func TestTakeControlFinishedSyncsTrackedTopPane(t *testing.T) {
 	}
 }
 
+func TestTakeControlFinishedCleanupSessionFollowsRecoveredSession(t *testing.T) {
+	ctrl := &fakeController{sessionName: "shuttle-recovered", trackedPaneID: "%7"}
+	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+
+	updated, _ := model.Update(takeControlFinishedMsg{})
+	next := updated.(Model)
+
+	if next.CleanupSessionName() != "shuttle-recovered" {
+		t.Fatalf("expected cleanup session shuttle-recovered, got %q", next.CleanupSessionName())
+	}
+}
+
 func TestTakeControlFinishedResumesControllerWithoutLocalExecution(t *testing.T) {
 	activeExecution := &controller.CommandExecution{
 		ID:        "cmd-1",
@@ -2325,5 +2337,27 @@ func TestShellSubmitUsesCurrentInputEachTime(t *testing.T) {
 
 	if ctrl.shellCommands[1] != "ls -lah" {
 		t.Fatalf("expected second command ls -lah, got %q", ctrl.shellCommands[1])
+	}
+}
+
+func TestActiveExecutionCardClarifiesF2AndF3ForOwnedPane(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.activeExecution = &controller.CommandExecution{
+		ID:           "cmd-1",
+		Command:      "sudo apt update",
+		Origin:       controller.CommandOriginAgentProposal,
+		State:        controller.CommandExecutionAwaitingInput,
+		StartedAt:    time.Now(),
+		TrackedShell: controller.TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%9"},
+	}
+	ctrl.activeExecution = model.activeExecution
+
+	card := model.renderActiveExecutionCard(100)
+	if !strings.Contains(card, "surface: owned execution pane") {
+		t.Fatalf("expected owned-pane surface label, got %q", card)
+	}
+	if !strings.Contains(card, "F2 still targets the persistent shell") || !strings.Contains(card, "F3 take control") {
+		t.Fatalf("expected explicit F2/F3 split guidance, got %q", card)
 	}
 }

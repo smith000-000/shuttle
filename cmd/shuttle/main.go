@@ -28,11 +28,6 @@ func main() {
 		return
 	}
 
-	if cfg.TraceMode == config.TraceModeSensitive && !cfg.TraceConsent {
-		fmt.Fprintf(os.Stderr, "config error: sensitive trace captures raw commands, terminal output, key input, prompts, and provider payloads. Re-run with --trace-consent to acknowledge the risk.\n")
-		os.Exit(2)
-	}
-
 	logger, closeLogger, err := logging.New(cfg.LogPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "logger error: %v\n", err)
