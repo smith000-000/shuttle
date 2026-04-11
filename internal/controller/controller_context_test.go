@@ -41,6 +41,9 @@ func TestLocalControllerStartNewTaskResetsTaskStateButPreservesSession(t *testin
 	if controller.session.WorkingDirectory != "/workspace" || controller.session.TrackedShell.PaneID != "%0" || controller.session.ApprovalMode != ApprovalModeAuto {
 		t.Fatalf("expected session continuity to be preserved, got %#v", controller.session)
 	}
+	if controller.session.LocalWorkingDirectory == "" {
+		t.Fatalf("expected local working directory probe to be populated, got %#v", controller.session)
+	}
 }
 
 func TestLocalControllerStartNewTaskBlocksPendingApproval(t *testing.T) {

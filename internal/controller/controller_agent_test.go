@@ -52,8 +52,8 @@ func TestLocalControllerSubmitAgentPrompt(t *testing.T) {
 		t.Fatalf("unexpected event sequence: %#v", events)
 	}
 
-	if agent.lastInput.Session.RecentShellOutput != "recent shell output" {
-		t.Fatalf("expected recent shell output in agent input, got %q", agent.lastInput.Session.RecentShellOutput)
+	if agent.lastInput.Session.RecentShellOutput != "" {
+		t.Fatalf("expected ordinary agent turn not to recapture tracked-pane output, got %q", agent.lastInput.Session.RecentShellOutput)
 	}
 }
 
@@ -131,6 +131,60 @@ func TestLocalControllerSubmitAgentPromptCreatesActivePlan(t *testing.T) {
 	}
 }
 
+func TestLocalControllerSubmitAgentPromptClearsSupersededActivePlan(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "Starting the new task.",
+		},
+	}
+	controller := New(agent, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	controller.task.ActivePlan = &ActivePlan{
+		Summary: "Old task plan",
+		Steps: []PlanStep{
+			{Text: "Do the old thing.", Status: PlanStepInProgress},
+			{Text: "Report back.", Status: PlanStepPending},
+		},
+	}
+
+	if _, err := controller.SubmitAgentPrompt(context.Background(), "inspect the current repo status instead"); err != nil {
+		t.Fatalf("SubmitAgentPrompt() error = %v", err)
+	}
+
+	if agent.lastInput.Task.ActivePlan != nil {
+		t.Fatalf("expected old active plan to be cleared for new prompt, got %#v", agent.lastInput.Task.ActivePlan)
+	}
+	if controller.task.ActivePlan != nil {
+		t.Fatalf("expected controller active plan to clear for new prompt, got %#v", controller.task.ActivePlan)
+	}
+}
+
+func TestLocalControllerSubmitAgentPromptPreservesActivePlanForContinuationPrompt(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "Continuing the current task.",
+		},
+	}
+	controller := New(agent, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	controller.task.ActivePlan = &ActivePlan{
+		Summary: "Current task plan",
+		Steps: []PlanStep{
+			{Text: "Do the current thing.", Status: PlanStepInProgress},
+			{Text: "Report back.", Status: PlanStepPending},
+		},
+	}
+
+	if _, err := controller.SubmitAgentPrompt(context.Background(), "continue"); err != nil {
+		t.Fatalf("SubmitAgentPrompt() error = %v", err)
+	}
+
+	if agent.lastInput.Task.ActivePlan == nil {
+		t.Fatal("expected active plan to remain available for continuation prompt")
+	}
+	if controller.task.ActivePlan == nil {
+		t.Fatal("expected controller active plan to remain set for continuation prompt")
+	}
+}
+
 func TestLocalControllerSubmitAgentPromptAddsChecklistGuidanceForOrderedWorkflow(t *testing.T) {
 	agent := &stubAgent{
 		response: AgentResponse{
@@ -146,6 +200,106 @@ func TestLocalControllerSubmitAgentPromptAddsChecklistGuidanceForOrderedWorkflow
 
 	if !strings.Contains(agent.lastInput.Prompt, initialChecklistPromptSuffix) {
 		t.Fatalf("expected ordered-workflow checklist guidance, got %q", agent.lastInput.Prompt)
+	}
+	if !strings.Contains(agent.lastInput.Prompt, stateAuthorityPromptSuffix) {
+		t.Fatalf("expected state-authority guidance, got %q", agent.lastInput.Prompt)
+	}
+}
+
+func TestLocalControllerSubmitAgentPromptAddsChecklistGuidanceForInvestigativeInstallPrompt(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "I will inspect the likely install sources.",
+		},
+	}
+	controller := New(agent, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+
+	prompt := "can you figure out how and where orcaslicer was installed?"
+	if _, err := controller.SubmitAgentPrompt(context.Background(), prompt); err != nil {
+		t.Fatalf("SubmitAgentPrompt() error = %v", err)
+	}
+
+	if !strings.Contains(agent.lastInput.Prompt, initialChecklistPromptSuffix) {
+		t.Fatalf("expected investigative checklist guidance, got %q", agent.lastInput.Prompt)
+	}
+}
+
+func TestLocalControllerSubmitAgentPromptAddsChecklistGuidanceForInvestigativeDebugPrompt(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{Message: "I will inspect the likely sources."},
+	}
+	controller := New(agent, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+
+	prompt := "can you figure out why nginx is listening on this port?"
+	if _, err := controller.SubmitAgentPrompt(context.Background(), prompt); err != nil {
+		t.Fatalf("SubmitAgentPrompt() error = %v", err)
+	}
+
+	if !strings.Contains(agent.lastInput.Prompt, initialChecklistPromptSuffix) {
+		t.Fatalf("expected investigative checklist guidance, got %q", agent.lastInput.Prompt)
+	}
+}
+
+func TestLocalControllerSubmitAgentPromptAddsRerunGuidanceForExplicitRetry(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "I will rerun it.",
+		},
+	}
+	controller := New(agent, nil, &stubContextReader{
+		context: shell.PromptContext{
+			User:         "localuser",
+			Host:         "workstation",
+			Directory:    "/workspace/project",
+			PromptSymbol: "%",
+			RawLine:      "localuser@workstation /workspace/project %",
+		},
+	}, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+
+	if _, err := controller.SubmitAgentPrompt(context.Background(), "run the test again on this host"); err != nil {
+		t.Fatalf("SubmitAgentPrompt() error = %v", err)
+	}
+
+	if !strings.Contains(agent.lastInput.Prompt, rerunOrContextShiftPromptSuffix) {
+		t.Fatalf("expected rerun guidance, got %q", agent.lastInput.Prompt)
+	}
+}
+
+func TestLocalControllerSubmitAgentPromptAddsContextShiftGuidanceWhenShellIdentityChanged(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "I will reassess it on the current shell.",
+		},
+	}
+	controller := New(agent, nil, &stubContextReader{
+		context: shell.PromptContext{
+			User:         "deploy",
+			Host:         "prod",
+			Directory:    "~/app",
+			PromptSymbol: "$",
+			RawLine:      "deploy@prod ~/app $",
+			Remote:       true,
+		},
+	}, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	controller.task.LastCommandResult = &CommandResultSummary{
+		Command: "go test ./...",
+		State:   CommandExecutionCompleted,
+		Summary: "ok",
+		ShellContext: &shell.PromptContext{
+			User:         "localuser",
+			Host:         "workstation",
+			Directory:    "/workspace/project",
+			PromptSymbol: "%",
+			RawLine:      "localuser@workstation /workspace/project %",
+		},
+	}
+
+	if _, err := controller.SubmitAgentPrompt(context.Background(), "run the test"); err != nil {
+		t.Fatalf("SubmitAgentPrompt() error = %v", err)
+	}
+
+	if !strings.Contains(agent.lastInput.Prompt, rerunOrContextShiftPromptSuffix) {
+		t.Fatalf("expected context-shift guidance, got %q", agent.lastInput.Prompt)
 	}
 }
 
@@ -220,7 +374,11 @@ func TestLocalControllerInspectProposedContextReturnsAuthoritativeShellState(t *
 	if !strings.Contains(result.Summary, "user_host=openclaw@openclaw") ||
 		!strings.Contains(result.Summary, "shell_target=openclaw@openclaw") ||
 		!strings.Contains(result.Summary, "cwd=/home/openclaw") ||
+		!strings.Contains(result.Summary, "cwd_source=prompt") ||
+		!strings.Contains(result.Summary, "cwd_confidence=medium") ||
+		!strings.Contains(result.Summary, "cwd_authoritative=false") ||
 		!strings.Contains(result.Summary, "remote=true") ||
+		!strings.Contains(result.Summary, "shell_location=remote") ||
 		!strings.Contains(result.Summary, "system=Linux") ||
 		!strings.Contains(result.Summary, "git_branch=main") ||
 		!strings.Contains(result.Summary, "local_workspace_root=/workspace/project") ||
@@ -233,6 +391,53 @@ func TestLocalControllerInspectProposedContextReturnsAuthoritativeShellState(t *
 	}
 	if controller.task.LastCommandResult == nil || controller.task.LastCommandResult.Command != inspectContextCommandLabel {
 		t.Fatalf("expected task last command result to be updated, got %#v", controller.task.LastCommandResult)
+	}
+}
+
+func TestLocalControllerInspectProposedContextPreservesRemoteTildeDirectory(t *testing.T) {
+	controller := New(nil, nil, &stubContextReader{
+		observed: shell.ObservedShellState{
+			PromptContext: shell.PromptContext{
+				User:         "openclaw",
+				Host:         "openclaw",
+				Directory:    "~",
+				System:       "Linux",
+				PromptSymbol: "$",
+				RawLine:      "openclaw@openclaw ~ $",
+				Remote:       true,
+			},
+			HasPromptContext: true,
+			Location: shell.ShellLocation{
+				Kind:      shell.ShellLocationRemote,
+				User:      "openclaw",
+				Host:      "openclaw",
+				Directory: "~",
+			},
+		},
+	}, SessionContext{
+		TrackedShell:       TrackedShellTarget{PaneID: "%0"},
+		LocalWorkspaceRoot: "/workspace/project",
+	})
+
+	events, err := controller.InspectProposedContext(context.Background())
+	if err != nil {
+		t.Fatalf("InspectProposedContext() error = %v", err)
+	}
+	result, ok := events[0].Payload.(CommandResultSummary)
+	if !ok {
+		t.Fatalf("expected command result payload, got %#v", events[0].Payload)
+	}
+	if !strings.Contains(result.Summary, "cwd=~") {
+		t.Fatalf("expected inspect summary to preserve remote tilde cwd, got %q", result.Summary)
+	}
+	if !strings.Contains(result.Summary, "cwd_source=prompt") || !strings.Contains(result.Summary, "cwd_confidence=low") || !strings.Contains(result.Summary, "cwd_authoritative=false") {
+		t.Fatalf("expected inspect summary to mark remote tilde cwd as prompt-derived and approximate, got %q", result.Summary)
+	}
+	if !strings.Contains(result.Summary, "remote_patch_root=~") {
+		t.Fatalf("expected remote patch root to preserve remote tilde cwd, got %q", result.Summary)
+	}
+	if strings.Contains(result.Summary, "/home/jsmith") {
+		t.Fatalf("expected no local-home expansion in remote inspect summary, got %q", result.Summary)
 	}
 }
 
@@ -677,7 +882,10 @@ func TestLocalControllerSubmitRefinementIncludesApprovalContext(t *testing.T) {
 		t.Fatalf("expected pending approval in agent input, got %#v", agent.lastInput.Task.PendingApproval)
 	}
 
-	if agent.lastInput.Prompt != "Use a safer option." {
+	if !strings.Contains(agent.lastInput.Prompt, "Use a safer option.") {
 		t.Fatalf("expected note prompt, got %q", agent.lastInput.Prompt)
+	}
+	if !strings.Contains(agent.lastInput.Prompt, stateAuthorityPromptSuffix) {
+		t.Fatalf("expected state-authority guidance, got %q", agent.lastInput.Prompt)
 	}
 }

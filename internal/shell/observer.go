@@ -14,19 +14,22 @@ import (
 	"aiterm/internal/logging"
 	"aiterm/internal/protocol"
 	"aiterm/internal/tmux"
+	xansi "github.com/charmbracelet/x/ansi"
 )
 
 type TrackedExecution struct {
-	CommandID      string
-	Command        string
-	State          MonitorState
-	Cause          CompletionCause
-	Confidence     SignalConfidence
-	SemanticShell  bool
-	SemanticSource string
-	ExitCode       int
-	Captured       string
-	ShellContext   PromptContext
+	CommandID       string
+	Command         string
+	State           MonitorState
+	Cause           CompletionCause
+	Confidence      SignalConfidence
+	SemanticShell   bool
+	SemanticSource  string
+	ExitCode        int
+	Captured        string
+	DisplayCaptured string
+	ShellContext    PromptContext
+	Location        ShellLocation
 }
 
 type paneClient interface {
@@ -73,12 +76,12 @@ const (
 type contextTransitionState string
 
 const (
-	contextTransitionSubmitted             contextTransitionState = "submitted"
-	contextTransitionAwaitingInteractive   contextTransitionState = "awaiting_interactive_input"
-	contextTransitionCandidatePromptSeen   contextTransitionState = "candidate_prompt_seen"
-	contextTransitionProbeVerifying        contextTransitionState = "probe_verifying"
-	contextTransitionSettled               contextTransitionState = "settled"
-	contextTransitionTimedOut              contextTransitionState = "timed_out"
+	contextTransitionSubmitted           contextTransitionState = "submitted"
+	contextTransitionAwaitingInteractive contextTransitionState = "awaiting_interactive_input"
+	contextTransitionCandidatePromptSeen contextTransitionState = "candidate_prompt_seen"
+	contextTransitionProbeVerifying      contextTransitionState = "probe_verifying"
+	contextTransitionSettled             contextTransitionState = "settled"
+	contextTransitionTimedOut            contextTransitionState = "timed_out"
 )
 
 func NewObserver(client *tmux.Client) *Observer {
@@ -116,7 +119,7 @@ func (o *Observer) StartTrackedCommand(ctx context.Context, paneID string, comma
 	if isContextTransitionCommand(command) {
 		monitor := newTrackedCommandMonitor("", command)
 		go func() {
-			result, err := o.runContextTransitionCommand(ctx, paneID, command, timeout)
+			result, err := o.runContextTransitionCommand(ctx, monitor, paneID, command, timeout)
 			state := MonitorStateCompleted
 			if err != nil {
 				state = monitorStateFromError(err)
@@ -134,6 +137,10 @@ func (o *Observer) StartTrackedCommand(ctx context.Context, paneID string, comma
 	if err != nil {
 		return nil, fmt.Errorf("capture pane before tracked command: %w", err)
 	}
+	beforeDisplayCapture, err := o.capturePaneDisplay(ctx, paneID, -trackedCaptureLines)
+	if err != nil {
+		beforeDisplayCapture = beforeCapture
+	}
 
 	markers := protocol.NewMarkers()
 	transportCommand, cleanup, err := o.buildTrackedTransport(ctx, paneID, command, markers)
@@ -147,7 +154,7 @@ func (o *Observer) StartTrackedCommand(ctx context.Context, paneID string, comma
 	}
 
 	monitor := newTrackedCommandMonitor(markers.CommandID, command)
-	go o.runTrackedMonitor(ctx, monitor, paneID, command, transportCommand, timeout, beforeCapture, markers, cleanup)
+	go o.runTrackedMonitor(ctx, monitor, paneID, command, transportCommand, timeout, beforeCapture, beforeDisplayCapture, markers, cleanup)
 	return monitor, nil
 }
 
@@ -164,40 +171,64 @@ func (o *Observer) CaptureRecentOutput(ctx context.Context, paneID string, lines
 	return sanitizeCapturedBody(captured), nil
 }
 
+func (o *Observer) CaptureRecentOutputDisplay(ctx context.Context, paneID string, lines int) (string, error) {
+	if lines <= 0 {
+		lines = 200
+	}
+
+	captured, err := o.capturePaneDisplay(ctx, paneID, -lines)
+	if err != nil {
+		return "", fmt.Errorf("capture recent output for display: %w", err)
+	}
+
+	return sanitizeDisplayBody(captured), nil
+}
+
 func (o *Observer) CaptureShellContext(ctx context.Context, paneID string) (PromptContext, error) {
+	observed, err := o.CaptureObservedShellState(ctx, paneID)
+	if err != nil {
+		return PromptContext{}, err
+	}
+	if observed.HasPromptContext {
+		return observed.PromptContext, nil
+	}
+	return PromptContext{}, nil
+}
+
+func (o *Observer) CaptureObservedShellState(ctx context.Context, paneID string) (ObservedShellState, error) {
 	captured, err := o.capturePane(ctx, paneID, -80)
 	if err != nil {
-		return PromptContext{}, fmt.Errorf("capture shell context: %w", err)
+		return ObservedShellState{}, fmt.Errorf("capture observed shell state: %w", err)
 	}
 
 	paneInfo, paneErr := o.paneInfo(ctx, paneID)
 	hasPaneInfo := paneErr == nil
-
-	context, ok := ParsePromptContextFromCapture(captured)
-	if ok && captureHasCurrentPromptContext(captured, context) {
-		if hasPaneInfo {
-			if semanticState, _, semanticOK := o.captureSemanticShellState(ctx, paneID, paneInfo.TTY, "", strings.TrimSpace(paneInfo.CurrentCommand), context); semanticOK {
-				synthesized := synthesizePromptContext(context, semanticState)
-				if captureHasCurrentPromptContext(captured, synthesized) {
-					context = synthesized
-				}
-			}
-		}
-		o.promptHint = context
-		return context, nil
-	}
-
+	var info *tmux.Pane
 	if hasPaneInfo {
-		if semanticState, _, semanticOK := o.captureSemanticShellState(ctx, paneID, paneInfo.TTY, "", strings.TrimSpace(paneInfo.CurrentCommand), o.promptHint); semanticOK {
-			context = synthesizePromptContext(o.promptHint, semanticState)
-			if captureHasCurrentPromptContext(captured, context) {
-				o.promptHint = context
-				return context, nil
-			}
+		info = &paneInfo
+	}
+
+	observed := o.observeShellState(ctx, paneID, "", captured, info, o.promptHint)
+	if observed.HasPromptContext && captureHasCurrentPromptContext(captured, observed.PromptContext) {
+		o.promptHint = observed.PromptContext
+		return observed, nil
+	}
+
+	if observed.HasSemanticState {
+		context := synthesizePromptContext(o.promptHint, observed.SemanticState)
+		if captureHasCurrentPromptContext(captured, context) {
+			observed.PromptContext = context
+			observed.HasPromptContext = true
+			observed.Location = inferShellLocation(observed.PromptContext, observed.CurrentPaneCommand, observed.RememberedTransition)
+			o.promptHint = context
+			return observed, nil
 		}
 	}
 
-	return PromptContext{}, nil
+	observed.PromptContext = PromptContext{}
+	observed.HasPromptContext = false
+	observed.Location = inferShellLocation(PromptContext{}, observed.CurrentPaneCommand, observed.RememberedTransition)
+	return observed, nil
 }
 
 func (o *Observer) RunTrackedCommand(ctx context.Context, paneID string, command string, timeout time.Duration) (TrackedExecution, error) {
@@ -225,7 +256,7 @@ func (o *Observer) ResolveTrackedPane(ctx context.Context, paneID string) (strin
 	return resolved, nil
 }
 
-func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedCommandMonitor, paneID string, command string, transportCommand string, timeout time.Duration, beforeCapture string, markers protocol.Markers, cleanup func()) {
+func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedCommandMonitor, paneID string, command string, transportCommand string, timeout time.Duration, beforeCapture string, beforeDisplayCapture string, markers protocol.Markers, cleanup func()) {
 	defer cleanup()
 	logging.Trace(
 		"shell.tracked.start",
@@ -253,24 +284,18 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 				"last_capture_preview", logging.Preview(lastCapture, 1000),
 			)
 			monitor.finish(TrackedExecution{
-				CommandID:  markers.CommandID,
-				Command:    command,
-				Cause:      CompletionCauseUnknown,
-				Confidence: ConfidenceLow,
-				Captured:   monitorTail(lastCapture, transportCommand),
+				CommandID:       markers.CommandID,
+				Command:         command,
+				Cause:           CompletionCauseUnknown,
+				Confidence:      ConfidenceLow,
+				Captured:        monitorTail(lastCapture, transportCommand),
+				DisplayCaptured: monitorTail(lastCapture, transportCommand),
 			}, fmt.Errorf("capture pane: %w", err), MonitorStateLost)
 			return
 		}
-		lastCapture = captured
-		tail := monitorTail(captured, transportCommand)
-		monitor.updateTail(tail)
-		var parsedShellContext PromptContext
-		hasParsedShellContext := false
-		if shellContext, ok := ParsePromptContextFromCapture(captured); ok {
-			parsedShellContext = shellContext
-			hasParsedShellContext = true
-			monitor.updateShellContext(shellContext)
-		}
+		rawCaptured := captured
+		captured = sanitizeCapturedBody(captured)
+		lastCapture = rawCaptured
 		if lastPaneInfoCheck.IsZero() || time.Since(lastPaneInfoCheck) >= 200*time.Millisecond {
 			lastPaneInfoCheck = time.Now()
 			if paneInfo, paneErr := o.paneInfo(ctx, paneID); paneErr == nil {
@@ -280,22 +305,20 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 				monitor.updateForegroundCommand(currentPaneCommand)
 			}
 		}
-		semanticBaseContext := monitor.Snapshot().ShellContext
-		if semanticBaseContext.PromptLine() == "" {
-			semanticBaseContext = o.promptHint
+		paneInfo := tmux.Pane{CurrentCommand: currentPaneCommand, TTY: paneTTY, AlternateOn: alternateOn}
+		observed := o.observeShellState(ctx, paneID, command, rawCaptured, &paneInfo, monitor.Snapshot().ShellContext)
+		tail := observed.Tail
+		monitor.updateTail(tail, tail)
+		if observed.HasPromptContext {
+			monitor.updateShellContext(observed.PromptContext)
 		}
-		if hasParsedShellContext {
-			semanticBaseContext = parsedShellContext
-		}
-		semanticState, semanticSource, hasSemanticState := o.captureSemanticShellState(ctx, paneID, paneTTY, command, currentPaneCommand, semanticBaseContext)
-		if hasSemanticState {
-			monitor.updateSemanticMetadata(true, semanticSource)
-			monitor.updateShellContext(synthesizePromptContext(semanticBaseContext, semanticState))
+		if observed.HasSemanticState {
+			monitor.updateSemanticMetadata(true, observed.SemanticSource)
 		} else {
 			monitor.updateSemanticMetadata(false, "")
 		}
 
-		if !started && sawTrackedCommandStart(captured, markers) {
+		if !started && sawTrackedCommandStart(rawCaptured, markers) {
 			started = true
 			monitor.setState(MonitorStateRunning)
 			logging.Trace(
@@ -303,36 +326,36 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 				"pane", paneID,
 				"command", command,
 				"command_id", markers.CommandID,
-				"capture_preview", logging.Preview(captured, 1000),
+				"capture_preview", logging.Preview(rawCaptured, 1000),
 			)
 		}
-		if !started && trackedCommandLikelyStarted(beforeCapture, captured) {
+		if !started && trackedCommandLikelyStarted(beforeCapture, rawCaptured) {
 			started = true
 			logging.Trace(
 				"shell.tracked.started_inferred",
 				"pane", paneID,
 				"command", command,
 				"command_id", markers.CommandID,
-				"delta_preview", logging.Preview(capturePaneDelta(beforeCapture, captured), 1000),
+				"delta_preview", logging.Preview(capturePaneDelta(beforeCapture, rawCaptured), 1000),
 			)
 		}
-		if !started && hasSemanticState && semanticState.Event == semanticEventCommand && !semanticState.UpdatedAt.Before(commandSentAt) {
+		if !started && observed.HasSemanticState && observed.SemanticState.Event == semanticEventCommand && !observed.SemanticState.UpdatedAt.Before(commandSentAt) {
 			started = true
-			monitor.setState(classifyActiveMonitorState(command, tail, alternateOn, currentPaneCommand))
+			monitor.setState(classifyActiveMonitorState(command, observed))
 			logging.Trace(
 				"shell.tracked.started_inferred_by_semantic_state",
 				"pane", paneID,
 				"command", command,
 				"command_id", markers.CommandID,
 				"pane_command", currentPaneCommand,
-				"semantic_event", semanticState.Event,
+				"semantic_event", observed.SemanticState.Event,
 			)
 		}
 		if started {
-			monitor.setState(classifyActiveMonitorState(command, tail, alternateOn, currentPaneCommand))
+			monitor.setState(classifyActiveMonitorState(command, observed))
 		}
 
-		result, complete, err := protocol.ParseCommandResult(captured, markers)
+		result, complete, err := protocol.ParseCommandResult(rawCaptured, markers)
 		cause := CompletionCauseEndMarker
 		confidence := ConfidenceStrong
 		if err != nil {
@@ -342,19 +365,20 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 				"pane", paneID,
 				"command", command,
 				"command_id", markers.CommandID,
-				"capture_preview", logging.Preview(captured, 1000),
+				"capture_preview", logging.Preview(rawCaptured, 1000),
 			)
 			monitor.finish(TrackedExecution{
-				CommandID:  markers.CommandID,
-				Command:    command,
-				Cause:      CompletionCauseUnknown,
-				Confidence: ConfidenceLow,
-				Captured:   tail,
+				CommandID:       markers.CommandID,
+				Command:         command,
+				Cause:           CompletionCauseUnknown,
+				Confidence:      ConfidenceLow,
+				Captured:        tail,
+				DisplayCaptured: tail,
 			}, fmt.Errorf("parse tracked command result: %w", err), MonitorStateLost)
 			return
 		}
 		if !complete {
-			result, complete, err = inferTrackedCommandResultFromEndMarker(captured, beforeCapture, transportCommand, markers)
+			result, complete, err = inferTrackedCommandResultFromEndMarker(rawCaptured, beforeCapture, transportCommand, markers)
 			if complete {
 				cause = CompletionCauseEndMarkerInferred
 				confidence = ConfidenceMedium
@@ -366,14 +390,15 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 					"pane", paneID,
 					"command", command,
 					"command_id", markers.CommandID,
-					"capture_preview", logging.Preview(captured, 1000),
+					"capture_preview", logging.Preview(rawCaptured, 1000),
 				)
 				monitor.finish(TrackedExecution{
-					CommandID:  markers.CommandID,
-					Command:    command,
-					Cause:      CompletionCauseUnknown,
-					Confidence: ConfidenceLow,
-					Captured:   tail,
+					CommandID:       markers.CommandID,
+					Command:         command,
+					Cause:           CompletionCauseUnknown,
+					Confidence:      ConfidenceLow,
+					Captured:        tail,
+					DisplayCaptured: tail,
 				}, fmt.Errorf("parse tracked command result from end marker: %w", err), MonitorStateLost)
 				return
 			}
@@ -382,7 +407,11 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 		if complete {
 			cleanBody := sanitizeCapturedBody(result.Body)
 			cleanBody = stripEchoedCommand(cleanBody, transportCommand)
-			shellContext, _ := ParsePromptContextFromCapture(captured)
+			shellContext, _ := ParsePromptContextFromCapture(rawCaptured)
+			displayBody := o.captureCommandDisplayDelta(ctx, paneID, beforeDisplayCapture, transportCommand, shellContext)
+			if displayBody == "" {
+				displayBody = cleanBody
+			}
 			logging.Trace(
 				"shell.tracked.complete",
 				"pane", paneID,
@@ -394,73 +423,68 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 				"prompt", shellContext.PromptLine(),
 			)
 			monitor.finish(TrackedExecution{
-				CommandID:    result.CommandID,
-				Command:      command,
-				Cause:        cause,
-				Confidence:   confidence,
-				ExitCode:     result.ExitCode,
-				Captured:     cleanBody,
-				ShellContext: shellContext,
+				CommandID:       result.CommandID,
+				Command:         command,
+				Cause:           cause,
+				Confidence:      confidence,
+				ExitCode:        result.ExitCode,
+				Captured:        cleanBody,
+				DisplayCaptured: displayBody,
+				ShellContext:    shellContext,
 			}, nil, MonitorStateCompleted)
 			return
 		}
 
-		if started && hasSemanticState && semanticState.Event == semanticEventPrompt && !semanticState.UpdatedAt.Before(commandSentAt) {
-			promptContext := monitor.Snapshot().ShellContext
-			if promptContext.PromptLine() == "" {
-				promptContext = synthesizePromptContext(o.promptHint, semanticState)
-			}
-			cleanBody := sanitizeCapturedBody(capturePaneDelta(beforeCapture, captured))
-			cleanBody = stripEchoedCommand(cleanBody, transportCommand)
-			if promptContext.PromptLine() != "" {
-				cleanBody = stripTrailingPromptLine(cleanBody, promptContext)
-			}
-			exitCode := 0
-			if semanticState.ExitCode != nil {
-				exitCode = *semanticState.ExitCode
-			}
-			state := MonitorStateCompleted
-			switch exitCode {
-			case InterruptedExitCode:
-				state = MonitorStateCanceled
-			case 0:
-				state = MonitorStateCompleted
-			default:
-				state = MonitorStateFailed
+		if started && observed.HasSemanticState && observed.SemanticState.Event == semanticEventPrompt && !observed.SemanticState.UpdatedAt.Before(commandSentAt) {
+			evaluation, complete := evaluateSemanticPromptReturn(promptReturnInputs{
+				CommandID:  markers.CommandID,
+				Command:    command,
+				Observed:   observed,
+				Snapshot:   monitor.Snapshot(),
+				PromptHint: o.promptHint,
+				RawBody:    capturePaneDelta(beforeCapture, rawCaptured),
+				BodyCleaner: func(body string, promptContext PromptContext) string {
+					return stripTrailingPromptLine(stripEchoedCommand(sanitizeCapturedBody(body), transportCommand), promptContext)
+				},
+				SemanticSource: observed.SemanticSource,
+			})
+			if !complete {
+				continue
 			}
 			logging.Trace(
 				"shell.tracked.semantic_prompt_returned",
 				"pane", paneID,
 				"command", command,
 				"command_id", markers.CommandID,
-				"exit_code", exitCode,
-				"state", state,
-				"prompt", promptContext.PromptLine(),
-				"capture_preview", logging.Preview(cleanBody, 1200),
+				"exit_code", evaluation.Result.ExitCode,
+				"state", evaluation.State,
+				"prompt", evaluation.Result.ShellContext.PromptLine(),
+				"capture_preview", logging.Preview(evaluation.Result.Captured, 1200),
 			)
-			monitor.finish(TrackedExecution{
-				CommandID:      markers.CommandID,
-				Command:        command,
-				Cause:          CompletionCausePromptReturn,
-				Confidence:     ConfidenceStrong,
-				SemanticShell:  true,
-				SemanticSource: semanticSource,
-				ExitCode:       exitCode,
-				Captured:       cleanBody,
-				ShellContext:   promptContext,
-			}, nil, state)
+			monitor.finish(evaluation.Result, nil, evaluation.State)
 			return
 		}
 
-		if started && allowPromptReturnInference(command, alternateOn, currentPaneCommand) {
-			promptContext := monitor.Snapshot().ShellContext
-			if TailSuggestsPromptReturn(captured, promptContext) {
-				cleanBody := sanitizeCapturedBody(capturePaneDelta(beforeCapture, captured))
-				cleanBody = stripEchoedCommand(cleanBody, transportCommand)
-				if promptContext.PromptLine() != "" {
-					cleanBody = stripTrailingPromptLine(cleanBody, promptContext)
-				}
-				if cleanBody == "" && promptContext.LastExitCode == nil && semanticState.ExitCode == nil {
+		if started && allowPromptReturnInference(command, observed) {
+			promptContext := promptReturnContext(promptReturnInputs{
+				Observed:   observed,
+				Snapshot:   monitor.Snapshot(),
+				PromptHint: o.promptHint,
+			})
+			if TailSuggestsPromptReturn(rawCaptured, promptContext) {
+				evaluation, complete := evaluatePromptReturnInference(promptReturnInputs{
+					CommandID:  markers.CommandID,
+					Command:    command,
+					Observed:   observed,
+					Snapshot:   monitor.Snapshot(),
+					PromptHint: o.promptHint,
+					RawBody:    capturePaneDelta(beforeCapture, rawCaptured),
+					BodyCleaner: func(body string, promptContext PromptContext) string {
+						return stripTrailingPromptLine(stripEchoedCommand(sanitizeCapturedBody(body), transportCommand), promptContext)
+					},
+					SemanticSource: observed.SemanticSource,
+				})
+				if !complete {
 					select {
 					case <-ctx.Done():
 						logging.TraceError(
@@ -478,42 +502,26 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 					}
 					continue
 				}
-				exitCode, state, confidence, inferred := inferPromptReturnResult(promptContext, cleanBody, semanticState.ExitCode)
-				semanticShell := !inferred && (promptContext.LastExitCode != nil || semanticState.ExitCode != nil)
-				semanticSourceValue := ""
-				if semanticShell {
-					semanticSourceValue = semanticSource
-				}
 				logging.Trace(
 					"shell.tracked.prompt_returned",
 					"pane", paneID,
 					"command", command,
 					"command_id", markers.CommandID,
-					"captured_preview", logging.Preview(cleanBody, 1200),
-					"prompt", promptContext.PromptLine(),
+					"captured_preview", logging.Preview(evaluation.Result.Captured, 1200),
+					"prompt", evaluation.Result.ShellContext.PromptLine(),
 					"pane_command", currentPaneCommand,
-					"confidence", confidence,
-					"exit_code", exitCode,
-					"state", state,
-					"inferred_exit", inferred,
+					"confidence", evaluation.Result.Confidence,
+					"exit_code", evaluation.Result.ExitCode,
+					"state", evaluation.State,
+					"inferred_exit", !evaluation.Result.SemanticShell && evaluation.Result.Confidence != ConfidenceStrong,
 				)
-				monitor.finish(TrackedExecution{
-					CommandID:      markers.CommandID,
-					Command:        command,
-					Cause:          CompletionCausePromptReturn,
-					Confidence:     confidence,
-					SemanticShell:  semanticShell,
-					SemanticSource: semanticSourceValue,
-					ExitCode:       exitCode,
-					Captured:       cleanBody,
-					ShellContext:   promptContext,
-				}, nil, state)
+				monitor.finish(evaluation.Result, nil, evaluation.State)
 				return
 			}
 		}
 
 		if !started && time.Now().After(startDeadline) {
-			inferredState := classifyActiveMonitorState(command, tail, alternateOn, currentPaneCommand)
+			inferredState := classifyActiveMonitorState(command, observed)
 			if inferredState == MonitorStateAwaitingInput || inferredState == MonitorStateInteractiveFullscreen {
 				started = true
 				monitor.setState(inferredState)
@@ -564,17 +572,17 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 	}
 }
 
-func classifyActiveMonitorState(command string, tail string, alternateOn bool, currentPaneCommand string) MonitorState {
-	if alternateOn {
+func classifyActiveMonitorState(command string, observed ObservedShellState) MonitorState {
+	if observed.AlternateOn {
 		return MonitorStateInteractiveFullscreen
 	}
-	if foregroundCommandSuggestsFullscreen(currentPaneCommand) {
+	if foregroundCommandSuggestsFullscreen(observed.CurrentPaneCommand) {
 		return MonitorStateInteractiveFullscreen
 	}
-	if TailSuggestsAwaitingInput(tail) {
+	if TailSuggestsAwaitingInput(observed.Tail) {
 		return MonitorStateAwaitingInput
 	}
-	if foregroundCommandSuggestsAwaitingInput(currentPaneCommand) {
+	if foregroundCommandSuggestsAwaitingInput(observed.CurrentPaneCommand) {
 		return MonitorStateAwaitingInput
 	}
 	if IsInteractiveCommand(command) {
@@ -583,9 +591,16 @@ func classifyActiveMonitorState(command string, tail string, alternateOn bool, c
 	return MonitorStateRunning
 }
 
-func allowPromptReturnInference(command string, alternateOn bool, currentPaneCommand string) bool {
-	transition := detectShellTransition(command, currentPaneCommand, PromptContext{}, shellTransitionNone)
-	return !alternateOn && !IsInteractiveCommand(command) && (transition.Kind == shellTransitionNone || transition.Kind == shellTransitionRemote) && paneCommandAllowsPromptInference(currentPaneCommand)
+func allowPromptReturnInference(command string, observed ObservedShellState) bool {
+	if observed.AlternateOn || IsInteractiveCommand(command) {
+		return false
+	}
+	switch observed.Location.Kind {
+	case ShellLocationUnknown, ShellLocationLocal, ShellLocationRemote:
+	default:
+		return false
+	}
+	return paneCommandAllowsPromptInference(observed.CurrentPaneCommand)
 }
 
 func monitorStateFromError(err error) MonitorState {
@@ -734,7 +749,24 @@ func IsInteractiveCommand(command string) bool {
 	}
 }
 
-func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID string, command string, timeout time.Duration) (TrackedExecution, error) {
+func publishContextTransitionObservation(monitor *trackedCommandMonitor, observation transitionObservation, decision transitionTrackerDecision) {
+	if monitor == nil {
+		return
+	}
+	if strings.TrimSpace(observation.Delta) != "" {
+		monitor.updateTail(observation.Delta, observation.Delta)
+	}
+	if observation.HasPrompt && observation.Candidate.PromptLine() != "" {
+		monitor.updateShellContext(observation.Candidate)
+	}
+	if decision.AwaitingInput {
+		monitor.setState(MonitorStateAwaitingInput)
+		return
+	}
+	monitor.setState(MonitorStateRunning)
+}
+
+func (o *Observer) runContextTransitionCommand(ctx context.Context, monitor *trackedCommandMonitor, paneID string, command string, timeout time.Duration) (TrackedExecution, error) {
 	logging.Trace(
 		"shell.context_transition.start",
 		"pane", paneID,
@@ -757,11 +789,12 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID strin
 		logging.TraceError("shell.context_transition.send_error", err, "pane", paneID, "command", command)
 		return TrackedExecution{}, fmt.Errorf("send context transition command: %w", err)
 	}
+	if monitor != nil {
+		monitor.setState(MonitorStateRunning)
+	}
 
 	deadline := time.Now().Add(effectiveTimeout)
-	transitionState := contextTransitionSubmitted
-	candidateSeen := false
-	candidatePrompt := PromptContext{}
+	tracker := newContextTransitionTracker(command, beforeCapture, baselineContext)
 	promptCapture := beforeCapture
 	promptContext := baselineContext
 	for {
@@ -771,64 +804,66 @@ func (o *Observer) runContextTransitionCommand(ctx context.Context, paneID strin
 			return TrackedExecution{}, fmt.Errorf("capture pane after context transition: %w", err)
 		}
 
-		candidate, ok := ParsePromptContextFromCapture(captured)
-		delta := capturePaneDelta(beforeCapture, captured)
-		delta = sanitizeCapturedBody(delta)
-		delta = stripEchoedCommand(delta, command)
-		delta = stripTrailingPromptLine(delta, candidate)
-		delta = strings.TrimSpace(delta)
-
-		if TailSuggestsAwaitingInput(delta) {
-			transitionState = contextTransitionAwaitingInteractive
-			candidateSeen = false
-		} else if ok && promptReturnedAfterTransition(beforeCapture, baselineContext, candidate, captured, delta) {
-			transitionState = contextTransitionCandidatePromptSeen
-			if !candidateSeen || !promptContextsEquivalent(candidatePrompt, candidate) {
-				candidateSeen = true
-				candidatePrompt = candidate
-			} else {
-				verifyCapture, verifyErr := o.capturePane(ctx, paneID, -200)
-				if verifyErr != nil {
-					logging.TraceError("shell.context_transition.capture_verify_error", verifyErr, "pane", paneID, "command", command)
-					return TrackedExecution{}, fmt.Errorf("capture pane while verifying context transition: %w", verifyErr)
-				}
-				verifyCandidate, verifyOK := ParsePromptContextFromCapture(verifyCapture)
-				verifyDelta := sanitizeCapturedBody(capturePaneDelta(beforeCapture, verifyCapture))
-				verifyDelta = stripEchoedCommand(verifyDelta, command)
-				verifyDelta = stripTrailingPromptLine(verifyDelta, verifyCandidate)
-				verifyDelta = strings.TrimSpace(verifyDelta)
-
-				switch {
-				case TailSuggestsAwaitingInput(verifyDelta):
-					transitionState = contextTransitionAwaitingInteractive
-					candidateSeen = false
-				case verifyOK && promptContextsEquivalent(candidatePrompt, verifyCandidate):
-					promptCapture = verifyCapture
-					promptContext = verifyCandidate
-					transitionState = contextTransitionProbeVerifying
-					logging.Trace(
-						"shell.context_transition.prompt_returned",
-						"pane", paneID,
-						"command", command,
-						"prompt", promptContext.PromptLine(),
-						"capture_preview", logging.Preview(verifyCapture, 1200),
-					)
-					goto probe
-				case verifyOK && promptReturnedAfterTransition(beforeCapture, baselineContext, verifyCandidate, verifyCapture, verifyDelta):
-					candidatePrompt = verifyCandidate
-				default:
-					candidateSeen = false
-				}
+		observation := newTransitionObservation(beforeCapture, captured, command)
+		decision := tracker.Observe(observation)
+		publishContextTransitionObservation(monitor, observation, decision)
+		if decision.Settled {
+			promptCapture = decision.PromptCapture
+			promptContext = decision.PromptContext
+			logging.Trace(
+				"shell.context_transition.prompt_returned",
+				"pane", paneID,
+				"command", command,
+				"prompt", promptContext.PromptLine(),
+				"capture_preview", logging.Preview(promptCapture, 1200),
+			)
+			goto probe
+		}
+		if paneInfo, paneErr := o.paneInfo(ctx, paneID); paneErr == nil {
+			if shouldFallbackSettleExitTransition(command, paneID, paneInfo, observation) {
+				promptCapture = captured
+				promptContext = observation.Candidate
+				logging.Trace(
+					"shell.context_transition.fallback_settled",
+					"pane", paneID,
+					"resolved_pane", strings.TrimSpace(paneInfo.ID),
+					"command", command,
+					"pane_command", strings.TrimSpace(paneInfo.CurrentCommand),
+					"delta_preview", logging.Preview(observation.Delta, 1200),
+				)
+				goto probe
+			}
+		}
+		if decision.NeedsVerify {
+			verifyCapture, verifyErr := o.capturePane(ctx, paneID, -200)
+			if verifyErr != nil {
+				logging.TraceError("shell.context_transition.capture_verify_error", verifyErr, "pane", paneID, "command", command)
+				return TrackedExecution{}, fmt.Errorf("capture pane while verifying context transition: %w", verifyErr)
+			}
+			verifyObservation := newTransitionObservation(beforeCapture, verifyCapture, command)
+			verifyDecision := tracker.ObserveVerification(verifyObservation)
+			publishContextTransitionObservation(monitor, verifyObservation, verifyDecision)
+			if verifyDecision.Settled {
+				promptCapture = verifyDecision.PromptCapture
+				promptContext = verifyDecision.PromptContext
+				logging.Trace(
+					"shell.context_transition.prompt_returned",
+					"pane", paneID,
+					"command", command,
+					"prompt", promptContext.PromptLine(),
+					"capture_preview", logging.Preview(promptCapture, 1200),
+				)
+				goto probe
 			}
 		}
 
 		if time.Now().After(deadline) {
-			transitionState = contextTransitionTimedOut
+			tracker.state = contextTransitionTimedOut
 			logging.Trace(
 				"shell.context_transition.timeout",
 				"pane", paneID,
 				"command", command,
-				"state", transitionState,
+				"state", tracker.state,
 				"capture_preview", logging.Preview(captured, 1200),
 			)
 			return TrackedExecution{}, fmt.Errorf("timed out waiting for context transition command to settle")
@@ -861,6 +896,7 @@ probe:
 
 	exitCode := 0
 	commandID := ""
+	location := inferShellLocation(promptContext, "", o.rememberedTransition(paneID))
 	if err == nil {
 		commandID = probeResult.CommandID
 		probeOutput, parsedContext, parsedExitCode := parseShellContextProbeOutput(probeResult.Captured, promptContext)
@@ -879,8 +915,10 @@ probe:
 		if probeOutput != "" {
 			delta = strings.TrimSpace(delta + "\n" + probeOutput)
 		}
+		location = MarkShellLocationDirectoryAuthoritative(location, promptContext.Directory)
 	} else {
 		logging.TraceError("shell.context_transition.probe_error", err, "pane", paneID, "command", command)
+		location = MarkShellLocationDirectoryApproximate(location)
 	}
 
 	currentPaneCommand := ""
@@ -908,6 +946,7 @@ probe:
 		ExitCode:     exitCode,
 		Captured:     delta,
 		ShellContext: promptContext,
+		Location:     location,
 	}, nil
 }
 
@@ -1039,6 +1078,46 @@ func sanitizeCapturedBody(body string) string {
 	return strings.TrimSpace(strings.Join(stripShuttlePlumbingLines(filtered), "\n"))
 }
 
+func sanitizeDisplayBody(body string) string {
+	if strings.TrimSpace(xansi.Strip(body)) == "" {
+		return ""
+	}
+
+	rawLines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
+	filtered := make([]string, 0, len(rawLines))
+	droppingContinuation := false
+
+	for _, rawLine := range rawLines {
+		plainLine := xansi.Strip(rawLine)
+		trimmed := strings.TrimSpace(plainLine)
+		if trimmed == "" {
+			continue
+		}
+		if strings.Contains(trimmed, "__SHUTTLE_E__:") || strings.Contains(trimmed, "__SHUTTLE_B__:") || wrappedSentinelSuffixPattern.MatchString(trimmed) {
+			continue
+		}
+		if isShuttlePlumbingLine(trimmed) {
+			if len(filtered) > 0 {
+				lastPlain := strings.TrimSpace(xansi.Strip(filtered[len(filtered)-1]))
+				if lastPlain == "." || lineLooksLikeSourcedDotPrompt(lastPlain) {
+					filtered = filtered[:len(filtered)-1]
+				}
+			}
+			droppingContinuation = true
+			continue
+		}
+		if droppingContinuation {
+			if isShuttleContinuationLine(trimmed) {
+				continue
+			}
+			droppingContinuation = false
+		}
+		filtered = append(filtered, rawLine)
+	}
+
+	return strings.TrimSpace(strings.Join(filtered, "\n"))
+}
+
 func (o *Observer) captureSemanticShellState(ctx context.Context, paneID string, paneTTY string, submittedCommand string, currentPaneCommand string, promptContext PromptContext) (semanticShellState, string, bool) {
 	if shouldIgnoreLocalSemanticState(submittedCommand, currentPaneCommand, promptContext, o.rememberedTransition(paneID)) {
 		return semanticShellState{}, semanticSourceNone, false
@@ -1091,7 +1170,33 @@ type pipePaneClient interface {
 	PipePaneOutput(ctx context.Context, target string, shellCommand string) error
 }
 
+type paneCapture struct {
+	display string
+	raw     string
+	clean   string
+}
+
 func (o *Observer) capturePane(ctx context.Context, paneID string, startLine int) (string, error) {
+	return o.capturePanePlain(ctx, paneID, startLine)
+}
+
+func (o *Observer) capturePaneOutput(ctx context.Context, paneID string, startLine int) (paneCapture, error) {
+	plainCaptured, err := o.capturePanePlain(ctx, paneID, startLine)
+	if err != nil {
+		return paneCapture{}, err
+	}
+	displayCaptured, err := o.capturePaneDisplay(ctx, paneID, startLine)
+	if err != nil {
+		displayCaptured = plainCaptured
+	}
+	return paneCapture{
+		display: sanitizeDisplayBody(displayCaptured),
+		raw:     plainCaptured,
+		clean:   sanitizeCapturedBody(plainCaptured),
+	}, nil
+}
+
+func (o *Observer) capturePanePlain(ctx context.Context, paneID string, startLine int) (string, error) {
 	target, err := o.resolvePaneID(ctx, paneID)
 	if err != nil {
 		return "", err
@@ -1103,6 +1208,29 @@ func (o *Observer) capturePane(ctx context.Context, paneID string, startLine int
 	target, err = o.recoverActionTarget(ctx, paneID, err)
 	if err != nil {
 		return "", err
+	}
+	return o.client.CapturePane(ctx, target, startLine)
+}
+
+func (o *Observer) capturePaneDisplay(ctx context.Context, paneID string, startLine int) (string, error) {
+	target, err := o.resolvePaneID(ctx, paneID)
+	if err != nil {
+		return "", err
+	}
+	captured, err := o.capturePaneDisplayFromClient(ctx, target, startLine)
+	if err == nil || (!isPaneNotFoundError(err) && !shouldRecoverObserverSession(err)) {
+		return captured, err
+	}
+	target, err = o.recoverActionTarget(ctx, paneID, err)
+	if err != nil {
+		return "", err
+	}
+	return o.capturePaneDisplayFromClient(ctx, target, startLine)
+}
+
+func (o *Observer) capturePaneDisplayFromClient(ctx context.Context, target string, startLine int) (string, error) {
+	if escapedClient, ok := o.client.(escapedPaneClient); ok {
+		return escapedClient.CapturePaneEscaped(ctx, target, startLine)
 	}
 	return o.client.CapturePane(ctx, target, startLine)
 }
@@ -1553,6 +1681,38 @@ func promptReturnedAfterTransition(beforeCapture string, baseline PromptContext,
 	return strings.TrimSpace(captured) != strings.TrimSpace(beforeCapture)
 }
 
+func shouldFallbackSettleExitTransition(command string, requestedPaneID string, livePane tmux.Pane, observation transitionObservation) bool {
+	fields := transitionCommandFields(command)
+	if len(fields) == 0 {
+		return false
+	}
+	switch fields[0] {
+	case "exit", "logout":
+	default:
+		return false
+	}
+	if !paneCommandIsShell(strings.TrimSpace(livePane.CurrentCommand)) {
+		return false
+	}
+	livePaneID := strings.TrimSpace(livePane.ID)
+	requestedPaneID = strings.TrimSpace(requestedPaneID)
+	if requestedPaneID != "" && livePaneID != "" && requestedPaneID != livePaneID {
+		return true
+	}
+	return transitionTailSuggestsDisconnect(observation.Delta)
+}
+
+func transitionTailSuggestsDisconnect(delta string) bool {
+	lower := strings.ToLower(strings.TrimSpace(delta))
+	if lower == "" {
+		return false
+	}
+	if strings.Contains(lower, "connection to ") && strings.Contains(lower, " closed") {
+		return true
+	}
+	return strings.Contains(lower, "logout")
+}
+
 func promptContextsMateriallyDiffer(left PromptContext, right PromptContext) bool {
 	return strings.TrimSpace(left.User) != strings.TrimSpace(right.User) ||
 		strings.TrimSpace(left.Host) != strings.TrimSpace(right.Host) ||
@@ -1585,7 +1745,8 @@ func stripTrailingPromptLine(body string, promptContext PromptContext) string {
 	}
 
 	lines := strings.Split(body, "\n")
-	if strings.TrimSpace(lines[len(lines)-1]) == promptLine {
+	lastLine := strings.TrimSpace(lines[len(lines)-1])
+	if lastLine == promptLine || strings.TrimSpace(xansi.Strip(lastLine)) == promptLine {
 		lines = lines[:len(lines)-1]
 	}
 
@@ -1594,6 +1755,18 @@ func stripTrailingPromptLine(body string, promptContext PromptContext) string {
 
 func TrimTrailingPromptLine(body string, promptContext PromptContext) string {
 	return stripTrailingPromptLine(body, promptContext)
+}
+
+func (o *Observer) captureCommandDisplayDelta(ctx context.Context, paneID string, beforeDisplay string, command string, promptContext PromptContext) string {
+	captured, err := o.capturePaneDisplay(ctx, paneID, -trackedCaptureLines)
+	if err != nil {
+		return ""
+	}
+
+	body := sanitizeDisplayBody(capturePaneDelta(beforeDisplay, captured))
+	body = stripEchoedCommand(body, command)
+	body = stripTrailingPromptLine(body, promptContext)
+	return strings.TrimSpace(body)
 }
 
 func parseShellContextProbeOutput(body string, baseline PromptContext) (string, PromptContext, int) {

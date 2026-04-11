@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	remoteCapabilitiesFileName = "remote_capabilities.json"
-	remoteCapabilityFreshness  = 24 * time.Hour
+	remoteCapabilitiesFileName  = "remote_capabilities.json"
+	remoteCapabilityFreshness   = 24 * time.Hour
 	remoteCapabilityNegativeTTL = 10 * time.Minute
 )
 
@@ -51,19 +51,20 @@ func newRemoteCapabilityStore(stateDir string) *remoteCapabilityStore {
 	}
 }
 
-func (s *remoteCapabilityStore) summaryForPrompt(prompt *shell.PromptContext) *RemoteCapabilitySummary {
+func (s *remoteCapabilityStore) summaryForShell(location *shell.ShellLocation, prompt *shell.PromptContext) *RemoteCapabilitySummary {
 	if s == nil {
 		return nil
 	}
-	record, ok := s.recordForPrompt(prompt)
+	record, ok := s.recordForShell(location, prompt)
 	if !ok {
 		return nil
 	}
 	return record.summary("cached")
 }
 
-func (s *remoteCapabilityStore) recordForPrompt(prompt *shell.PromptContext) (remoteCapabilityRecord, bool) {
-	if s == nil || prompt == nil || !prompt.Remote {
+func (s *remoteCapabilityStore) recordForShell(location *shell.ShellLocation, prompt *shell.PromptContext) (remoteCapabilityRecord, bool) {
+	key := remoteCapabilityKeyForShell(location, prompt)
+	if s == nil || key == "" {
 		return remoteCapabilityRecord{}, false
 	}
 	s.mu.Lock()
@@ -71,7 +72,6 @@ func (s *remoteCapabilityStore) recordForPrompt(prompt *shell.PromptContext) (re
 	if !s.loaded {
 		s.loadLocked()
 	}
-	key := remoteCapabilityKey(prompt.User, prompt.Host)
 	record, ok := s.entries[key]
 	if !ok || record.stale() {
 		return remoteCapabilityRecord{}, false
@@ -95,8 +95,9 @@ func (s *remoteCapabilityStore) saveRecord(record remoteCapabilityRecord) {
 	s.saveLocked()
 }
 
-func (s *remoteCapabilityStore) invalidatePrompt(prompt *shell.PromptContext) {
-	if s == nil || prompt == nil || !prompt.Remote {
+func (s *remoteCapabilityStore) invalidateShell(location *shell.ShellLocation, prompt *shell.PromptContext) {
+	key := remoteCapabilityKeyForShell(location, prompt)
+	if s == nil || key == "" {
 		return
 	}
 	s.mu.Lock()
@@ -104,13 +105,13 @@ func (s *remoteCapabilityStore) invalidatePrompt(prompt *shell.PromptContext) {
 	if !s.loaded {
 		s.loadLocked()
 	}
-	key := remoteCapabilityKey(prompt.User, prompt.Host)
 	delete(s.entries, key)
 	s.saveLocked()
 }
 
-func (s *remoteCapabilityStore) markTransport(prompt *shell.PromptContext, transport PatchTransport) {
-	if s == nil || prompt == nil || !prompt.Remote || transport == PatchTransportNone {
+func (s *remoteCapabilityStore) markTransport(location *shell.ShellLocation, prompt *shell.PromptContext, transport PatchTransport) {
+	key := remoteCapabilityKeyForShell(location, prompt)
+	if s == nil || key == "" || transport == PatchTransportNone {
 		return
 	}
 	s.mu.Lock()
@@ -118,7 +119,6 @@ func (s *remoteCapabilityStore) markTransport(prompt *shell.PromptContext, trans
 	if !s.loaded {
 		s.loadLocked()
 	}
-	key := remoteCapabilityKey(prompt.User, prompt.Host)
 	record, ok := s.entries[key]
 	if !ok {
 		return
@@ -185,6 +185,18 @@ func remoteCapabilityKey(user string, host string) string {
 	return user + "@" + host
 }
 
+func remoteCapabilityKeyForShell(location *shell.ShellLocation, prompt *shell.PromptContext) string {
+	effective := effectiveShellLocation(location, prompt)
+	if effective.Kind != shell.ShellLocationRemote {
+		return ""
+	}
+	user := ""
+	host := ""
+	user = effective.User
+	host = effective.Host
+	return remoteCapabilityKey(user, host)
+}
+
 func (r remoteCapabilityRecord) stale() bool {
 	if r.LastValidated.IsZero() {
 		return true
@@ -216,12 +228,12 @@ func (r remoteCapabilityRecord) summary(source string) *RemoteCapabilitySummary 
 }
 
 func (c *LocalController) refreshRemoteCapabilityHintLocked() {
-	if c.session.CurrentShell == nil || !c.session.CurrentShell.Remote {
+	if !isRemoteShellLocation(c.session.CurrentShellLocation, c.session.CurrentShell) {
 		c.session.RemoteCapabilities = nil
 		return
 	}
 	if c.remoteCaps == nil {
 		return
 	}
-	c.session.RemoteCapabilities = c.remoteCaps.summaryForPrompt(c.session.CurrentShell)
+	c.session.RemoteCapabilities = c.remoteCaps.summaryForShell(c.session.CurrentShellLocation, c.session.CurrentShell)
 }

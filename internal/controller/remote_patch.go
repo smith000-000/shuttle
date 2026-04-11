@@ -47,9 +47,9 @@ type remoteReadPayload struct {
 }
 
 const (
-	remoteReadMarker     = "__SHUTTLE_REMOTE_READ__"
-	remoteReadDataBegin  = "__SHUTTLE_REMOTE_DATA_BEGIN__"
-	remoteReadDataEnd    = "__SHUTTLE_REMOTE_DATA_END__"
+	remoteReadMarker    = "__SHUTTLE_REMOTE_READ__"
+	remoteReadDataBegin = "__SHUTTLE_REMOTE_DATA_BEGIN__"
+	remoteReadDataEnd   = "__SHUTTLE_REMOTE_DATA_END__"
 )
 
 func (c *LocalController) applyRemotePatch(ctx context.Context, patch string) ([]TranscriptEvent, error) {
@@ -59,13 +59,14 @@ func (c *LocalController) applyRemotePatch(ctx context.Context, patch string) ([
 	c.mu.Lock()
 	runner := c.runner
 	currentShell := c.session.CurrentShell
+	currentLocation := c.session.CurrentShellLocation
 	c.mu.Unlock()
 
 	targetLabel := strings.TrimSpace(remotePatchTargetLabel(currentShell, trackedShell))
 	if runner == nil {
 		return c.recordPatchApplyFailure("", PatchTargetRemoteShell, targetLabel, "remote patch runner is not configured")
 	}
-	if currentShell == nil || !currentShell.Remote {
+	if !isRemoteShellLocation(currentLocation, currentShell) {
 		return c.recordPatchApplyFailure("", PatchTargetRemoteShell, targetLabel, "remote patch target is ambiguous or not currently active")
 	}
 
@@ -133,7 +134,7 @@ func (c *LocalController) applyRemotePatch(ctx context.Context, patch string) ([
 	c.task.PatchRepairCount = 0
 	c.task.LastPatchApplyResult = &summary
 	if c.remoteCaps != nil {
-		c.remoteCaps.markTransport(currentShell, transport)
+		c.remoteCaps.markTransport(c.session.CurrentShellLocation, currentShell, transport)
 		c.refreshRemoteCapabilityHintLocked()
 	}
 	event := c.newEvent(EventPatchApplyResult, summary)
@@ -298,8 +299,11 @@ func remotePatchPaths(changes []patchapply.FileChange) []string {
 }
 
 func (c *LocalController) loadRemotePatchCapabilities(ctx context.Context, runner ShellRunner, trackedShell TrackedShellTarget, currentShell *shell.PromptContext) (remotePatchCapabilities, string, error) {
+	c.mu.Lock()
+	currentLocation := c.session.CurrentShellLocation
+	c.mu.Unlock()
 	if c.remoteCaps != nil {
-		if record, ok := c.remoteCaps.recordForPrompt(currentShell); ok {
+		if record, ok := c.remoteCaps.recordForShell(currentLocation, currentShell); ok {
 			return capabilitiesFromRecord(record), "cached", validateRemotePatchCapabilities(capabilitiesFromRecord(record))
 		}
 	}
@@ -307,20 +311,33 @@ func (c *LocalController) loadRemotePatchCapabilities(ctx context.Context, runne
 	if err != nil {
 		return remotePatchCapabilities{}, "", err
 	}
-	if c.remoteCaps != nil && currentShell != nil && currentShell.Remote {
-		c.storeRemotePatchCapabilities(currentShell, caps)
+	if c.remoteCaps != nil && isRemoteShellLocation(currentLocation, currentShell) {
+		c.storeRemotePatchCapabilities(currentLocation, currentShell, caps)
 	}
 	return caps, "probed", validateRemotePatchCapabilities(caps)
 }
 
-func (c *LocalController) storeRemotePatchCapabilities(currentShell *shell.PromptContext, caps remotePatchCapabilities) {
-	if c.remoteCaps == nil || currentShell == nil || !currentShell.Remote {
+func (c *LocalController) storeRemotePatchCapabilities(currentLocation *shell.ShellLocation, currentShell *shell.PromptContext, caps remotePatchCapabilities) {
+	key := remoteCapabilityKeyForShell(currentLocation, currentShell)
+	if c.remoteCaps == nil || key == "" {
 		return
 	}
+	user := ""
+	host := ""
+	if currentLocation != nil {
+		user = strings.TrimSpace(currentLocation.User)
+		host = strings.TrimSpace(currentLocation.Host)
+	}
+	if user == "" && currentShell != nil {
+		user = strings.TrimSpace(currentShell.User)
+	}
+	if host == "" && currentShell != nil {
+		host = strings.TrimSpace(currentShell.Host)
+	}
 	c.remoteCaps.saveRecord(remoteCapabilityRecord{
-		Key:                remoteCapabilityKey(currentShell.User, currentShell.Host),
-		User:               strings.TrimSpace(currentShell.User),
-		Host:               strings.TrimSpace(currentShell.Host),
+		Key:                key,
+		User:               user,
+		Host:               host,
 		TargetKind:         "remote_shell",
 		System:             caps.System,
 		OSRelease:          caps.OSRelease,
@@ -366,7 +383,10 @@ func (c *LocalController) resolveRemotePatchCapabilities(ctx context.Context, ru
 		if probeErr == nil {
 			caps = probed
 			source = "reprobed"
-			c.storeRemotePatchCapabilities(currentShell, caps)
+			c.mu.Lock()
+			currentLocation := c.session.CurrentShellLocation
+			c.mu.Unlock()
+			c.storeRemotePatchCapabilities(currentLocation, currentShell, caps)
 		}
 	}
 	return caps, source, validateRemotePatchCapabilities(caps)
@@ -420,7 +440,10 @@ func (c *LocalController) selectRemotePatchTransport(ctx context.Context, runner
 				if reprobed, probeErr := probeRemotePatchCapabilities(ctx, runner, trackedShell); probeErr == nil {
 					caps = reprobed
 					source = "reprobed"
-					c.storeRemotePatchCapabilities(currentShell, caps)
+					c.mu.Lock()
+					currentLocation := c.session.CurrentShellLocation
+					c.mu.Unlock()
+					c.storeRemotePatchCapabilities(currentLocation, currentShell, caps)
 					ok, err = canUseRemoteGitTransport(ctx, runner, trackedShell, caps, patch)
 				}
 			}

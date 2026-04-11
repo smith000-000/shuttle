@@ -24,6 +24,7 @@ type ollamaChatRequest struct {
 	Stream   bool                `json:"stream"`
 	Format   map[string]any      `json:"format,omitempty"`
 	Options  map[string]any      `json:"options,omitempty"`
+	Think    *bool               `json:"think,omitempty"`
 }
 
 type ollamaChatMessage struct {
@@ -77,6 +78,10 @@ func (a *OllamaAgent) Respond(ctx context.Context, input controller.AgentInput) 
 		Options: map[string]any{
 			"temperature": 0,
 		},
+	}
+	if SupportsThinking(a.profile) {
+		thinking := ThinkingEnabled(a.profile)
+		requestBody.Think = &thinking
 	}
 
 	payload, err := json.Marshal(requestBody)

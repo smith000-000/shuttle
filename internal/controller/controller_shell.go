@@ -39,23 +39,17 @@ func (c *LocalController) ResumeAfterTakeControl(ctx context.Context) ([]Transcr
 
 	c.mu.Lock()
 	primary := c.primaryExecutionLocked()
-	agentOwned := primary != nil && isAgentOwnedExecution(primary.Origin)
-	agentExecutionUsesTrackedShell := primary != nil && shouldSyncExecutionIntoUserShellSession(primary, c.session)
 	c.mu.Unlock()
-	if !agentOwned {
+	if primary != nil {
 		if len(pendingEvents) == 0 {
 			return nil, nil
 		}
 		return pendingEvents, nil
 	}
-	if !agentExecutionUsesTrackedShell {
-		if len(pendingEvents) == 0 {
-			return nil, nil
-		}
-		return pendingEvents, nil
+	if len(pendingEvents) == 0 {
+		return nil, nil
 	}
-	events, err := c.submitAgentTurn(ctx, "", resumeAfterTakeControlPrompt, nil, false)
-	return append(pendingEvents, events...), err
+	return pendingEvents, nil
 }
 
 func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context) ([]TranscriptEvent, bool, bool, error) {
@@ -71,6 +65,11 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 		return prependTranscriptEvent(nil, trackedShellEvent), false, false, nil
 	}
 	execution := *executionPtr
+	var fallbackPrompt *shell.PromptContext
+	if c.session.CurrentShell != nil {
+		contextCopy := *c.session.CurrentShell
+		fallbackPrompt = &contextCopy
+	}
 	c.mu.Unlock()
 	handoffTarget := takeControlTargetForExecution(&execution, trackedShell)
 	if strings.TrimSpace(handoffTarget.PaneID) == "" {
@@ -80,33 +79,56 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 		return prependTranscriptEvent(nil, trackedShellEvent), false, false, nil
 	}
 
-	promptContext, err := c.reader.CaptureShellContext(ctx, handoffTarget.PaneID)
+	observed, err := c.reader.CaptureObservedShellState(ctx, handoffTarget.PaneID)
 	if err != nil {
 		return nil, false, false, err
 	}
-	if promptContext.PromptLine() == "" || promptContext.LastExitCode == nil {
-		if promptContext.PromptLine() == "" {
-			return prependTranscriptEvent(nil, trackedShellEvent), false, false, nil
-		}
-	}
 
 	recentOutput := ""
+	recentDisplayOutput := ""
 	if execution.OwnershipMode == CommandOwnershipSharedObserver {
 		recentOutput = strings.TrimSpace(execution.LatestOutputTail)
+		recentDisplayOutput = strings.TrimSpace(execution.LatestDisplayTail)
 	}
 	if recentOutput == "" {
 		if captured, captureErr := c.reader.CaptureRecentOutput(ctx, handoffTarget.PaneID, 120); captureErr == nil {
 			recentOutput = strings.TrimSpace(captured)
 		}
 	}
+	if recentDisplayOutput == "" {
+		if captured, captureErr := c.reader.CaptureRecentOutputDisplay(ctx, handoffTarget.PaneID, 120); captureErr == nil {
+			recentDisplayOutput = strings.TrimSpace(captured)
+		}
+	}
 	if recentOutput == "" {
 		recentOutput = strings.TrimSpace(execution.LatestOutputTail)
 	}
-	if promptContext.PromptLine() != "" {
-		recentOutput = shell.TrimTrailingPromptLine(recentOutput, promptContext)
+	if recentDisplayOutput == "" {
+		recentDisplayOutput = strings.TrimSpace(execution.LatestDisplayTail)
+	}
+	reconcileReason := shell.HandoffPromptReturnReason(observed, recentOutput, fallbackPrompt)
+	if reconcileReason == "" {
+		logging.Trace(
+			"controller.resume_after_take_control.unreconciled",
+			"execution_id", execution.ID,
+			"command", execution.Command,
+			"pane_command", strings.TrimSpace(observed.CurrentPaneCommand),
+			"has_prompt_context", observed.HasPromptContext,
+			"semantic_exit_known", observed.SemanticState.ExitCode != nil,
+			"tail_preview", logging.Preview(recentOutput, 800),
+		)
+		return prependTranscriptEvent(nil, trackedShellEvent), false, false, nil
 	}
 
-	exitCode, state, confidence, semanticShell, semanticSource, inferred := inferHandoffPromptReturnResult(promptContext, execution, recentOutput)
+	promptContext := shell.PromptContext{}
+	hasPromptContext := observed.HasPromptContext && observed.PromptContext.PromptLine() != ""
+	if hasPromptContext {
+		promptContext = observed.PromptContext
+		recentOutput = shell.TrimTrailingPromptLine(recentOutput, promptContext)
+		recentDisplayOutput = shell.TrimTrailingPromptLine(recentDisplayOutput, promptContext)
+	}
+
+	exitCode, state, confidence, semanticShell, semanticSource, inferred := inferHandoffPromptReturnResult(promptContext, observed.SemanticState.ExitCode, observed.SemanticSource, execution, recentOutput)
 
 	summary := CommandResultSummary{
 		ExecutionID:    execution.ID,
@@ -120,9 +142,12 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 		SemanticSource: semanticSource,
 		ExitCode:       exitCode,
 		Summary:        recentOutput,
+		DisplaySummary: recentDisplayOutput,
 	}
-	contextCopy := promptContext
-	summary.ShellContext = &contextCopy
+	if hasPromptContext {
+		contextCopy := promptContext
+		summary.ShellContext = &contextCopy
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -130,8 +155,15 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 	if current == nil {
 		return prependTranscriptEvent(nil, trackedShellEvent), false, false, nil
 	}
-	c.applyPromptContextLocked(&contextCopy)
+	if hasPromptContext {
+		contextCopy := promptContext
+		c.applyPromptContextLocked(&contextCopy)
+	} else if observed.Location.Kind != "" {
+		c.applyShellLocationLocked(observed.Location)
+	}
 	c.session.RecentShellOutput = recentOutput
+	current.LatestOutputTail = recentOutput
+	current.LatestDisplayTail = recentDisplayOutput
 	c.task.LastCommandResult = &summary
 	cleanup := c.removeExecutionLocked(execution.ID)
 	resultEvent := c.newEvent(EventCommandResult, summary)
@@ -147,12 +179,13 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 		"confidence", confidence,
 		"semantic_shell", semanticShell,
 		"semantic_source", semanticSource,
+		"reconcile_reason", reconcileReason,
 		"tail_preview", logging.Preview(recentOutput, 1000),
 	)
 	return prependTranscriptEvent([]TranscriptEvent{resultEvent}, trackedShellEvent), isAgentOwnedExecution(execution.Origin), true, nil
 }
 
-func inferHandoffPromptReturnResult(promptContext shell.PromptContext, execution CommandExecution, recentOutput string) (int, CommandExecutionState, shell.SignalConfidence, bool, string, bool) {
+func inferHandoffPromptReturnResult(promptContext shell.PromptContext, semanticExitCode *int, observedSemanticSource string, execution CommandExecution, recentOutput string) (int, CommandExecutionState, shell.SignalConfidence, bool, string, bool) {
 	inferred := false
 	confidence := shell.ConfidenceStrong
 	semanticShell := false
@@ -165,6 +198,11 @@ func inferHandoffPromptReturnResult(promptContext shell.PromptContext, execution
 		confidence = shell.ConfidenceStrong
 		semanticShell = true
 		semanticSource = "state_file"
+	case semanticExitCode != nil:
+		exitCode = *semanticExitCode
+		confidence = shell.ConfidenceStrong
+		semanticShell = true
+		semanticSource = strings.TrimSpace(observedSemanticSource)
 	case execution.ExitCode != nil:
 		exitCode = *execution.ExitCode
 		confidence = shell.ConfidenceMedium
@@ -195,33 +233,27 @@ func inferHandoffPromptReturnResult(promptContext shell.PromptContext, execution
 }
 
 func (c *LocalController) RefreshShellContext(ctx context.Context) (*shell.PromptContext, error) {
-	c.refreshUserShellContext(ctx, false)
-	c.mu.Lock()
-	trackedShell := c.session.TrackedShell
-	current := c.session.CurrentShell
-	c.mu.Unlock()
-	if current != nil && current.PromptLine() != "" {
-		contextCopy := *current
+	trackedShell := c.syncTrackedShellTarget(ctx)
+	if observed := c.captureObservedShellStateForTarget(ctx, trackedShell); observed != nil && observed.HasPromptContext {
+		c.mu.Lock()
+		c.session.TrackedShell = trackedShell
+		if trackedShell.SessionName != "" {
+			c.session.SessionName = trackedShell.SessionName
+		}
+		c.applyObservedShellStateLocked(observed)
+		contextCopy := observed.PromptContext
+		c.mu.Unlock()
 		return &contextCopy, nil
 	}
-	if c.reader == nil || trackedShell.PaneID == "" {
-		return nil, nil
-	}
 
-	promptContext, err := c.reader.CaptureShellContext(ctx, trackedShell.PaneID)
-	if err != nil {
-		return nil, err
-	}
-	if promptContext.PromptLine() == "" {
-		return nil, nil
-	}
-
+	c.refreshUserShellContextForTarget(ctx, trackedShell, false)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	contextCopy := promptContext
-	c.applyPromptContextLocked(&contextCopy)
-
+	current := c.session.CurrentShell
+	if current == nil || current.PromptLine() == "" {
+		return nil, nil
+	}
+	contextCopy := *current
 	return &contextCopy, nil
 }
 
@@ -236,7 +268,7 @@ func (c *LocalController) PeekShellTail(ctx context.Context, lines int) (string,
 		return "", nil
 	}
 
-	return c.reader.CaptureRecentOutput(ctx, target.PaneID, lines)
+	return c.reader.CaptureRecentOutputDisplay(ctx, target.PaneID, lines)
 }
 
 func (c *LocalController) captureRecoverySnapshot(ctx context.Context, paneID string, execution *CommandExecution) string {
@@ -309,6 +341,7 @@ func (c *LocalController) syncTrackedShellTargetWithNotice(ctx context.Context) 
 	c.session.TrackedShell.PaneID = resolved
 	c.session = normalizeSessionContext(c.session)
 	updated := c.session.TrackedShell
+	c.syncTrackedShellExecutionsLocked(previous, updated)
 	var notice *TranscriptEvent
 	if previous.PaneID != updated.PaneID || previous.SessionName != updated.SessionName {
 		event := c.newEvent(EventSystemNotice, TextPayload{Text: trackedShellChangeNotice(previous, updated)})
@@ -327,6 +360,27 @@ func (c *LocalController) syncTrackedShellTargetWithNotice(ctx context.Context) 
 	}
 
 	return updated, notice
+}
+
+func (c *LocalController) syncTrackedShellExecutionsLocked(previous TrackedShellTarget, updated TrackedShellTarget) {
+	if sameTrackedShellTarget(previous, updated) || len(c.executions) == 0 {
+		return
+	}
+
+	changed := false
+	for _, execution := range c.executions {
+		if execution == nil {
+			continue
+		}
+		if !sameTrackedShellTarget(executionTarget(execution, previous), previous) {
+			continue
+		}
+		execution.TrackedShell = updated
+		changed = true
+	}
+	if changed {
+		c.syncTaskExecutionViewsLocked()
+	}
 }
 
 func trackedShellChangeNotice(previous TrackedShellTarget, current TrackedShellTarget) string {

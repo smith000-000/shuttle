@@ -4,16 +4,46 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
+	"regexp"
 	"strings"
 	"time"
 
+	"aiterm/internal/agentruntime"
 	"aiterm/internal/logging"
 	"aiterm/internal/shell"
 )
 
+func finalExecutionSummaryOutput(result shell.TrackedExecution, current *CommandExecution) string {
+	if strings.TrimSpace(result.Captured) != "" {
+		return result.Captured
+	}
+	if current != nil && strings.TrimSpace(current.LatestOutputTail) != "" {
+		return current.LatestOutputTail
+	}
+	return result.Captured
+}
+
+func finalExecutionDisplayOutput(result shell.TrackedExecution, current *CommandExecution) string {
+	if strings.TrimSpace(result.DisplayCaptured) != "" {
+		return result.DisplayCaptured
+	}
+	if current != nil && strings.TrimSpace(current.LatestDisplayTail) != "" {
+		return current.LatestDisplayTail
+	}
+	if current != nil && strings.TrimSpace(current.LatestOutputTail) != "" {
+		return current.LatestOutputTail
+	}
+	if strings.TrimSpace(result.Captured) != "" {
+		return result.Captured
+	}
+	return result.DisplayCaptured
+}
+
 func (c *LocalController) SubmitProposedShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error) {
 	logging.Trace("controller.submit_proposed_shell_command", "command", command)
+	if handled, events, err := c.handleInternalTmuxPaneProposal(ctx, command); handled {
+		return events, err
+	}
 	if handled, events, err := c.handleRemoteLocalPathProposal(ctx, command); handled {
 		return events, err
 	}
@@ -21,6 +51,37 @@ func (c *LocalController) SubmitProposedShellCommand(ctx context.Context, comman
 		return events, err
 	}
 	return c.submitShellCommand(ctx, command, CommandOriginAgentProposal)
+}
+
+var tmuxPaneIDPattern = regexp.MustCompile(`%[0-9]+`)
+
+func (c *LocalController) handleInternalTmuxPaneProposal(ctx context.Context, command string) (bool, []TranscriptEvent, error) {
+	command = strings.TrimSpace(command)
+	if command == "" || !isInternalTmuxInspectionCommand(command) {
+		return false, nil, nil
+	}
+
+	c.mu.Lock()
+	paneIDs := c.internalShuttlePaneIDsLocked()
+	agentAvailable := c.runtimeHost != nil
+	c.mu.Unlock()
+
+	if !referencesAnyInternalPaneID(command, paneIDs) {
+		return false, nil, nil
+	}
+
+	logging.Trace("controller.internal_tmux_guard.blocked", "command", command, "pane_ids", strings.Join(paneIDs, ","))
+	if agentAvailable {
+		events, err := c.submitAgentTurn(ctx, "", buildInternalTmuxRepairPrompt(command), nil, false)
+		if err != nil {
+			return true, events, err
+		}
+		if latest := latestProposalFromEvents(events); latest != nil && latest.Kind == ProposalCommand && !referencesAnyInternalPaneID(latest.Command, paneIDs) {
+			return true, events, nil
+		}
+	}
+
+	return true, c.blockInternalTmuxPaneProposal(command), nil
 }
 
 func (c *LocalController) SubmitShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error) {
@@ -39,10 +100,11 @@ func (c *LocalController) handleRemotePatchableProposal(ctx context.Context, com
 
 	c.mu.Lock()
 	currentShell := c.session.CurrentShell
-	agentAvailable := c.agent != nil
+	currentLocation := c.session.CurrentShellLocation
+	agentAvailable := c.runtimeHost != nil
 	c.mu.Unlock()
 
-	if currentShell == nil || !currentShell.Remote {
+	if !isRemoteShellLocation(currentLocation, currentShell) {
 		return false, nil, nil
 	}
 
@@ -71,15 +133,21 @@ func (c *LocalController) handleRemoteLocalPathProposal(ctx context.Context, com
 
 	c.mu.Lock()
 	currentShell := c.session.CurrentShell
+	currentLocation := c.session.CurrentShellLocation
+	localWorkingDirectory := c.session.LocalWorkingDirectory
 	localWorkspaceRoot := c.session.LocalWorkspaceRoot
-	agentAvailable := c.agent != nil
+	agentAvailable := c.runtimeHost != nil
 	c.mu.Unlock()
 
-	if currentShell == nil || !currentShell.Remote {
+	if !isRemoteShellLocation(currentLocation, currentShell) {
 		return false, nil, nil
 	}
 
-	localPaths := localOnlyPathsForRemoteGuard(localWorkspaceRoot)
+	localHost := c.refreshLocalHostContext()
+	if strings.TrimSpace(localWorkingDirectory) == "" {
+		localWorkingDirectory = localHost.WorkingDirectory
+	}
+	localPaths := localOnlyPathsForRemoteGuard(localWorkspaceRoot, localWorkingDirectory, localHost.HomeDirectory)
 	if len(localPaths) == 0 || !referencesAnyLocalOnlyPath(command, localPaths) {
 		return false, nil, nil
 	}
@@ -105,7 +173,8 @@ func buildRemotePatchRepairPrompt(command string, prompt *shell.PromptContext) s
 	}
 	cwd := ""
 	if prompt != nil {
-		cwd = normalizeWorkingDirectory(prompt.Directory)
+		location := shell.InferShellLocation(*prompt, "")
+		cwd = normalizeShellWorkingDirectory(prompt.Directory, &location)
 	}
 	lines := []string{
 		"The previous proposal was a raw remote shell file-edit command.",
@@ -127,7 +196,8 @@ func buildRemoteCommandPathRepairPrompt(command string, prompt *shell.PromptCont
 	}
 	cwd := ""
 	if prompt != nil {
-		cwd = normalizeWorkingDirectory(prompt.Directory)
+		location := shell.InferShellLocation(*prompt, "")
+		cwd = normalizeShellWorkingDirectory(prompt.Directory, &location)
 	}
 	lines := []string{
 		"The previous proposal was a remote-shell command that referenced local machine paths.",
@@ -160,7 +230,95 @@ func latestProposalFromEvents(events []TranscriptEvent) *ProposalPayload {
 	return nil
 }
 
-func localOnlyPathsForRemoteGuard(localWorkspaceRoot string) []string {
+func (c *LocalController) internalShuttlePaneIDsLocked() []string {
+	seen := map[string]struct{}{}
+	paneIDs := []string{}
+	appendPane := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		paneIDs = append(paneIDs, value)
+	}
+
+	appendPane(c.session.TrackedShell.PaneID)
+	for _, execution := range c.executions {
+		if execution == nil {
+			continue
+		}
+		appendPane(execution.TrackedShell.PaneID)
+	}
+	return paneIDs
+}
+
+func isInternalTmuxInspectionCommand(command string) bool {
+	command = strings.ToLower(strings.TrimSpace(command))
+	if !strings.HasPrefix(command, "tmux ") {
+		return false
+	}
+	return strings.Contains(command, "capture-pane") ||
+		strings.Contains(command, "list-panes") ||
+		strings.Contains(command, "display-message") ||
+		strings.Contains(command, "show-messages")
+}
+
+func referencesAnyInternalPaneID(command string, paneIDs []string) bool {
+	if len(paneIDs) == 0 {
+		return false
+	}
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return false
+	}
+	commandPaneIDs := tmuxPaneIDPattern.FindAllString(command, -1)
+	if len(commandPaneIDs) == 0 {
+		return false
+	}
+	seen := map[string]struct{}{}
+	for _, paneID := range paneIDs {
+		seen[paneID] = struct{}{}
+	}
+	for _, paneID := range commandPaneIDs {
+		if _, ok := seen[paneID]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func buildInternalTmuxRepairPrompt(command string) string {
+	lines := []string{
+		"The previous proposal targeted Shuttle-managed tmux pane IDs.",
+		"Do not use tmux capture-pane, list-panes, display-message, or any direct tmux pane-id inspection command.",
+		"Shuttle pane IDs are unstable implementation details, not a supported agent tool surface.",
+		"If you need to verify interruption, completion, or shell state, use the latest command result, recovery snapshot, inspect_context, or one normal shell command that does not reference tmux pane IDs.",
+		"Return exactly one revised next step or a brief answer if the task is already satisfied.",
+		"Original command: " + command,
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (c *LocalController) blockInternalTmuxPaneProposal(command string) []TranscriptEvent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	event := c.newEvent(EventSystemNotice, TextPayload{Text: "Blocked an agent proposal that targeted Shuttle-managed tmux pane IDs. Pane IDs are unstable implementation details; use command results, recovery context, or inspect_context instead."})
+	c.appendEvents(event)
+	return []TranscriptEvent{event}
+}
+
+type localHostContext struct {
+	WorkingDirectory string
+	HomeDirectory    string
+	Username         string
+	Hostname         string
+}
+
+func localOnlyPathsForRemoteGuard(localWorkspaceRoot string, localWorkingDirectory string, localHomeDirectory string) []string {
 	seen := map[string]struct{}{}
 	paths := []string{}
 	appendPath := func(value string) {
@@ -175,9 +333,8 @@ func localOnlyPathsForRemoteGuard(localWorkspaceRoot string) []string {
 		paths = append(paths, value)
 	}
 	appendPath(localWorkspaceRoot)
-	if home, err := os.UserHomeDir(); err == nil {
-		appendPath(home)
-	}
+	appendPath(localWorkingDirectory)
+	appendPath(localHomeDirectory)
 	return paths
 }
 
@@ -266,10 +423,21 @@ func (c *LocalController) prepareCommandExecutionTarget(ctx context.Context, tra
 		return trackedShell, nil, nil
 	}
 
+	if promptContext := c.capturePromptContextForTarget(ctx, trackedShell); promptContext != nil {
+		c.mu.Lock()
+		c.applyPromptContextLocked(promptContext)
+		currentLocation := c.session.CurrentShellLocation
+		c.mu.Unlock()
+		if isRemoteShellLocation(currentLocation, promptContext) {
+			return trackedShell, nil, nil
+		}
+	}
+
 	c.mu.Lock()
 	currentShell := c.session.CurrentShell
+	currentLocation := c.session.CurrentShellLocation
 	c.mu.Unlock()
-	if currentShell != nil && currentShell.Remote {
+	if isRemoteShellLocation(currentLocation, currentShell) {
 		return trackedShell, nil, nil
 	}
 
@@ -334,7 +502,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 	}
 	events := make([]TranscriptEvent, 0, 2)
 	if executionCleanup != nil {
-		events = append(events, c.newEvent(EventSystemNotice, TextPayload{Text: fmt.Sprintf("Running command in owned execution pane %s.", registered.TrackedShell.PaneID)}))
+		events = append(events, c.newEvent(EventSystemNotice, TextPayload{Text: "Running command in owned execution pane."}))
 	}
 	startEvent := c.newEvent(EventCommandStart, CommandStartPayload{
 		Command:   command,
@@ -400,12 +568,20 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 			} else {
 				lostExecution.LatestOutputTail = c.bestEffortRecentOutputLocked()
 			}
+			if strings.TrimSpace(result.DisplayCaptured) != "" {
+				lostExecution.LatestDisplayTail = result.DisplayCaptured
+			} else {
+				lostExecution.LatestDisplayTail = lostExecution.LatestOutputTail
+			}
 			completedAt := time.Now()
 			lostExecution.CompletedAt = &completedAt
 			if result.ShellContext.PromptLine() != "" {
 				shellContext := result.ShellContext
 				lostExecution.ShellContextAfter = &shellContext
 				c.applyPromptContextLocked(&shellContext)
+			}
+			if result.Location.Kind != "" {
+				c.applyShellLocationLocked(result.Location)
 			}
 
 			summary := CommandResultSummary{
@@ -420,6 +596,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 				SemanticSource: result.SemanticSource,
 				ExitCode:       result.ExitCode,
 				Summary:        lostExecution.LatestOutputTail,
+				DisplaySummary: lostExecution.LatestDisplayTail,
 			}
 			if result.ShellContext.PromptLine() != "" {
 				shellContext := result.ShellContext
@@ -463,6 +640,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 		failedExecution.State = CommandExecutionFailed
 		failedExecution.Error = err.Error()
 		failedExecution.LatestOutputTail = c.bestEffortRecentOutputForExecutionLocked(current)
+		failedExecution.LatestDisplayTail = failedExecution.LatestOutputTail
 		completedAt := time.Now()
 		failedExecution.CompletedAt = &completedAt
 		cleanup := c.removeExecutionLocked(execution.ID)
@@ -484,7 +662,10 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 	if result.State == shell.MonitorStateCanceled {
 		canceledExecution := *current
 		canceledExecution.State = CommandExecutionCanceled
-		canceledExecution.LatestOutputTail = result.Captured
+		finalOutput := finalExecutionSummaryOutput(result, current)
+		finalDisplayOutput := finalExecutionDisplayOutput(result, current)
+		canceledExecution.LatestOutputTail = finalOutput
+		canceledExecution.LatestDisplayTail = finalDisplayOutput
 		completedAt := time.Now()
 		canceledExecution.CompletedAt = &completedAt
 		exitCode := result.ExitCode
@@ -501,7 +682,8 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 			SemanticShell:  result.SemanticShell,
 			SemanticSource: result.SemanticSource,
 			ExitCode:       result.ExitCode,
-			Summary:        result.Captured,
+			Summary:        finalOutput,
+			DisplaySummary: finalDisplayOutput,
 		}
 		if result.ShellContext.PromptLine() != "" {
 			shellContext := result.ShellContext
@@ -510,6 +692,9 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 			if shouldSyncExecutionIntoUserShellSession(current, c.session) {
 				c.applyPromptContextLocked(&shellContext)
 			}
+		}
+		if result.Location.Kind != "" && shouldSyncExecutionIntoUserShellSession(current, c.session) {
+			c.applyShellLocationLocked(result.Location)
 		}
 		c.task.LastCommandResult = &summary
 		cleanup := c.removeExecutionLocked(execution.ID)
@@ -526,7 +711,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 			"command", command,
 			"origin", origin,
 			"command_id", result.CommandID,
-			"summary_preview", logging.Preview(result.Captured, 1000),
+			"summary_preview", logging.Preview(finalOutput, 1000),
 			"prompt", result.ShellContext.PromptLine(),
 		)
 		return prependTranscriptEvent(append(events, resultEvent), trackedShellEvent), nil
@@ -534,7 +719,10 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 
 	completedExecution := *current
 	completedExecution.State = CommandExecutionCompleted
-	completedExecution.LatestOutputTail = result.Captured
+	finalOutput := finalExecutionSummaryOutput(result, current)
+	finalDisplayOutput := finalExecutionDisplayOutput(result, current)
+	completedExecution.LatestOutputTail = finalOutput
+	completedExecution.LatestDisplayTail = finalDisplayOutput
 	completedAt := time.Now()
 	completedExecution.CompletedAt = &completedAt
 	exitCode := result.ExitCode
@@ -551,7 +739,8 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 		SemanticShell:  result.SemanticShell,
 		SemanticSource: result.SemanticSource,
 		ExitCode:       result.ExitCode,
-		Summary:        result.Captured,
+		Summary:        finalOutput,
+		DisplaySummary: finalDisplayOutput,
 	}
 	if result.ShellContext.PromptLine() != "" {
 		shellContext := result.ShellContext
@@ -560,6 +749,9 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 		if shouldSyncExecutionIntoUserShellSession(current, c.session) {
 			c.applyPromptContextLocked(&shellContext)
 		}
+	}
+	if result.Location.Kind != "" && shouldSyncExecutionIntoUserShellSession(current, c.session) {
+		c.applyShellLocationLocked(result.Location)
 	}
 	c.task.LastCommandResult = &summary
 	cleanup := c.removeExecutionLocked(execution.ID)
@@ -577,39 +769,30 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 		"origin", origin,
 		"command_id", result.CommandID,
 		"exit_code", result.ExitCode,
-		"summary_preview", logging.Preview(result.Captured, 1000),
+		"summary_preview", logging.Preview(finalOutput, 1000),
 		"prompt", result.ShellContext.PromptLine(),
 	)
 	return prependTranscriptEvent(append(events, resultEvent), trackedShellEvent), nil
 }
 
 func (c *LocalController) submitLostExecutionRecovery(ctx context.Context, execution CommandExecution) ([]TranscriptEvent, error) {
-	if c.agent == nil {
+	if c.runtimeHost == nil {
 		return nil, nil
 	}
 
 	c.refreshUserShellContext(ctx, false)
-
 	c.mu.Lock()
-	session := c.session
-	task := c.task
+	executionCopy := execution
+	c.task.CurrentExecution = &executionCopy
+	c.task.PrimaryExecutionID = execution.ID
+	c.task.ExecutionRegistry = []CommandExecution{execution}
+	c.task.RecoverySnapshot = c.captureRecoverySnapshot(ctx, executionTarget(&execution, c.session.TrackedShell).PaneID, &execution)
 	c.mu.Unlock()
-	if strings.TrimSpace(execution.LatestOutputTail) != "" {
-		session.RecentShellOutput = execution.LatestOutputTail
-	}
 
-	task.CurrentExecution = &execution
-	task.PrimaryExecutionID = execution.ID
-	task.ExecutionRegistry = []CommandExecution{execution}
-	task.RecoverySnapshot = c.captureRecoverySnapshot(ctx, executionTarget(&execution, session.TrackedShell).PaneID, &execution)
-
-	input := AgentInput{
-		Session: session,
-		Task:    task,
-		Prompt:  lostTrackingCheckInPrompt,
-	}
-
-	response, err := c.agent.Respond(ctx, input)
+	outcome, err := c.runtime.Handle(ctx, c.runtimeHost, agentruntime.Request{
+		Kind:   agentruntime.RequestLostExecutionRecovery,
+		Prompt: appendPromptSuffix(lostTrackingCheckInPrompt, stateAuthorityPromptSuffix),
+	})
 	if err != nil {
 		logging.TraceError(
 			"controller.lost_recovery.error",
@@ -619,36 +802,7 @@ func (c *LocalController) submitLostExecutionRecovery(ctx context.Context, execu
 		)
 		return nil, err
 	}
-	response = normalizeAgentResponse(response)
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	events := make([]TranscriptEvent, 0, 4)
-	if response.Message != "" {
-		events = append(events, c.newEvent(EventAgentMessage, TextPayload{Text: response.Message}))
-	}
-	if response.Plan != nil {
-		activePlan := buildActivePlan(*response.Plan)
-		c.task.ActivePlan = &activePlan
-		events = append(events, c.newEvent(EventPlan, activePlan))
-	}
-	if response.Proposal != nil {
-		events = append(events, c.newEvent(EventProposal, ProposalPayload{
-			Kind:        response.Proposal.Kind,
-			Command:     response.Proposal.Command,
-			Keys:        response.Proposal.Keys,
-			Patch:       response.Proposal.Patch,
-			PatchTarget: response.Proposal.PatchTarget,
-			Description: response.Proposal.Description,
-		}))
-	}
-	if response.Approval != nil {
-		approvalCopy := *response.Approval
-		c.task.PendingApproval = &approvalCopy
-		events = append(events, c.newEvent(EventApproval, approvalCopy))
-	}
-	c.appendEvents(events...)
+	events, _ := c.applyRuntimeOutcome(outcome, false, "")
 	logging.Trace(
 		"controller.lost_recovery.complete",
 		"execution_id", execution.ID,
@@ -783,6 +937,11 @@ func (c *LocalController) AbandonActiveExecution(reason string) *CommandExecutio
 	executionCopy.State = CommandExecutionCanceled
 	executionCopy.Error = strings.TrimSpace(reason)
 	executionCopy.LatestOutputTail = c.bestEffortRecentOutputForExecutionLocked(execution)
+	if strings.TrimSpace(execution.LatestDisplayTail) != "" {
+		executionCopy.LatestDisplayTail = execution.LatestDisplayTail
+	} else {
+		executionCopy.LatestDisplayTail = executionCopy.LatestOutputTail
+	}
 	completedAt := time.Now()
 	executionCopy.CompletedAt = &completedAt
 	cleanup := c.removeExecutionLocked(execution.ID)

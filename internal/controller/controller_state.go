@@ -242,10 +242,10 @@ func executionSupportsDirectTakeControl(execution *CommandExecution) bool {
 	}
 
 	switch execution.State {
-	case CommandExecutionAwaitingInput, CommandExecutionInteractiveFullscreen, CommandExecutionHandoffActive:
-		return true
-	default:
+	case CommandExecutionQueued, CommandExecutionCompleted, CommandExecutionFailed, CommandExecutionCanceled, CommandExecutionLost:
 		return false
+	default:
+		return true
 	}
 }
 
@@ -284,7 +284,7 @@ func runExecutionCleanup(cleanup func(context.Context) error) {
 
 func (c *LocalController) ownedExecutionStartDirLocked() string {
 	if c.session.CurrentShell != nil && strings.TrimSpace(c.session.CurrentShell.Directory) != "" {
-		if workingDirectory := normalizeWorkingDirectory(c.session.CurrentShell.Directory); workingDirectory != "" {
+		if workingDirectory := normalizeShellWorkingDirectory(c.session.CurrentShell.Directory, c.session.CurrentShellLocation); workingDirectory != "" {
 			return workingDirectory
 		}
 	}

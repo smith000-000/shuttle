@@ -22,11 +22,17 @@ type AnthropicAgent struct {
 }
 
 type anthropicMessagesRequest struct {
-	Model       string             `json:"model"`
-	MaxTokens   int                `json:"max_tokens"`
-	System      string             `json:"system,omitempty"`
-	Messages    []anthropicMessage `json:"messages"`
-	Temperature float64            `json:"temperature,omitempty"`
+	Model       string                   `json:"model"`
+	MaxTokens   int                      `json:"max_tokens"`
+	Thinking    *anthropicThinkingConfig `json:"thinking,omitempty"`
+	System      string                   `json:"system,omitempty"`
+	Messages    []anthropicMessage       `json:"messages"`
+	Temperature float64                  `json:"temperature,omitempty"`
+}
+
+type anthropicThinkingConfig struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens"`
 }
 
 type anthropicMessage struct {
@@ -91,6 +97,9 @@ func (a *AnthropicAgent) Respond(ctx context.Context, input controller.AgentInpu
 			},
 		},
 		Temperature: 0,
+	}
+	if ThinkingEnabled(a.profile) {
+		requestBody.Thinking = &anthropicThinkingConfig{Type: "enabled", BudgetTokens: 1024}
 	}
 
 	payload, err := json.Marshal(requestBody)

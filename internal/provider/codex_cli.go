@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"aiterm/internal/controller"
+	"aiterm/internal/shell"
 )
 
 var defaultCodexCLICommand = "codex"
@@ -152,6 +153,9 @@ func buildCodexPrompt(input controller.AgentInput) string {
 }
 
 func codexWorkingDir(input controller.AgentInput) string {
+	if sessionShellLocation(input.Session).Kind == shell.ShellLocationRemote {
+		return strings.TrimSpace(input.Session.LocalWorkspaceRoot)
+	}
 	return strings.TrimSpace(input.Session.WorkingDirectory)
 }
 

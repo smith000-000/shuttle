@@ -398,6 +398,117 @@ func TestAwaitingInputAllowsSendKeysMode(t *testing.T) {
 	}
 }
 
+func TestAwaitingInputAutoOpensSendKeysModeOnFreshObservation(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	execution := &controller.CommandExecution{
+		ID:               "cmd-1",
+		Command:          "sudo ls",
+		Origin:           controller.CommandOriginUserShell,
+		State:            controller.CommandExecutionAwaitingInput,
+		StartedAt:        time.Now(),
+		LatestOutputTail: "[sudo] password for localuser:",
+	}
+
+	updated, _ := model.Update(activeExecutionMsg{execution: execution})
+	next := updated.(Model)
+
+	if !next.sendingFullscreenKeys {
+		t.Fatal("expected fresh awaiting_input observation to auto-open KEYS> mode")
+	}
+	if !next.autoOpenedFullscreenKeys {
+		t.Fatal("expected KEYS> mode to be marked as auto-opened")
+	}
+}
+
+func TestShiftTabDismissesAutoOpenedSendKeysWithoutReasserting(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	execution := &controller.CommandExecution{
+		ID:               "cmd-1",
+		Command:          "sudo ls",
+		Origin:           controller.CommandOriginUserShell,
+		State:            controller.CommandExecutionAwaitingInput,
+		StartedAt:        time.Now(),
+		LatestOutputTail: "[sudo] password for localuser:",
+	}
+
+	updated, _ := model.Update(activeExecutionMsg{execution: execution})
+	model = updated.(Model)
+	if !model.sendingFullscreenKeys {
+		t.Fatal("expected KEYS> mode to auto-open before dismissal")
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	model = updated.(Model)
+	if model.sendingFullscreenKeys {
+		t.Fatal("expected Shift-Tab to dismiss KEYS> mode")
+	}
+	if model.mode != ShellMode {
+		t.Fatalf("expected Shift-Tab dismissal not to toggle mode, got %s", model.mode)
+	}
+
+	updated, _ = model.Update(activeExecutionMsg{execution: execution})
+	model = updated.(Model)
+	if model.sendingFullscreenKeys {
+		t.Fatal("expected dismissed KEYS> mode not to reassert for the same awaiting-input fingerprint")
+	}
+}
+
+func TestDismissedAutoOpenedSendKeysReassertsWhenAwaitingInputChanges(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	execution := &controller.CommandExecution{
+		ID:               "cmd-1",
+		Command:          "sudo ls",
+		Origin:           controller.CommandOriginUserShell,
+		State:            controller.CommandExecutionAwaitingInput,
+		StartedAt:        time.Now(),
+		LatestOutputTail: "[sudo] password for localuser:",
+	}
+
+	updated, _ := model.Update(activeExecutionMsg{execution: execution})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	model = updated.(Model)
+
+	changed := *execution
+	changed.LatestOutputTail = "Password incorrect, try again."
+	updated, _ = model.Update(activeExecutionMsg{execution: &changed})
+	model = updated.(Model)
+	if !model.sendingFullscreenKeys {
+		t.Fatal("expected KEYS> mode to reassert after the awaiting-input fingerprint changed")
+	}
+}
+
+func TestSendingKeysSuppressesAutoReopenForSameAwaitingInputPrompt(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	execution := &controller.CommandExecution{
+		ID:               "cmd-1",
+		Command:          "sudo ls",
+		Origin:           controller.CommandOriginUserShell,
+		State:            controller.CommandExecutionAwaitingInput,
+		StartedAt:        time.Now(),
+		LatestOutputTail: "[sudo] password for localuser:",
+	}
+
+	updated, _ := model.Update(activeExecutionMsg{execution: execution})
+	model = updated.(Model)
+	model.setInput("secret")
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected password prompt KEYS> send to produce a command")
+	}
+	if model.sendingFullscreenKeys {
+		t.Fatal("expected KEYS> to close after sending")
+	}
+
+	updated, _ = model.Update(activeExecutionMsg{execution: execution})
+	model = updated.(Model)
+	if model.sendingFullscreenKeys {
+		t.Fatal("expected successful send to suppress auto-reopen for the same awaiting-input prompt")
+	}
+}
+
 func TestSendKeysModeBypassesComposerLockOnEnter(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.sendingFullscreenKeys = true
@@ -417,6 +528,8 @@ func TestSendKeysModeBypassesComposerLockOnEnter(t *testing.T) {
 	}
 	model.setInput("hello")
 	model.takeControl = takeControlConfig{SocketName: "sock", SessionName: "sess", TrackedPaneID: "%0", DetachKey: TakeControlKey}
+	model.liveShellTail = "name:"
+	model.observeActiveKeysLease("test")
 
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next := updated.(Model)
@@ -426,6 +539,78 @@ func TestSendKeysModeBypassesComposerLockOnEnter(t *testing.T) {
 	}
 	if next.sendingFullscreenKeys {
 		t.Fatal("expected send-keys mode to submit and exit")
+	}
+}
+
+func TestSendKeysModeRequiresFreshObservedLease(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.sendingFullscreenKeys = true
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "read",
+		Origin:    controller.CommandOriginAgentApproval,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now(),
+	}
+	model.takeControl = takeControlConfig{SocketName: "sock", SessionName: "sess", TrackedPaneID: "%0", DetachKey: TakeControlKey}
+	model.setInput("hello")
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(Model)
+
+	if cmd == nil {
+		t.Fatal("expected a refresh command when KEYS> lacks a fresh observed lease")
+	}
+	if !next.sendingFullscreenKeys {
+		t.Fatal("expected KEYS> mode to stay active when the guard blocks sending")
+	}
+	if next.input != "hello" {
+		t.Fatalf("expected KEYS> input to remain for retry, got %q", next.input)
+	}
+	if len(next.entries) == 0 || !strings.Contains(next.entries[len(next.entries)-1].Body, "fresh read of the active terminal") {
+		t.Fatalf("expected guard notice, got %#v", next.entries)
+	}
+}
+
+func TestSendKeysModeConsumesObservedLeaseUntilRefreshed(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "read",
+		Origin:    controller.CommandOriginAgentApproval,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now(),
+	}
+	model.takeControl = takeControlConfig{SocketName: "sock", SessionName: "sess", TrackedPaneID: "%0", DetachKey: TakeControlKey}
+	model.liveShellTail = "Password:"
+	model.observeActiveKeysLease("test")
+
+	model.sendingFullscreenKeys = true
+	model.setInput("hello")
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected first KEYS> send to succeed with a fresh lease")
+	}
+	if next.sendingFullscreenKeys {
+		t.Fatal("expected KEYS> mode to exit after a successful send")
+	}
+	if next.hasFreshActiveKeysLease() {
+		t.Fatal("expected send to consume the active-keys lease")
+	}
+
+	next.sendingFullscreenKeys = true
+	next.setInput("world")
+	updated, cmd = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	blocked := updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected guard-triggered refresh after consuming the lease")
+	}
+	if !blocked.sendingFullscreenKeys {
+		t.Fatal("expected KEYS> mode to remain active when retry is blocked")
+	}
+	if blocked.input != "world" {
+		t.Fatalf("expected blocked KEYS> input to remain, got %q", blocked.input)
 	}
 }
 
@@ -586,7 +771,7 @@ func TestF2DoesNotMarkOwnedExecutionAsHandoff(t *testing.T) {
 	}
 }
 
-func TestF2MarksOwnedInteractiveExecutionAsHandoff(t *testing.T) {
+func TestF3MarksOwnedInteractiveExecutionAsHandoff(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
 	model.activeExecution = &controller.CommandExecution{
 		ID:        "cmd-1",
@@ -602,7 +787,7 @@ func TestF2MarksOwnedInteractiveExecutionAsHandoff(t *testing.T) {
 	model.takeControl.TrackedPaneID = "%9"
 	model.takeControl.TemporaryPane = true
 
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF2})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF3})
 	next := updated.(Model)
 
 	if next.activeExecution == nil || next.activeExecution.State != controller.CommandExecutionHandoffActive {
@@ -610,6 +795,51 @@ func TestF2MarksOwnedInteractiveExecutionAsHandoff(t *testing.T) {
 	}
 	if !next.handoffVisible {
 		t.Fatal("expected owned interactive execution to show handoff state")
+	}
+}
+
+func TestExecutionTakeControlConfigUsesF3DetachKey(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 15",
+		Origin:    controller.CommandOriginAgentProposal,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+		TrackedShell: controller.TrackedShellTarget{
+			SessionName: "shuttle-test",
+			PaneID:      "%9",
+		},
+	}
+
+	config := model.executionTakeControlConfig()
+	if config.DetachKey != ExecutionTakeControlKey {
+		t.Fatalf("expected execution handoff detach key %q, got %q", ExecutionTakeControlKey, config.DetachKey)
+	}
+}
+
+func TestF2DoesNotMarkOwnedInteractiveExecutionAsHandoff(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sudo apt update",
+		Origin:    controller.CommandOriginAgentProposal,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now(),
+		TrackedShell: controller.TrackedShellTarget{
+			SessionName: "shuttle-test",
+			PaneID:      "%9",
+		},
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF2})
+	next := updated.(Model)
+
+	if next.activeExecution == nil || next.activeExecution.State != controller.CommandExecutionAwaitingInput {
+		t.Fatalf("expected owned interactive execution to remain awaiting input, got %#v", next.activeExecution)
+	}
+	if next.handoffVisible {
+		t.Fatal("expected F2 persistent-shell handoff not to mark owned execution as handoff-visible")
 	}
 }
 
@@ -668,6 +898,135 @@ func TestTakeControlFinishedResumesControllerWithoutLocalExecution(t *testing.T)
 	}
 	if next.activeExecution == nil || next.activeExecution.Command != "sleep 20" {
 		t.Fatalf("expected returned handoff command to become active, got %#v", next.activeExecution)
+	}
+}
+
+func TestTakeControlFinishedRetriesEmptyResumeAfterTakeControl(t *testing.T) {
+	ctrl := &fakeController{
+		resumeEventsQueue: [][]controller.TranscriptEvent{
+			nil,
+			{
+				{
+					Kind: controller.EventCommandResult,
+					Payload: controller.CommandResultSummary{
+						ExecutionID: "cmd-1",
+						Command:     "tail -f AGENTS.md",
+						Origin:      controller.CommandOriginUserShell,
+						State:       controller.CommandExecutionCanceled,
+						ExitCode:    shell.InterruptedExitCode,
+						Summary:     "^C",
+					},
+				},
+			},
+		},
+		activeExecution: &controller.CommandExecution{
+			ID:        "cmd-1",
+			Command:   "tail -f AGENTS.md",
+			Origin:    controller.CommandOriginUserShell,
+			State:     controller.CommandExecutionRunning,
+			StartedAt: time.Now(),
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "tail -f AGENTS.md",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionHandoffActive,
+		StartedAt: time.Now(),
+	}
+	model.handoffVisible = true
+	model.handoffPriorState = controller.CommandExecutionRunning
+
+	updated, cmd := model.Update(takeControlFinishedMsg{})
+	next := updated.(Model)
+
+	msg := controllerEventsFromCmd(t, cmd)
+	updated, retryCmd := next.Update(msg)
+	next = updated.(Model)
+
+	if retryCmd == nil {
+		t.Fatal("expected retry command after empty handoff reconciliation")
+	}
+	if next.handoffResumeRetryBudget != 2 {
+		t.Fatalf("expected retry budget to decrement, got %d", next.handoffResumeRetryBudget)
+	}
+
+	msg = controllerEventsFromCmd(t, retryCmd)
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+
+	if next.activeExecution != nil {
+		t.Fatalf("expected retry to clear active execution after canceled result, got %#v", next.activeExecution)
+	}
+}
+
+func TestTakeControlFinishedClearsExecutionWhenControllerAlreadySettledDuringHandoff(t *testing.T) {
+	ctrl := &fakeController{
+		resumeEventsQueue: [][]controller.TranscriptEvent{
+			nil,
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 15",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionHandoffActive,
+		StartedAt: time.Now(),
+	}
+	model.handoffVisible = true
+	model.handoffPriorState = controller.CommandExecutionRunning
+
+	updated, cmd := model.Update(takeControlFinishedMsg{})
+	next := updated.(Model)
+
+	msg := controllerEventsFromCmd(t, cmd)
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+
+	if next.activeExecution != nil {
+		t.Fatalf("expected settled controller state to clear stale handoff execution, got %#v", next.activeExecution)
+	}
+	if next.handoffResumeRetryBudget != 0 {
+		t.Fatalf("expected retry budget to clear once controller reported no active execution, got %d", next.handoffResumeRetryBudget)
+	}
+}
+
+func TestTakeControlFinishedIgnoresStalePreHandoffExecutionPoll(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 15",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+	}
+
+	staleEpoch := model.activeExecutionPollEpoch
+	updated, _ := model.takeControlPersistentShellNow()
+	model = updated.(Model)
+	updated, _ = model.Update(takeControlFinishedMsg{})
+	model = updated.(Model)
+
+	updated, _ = model.Update(activeExecutionMsg{
+		epoch: staleEpoch,
+		execution: &controller.CommandExecution{
+			ID:        "cmd-1",
+			Command:   "sleep 15",
+			Origin:    controller.CommandOriginUserShell,
+			State:     controller.CommandExecutionRunning,
+			StartedAt: time.Now(),
+		},
+	})
+	next := updated.(Model)
+
+	if next.activeExecution == nil || next.activeExecution.State == controller.CommandExecutionHandoffActive {
+		t.Fatalf("expected handoff return state to stay intact, got %#v", next.activeExecution)
+	}
+	if next.activeExecution.Command != "sleep 15" {
+		t.Fatalf("expected existing execution to remain, got %#v", next.activeExecution)
 	}
 }
 
@@ -892,7 +1251,34 @@ func TestActiveExecutionCardShowsFullscreenKeyHintsWithoutKill(t *testing.T) {
 	}
 }
 
-func TestActiveExecutionCardExplainsOwnedExecutionPane(t *testing.T) {
+func TestActiveExecutionCardShowsAwaitingInputKeyHints(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.shellContext = shell.PromptContext{
+		User:         "localuser",
+		Host:         "workstation",
+		Directory:    "/workspace/project",
+		PromptSymbol: "%",
+		RawLine:      "localuser@workstation ~/workspace/project %",
+	}
+	model.activeExecution = &controller.CommandExecution{
+		ID:               "cmd-1",
+		Command:          "sudo ls",
+		Origin:           controller.CommandOriginUserShell,
+		State:            controller.CommandExecutionAwaitingInput,
+		StartedAt:        time.Now(),
+		LatestOutputTail: "[sudo] password for localuser:",
+	}
+
+	card := model.renderActiveExecutionCard(100)
+	if !strings.Contains(card, "Terminal input prompt detected.") {
+		t.Fatalf("expected awaiting-input notice, got %q", card)
+	}
+	if !strings.Contains(card, "F2 take control  S send keys") {
+		t.Fatalf("expected awaiting-input key hints, got %q", card)
+	}
+}
+
+func TestActiveExecutionCardOffersF3ForOwnedRunningPane(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
 	model.activeExecution = &controller.CommandExecution{
 		ID:        "cmd-1",
@@ -906,17 +1292,19 @@ func TestActiveExecutionCardExplainsOwnedExecutionPane(t *testing.T) {
 		},
 		LatestOutputTail: "still running",
 	}
+	model.takeControl.TrackedPaneID = "%9"
+	model.takeControl.TemporaryPane = true
 
 	card := model.renderActiveExecutionCard(100)
-	if !strings.Contains(card, "owned execution pane") {
-		t.Fatalf("expected owned execution explanation, got %q", card)
+	if !strings.Contains(card, "F3 take control") {
+		t.Fatalf("expected owned execution card to advertise F3 takeover, got %q", card)
 	}
-	if strings.Contains(card, "F2 take control") {
-		t.Fatalf("expected owned execution card not to advertise F2 takeover, got %q", card)
+	if !strings.Contains(card, "Temporary Shuttle execution pane") {
+		t.Fatalf("expected owned execution card to explain temporary pane, got %q", card)
 	}
 }
 
-func TestActiveExecutionCardOffersTakeControlForOwnedInteractivePane(t *testing.T) {
+func TestActiveExecutionCardOffersF3ForOwnedInteractivePane(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
 	model.activeExecution = &controller.CommandExecution{
 		ID:        "cmd-1",
@@ -934,8 +1322,8 @@ func TestActiveExecutionCardOffersTakeControlForOwnedInteractivePane(t *testing.
 	model.takeControl.TemporaryPane = true
 
 	card := model.renderActiveExecutionCard(100)
-	if !strings.Contains(card, "F2 take control") {
-		t.Fatalf("expected owned interactive card to advertise F2 takeover, got %q", card)
+	if !strings.Contains(card, "F3 take control") {
+		t.Fatalf("expected owned interactive card to advertise F3 takeover, got %q", card)
 	}
 	if !strings.Contains(card, "Temporary Shuttle execution pane") {
 		t.Fatalf("expected owned interactive card to explain temporary pane, got %q", card)
@@ -1013,8 +1401,17 @@ func TestSStartsFullscreenKeyMode(t *testing.T) {
 func TestSubmitFullscreenKeysBypassesShellCommandPath(t *testing.T) {
 	ctrl := &fakeController{}
 	model := NewModel(fakeWorkspace(), ctrl).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "read",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now(),
+	}
 	model.sendingFullscreenKeys = true
 	model.input = "q"
+	model.liveShellTail = "waiting for input"
+	model.observeActiveKeysLease("test")
 
 	updated, cmd := model.submit()
 	next := updated.(Model)
@@ -1031,8 +1428,17 @@ func TestSubmitFullscreenKeysBypassesShellCommandPath(t *testing.T) {
 
 func TestCarriageReturnRuneSubmitsFullscreenKeys(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "read",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now(),
+	}
 	model.sendingFullscreenKeys = true
 	model.input = "hello"
+	model.liveShellTail = "waiting for input"
+	model.observeActiveKeysLease("test")
 
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'\r'}})
 	next := updated.(Model)
@@ -1048,8 +1454,17 @@ func TestCarriageReturnRuneSubmitsFullscreenKeys(t *testing.T) {
 func TestEnterSubmitsFullscreenKeysWhileBusy(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
 	model.busy = true
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "read",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now(),
+	}
 	model.sendingFullscreenKeys = true
 	model.input = "hello"
+	model.liveShellTail = "waiting for input"
+	model.observeActiveKeysLease("test")
 
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next := updated.(Model)
@@ -1074,10 +1489,45 @@ func TestFullscreenKeysForSubmitPreservesExactSendByDefault(t *testing.T) {
 	}
 }
 
+func TestShouldAutoAppendEnterForAwaitingInput(t *testing.T) {
+	if !shouldAutoAppendEnterForAwaitingInput("[sudo] password for localuser:") {
+		t.Fatal("expected password prompt to append Enter")
+	}
+	if !shouldAutoAppendEnterForAwaitingInput("root@omv's password") {
+		t.Fatal("expected ssh password prompt without trailing colon to append Enter")
+	}
+	if !shouldAutoAppendEnterForAwaitingInput("Select an option:") {
+		t.Fatal("expected menu prompt to append Enter")
+	}
+	if shouldAutoAppendEnterForAwaitingInput("Press any key to continue") {
+		t.Fatal("expected press-any-key prompt to remain exact")
+	}
+}
+
+func TestShouldAutoAppendEnterForActiveExecutionFallsBackToCommand(t *testing.T) {
+	execution := &controller.CommandExecution{
+		ID:      "cmd-1",
+		Command: "ssh root@omv",
+		State:   controller.CommandExecutionAwaitingInput,
+	}
+	if !shouldAutoAppendEnterForActiveExecution(execution, "", "") {
+		t.Fatal("expected ssh awaiting-input execution to append Enter even when tail text is missing")
+	}
+}
+
 func TestCtrlYSubmitsFullscreenKeysWithTrailingEnter(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "read",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now(),
+	}
 	model.sendingFullscreenKeys = true
 	model.input = "password"
+	model.liveShellTail = "password:"
+	model.observeActiveKeysLease("test")
 
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyCtrlY})
 	next := updated.(Model)
@@ -1087,6 +1537,102 @@ func TestCtrlYSubmitsFullscreenKeysWithTrailingEnter(t *testing.T) {
 	}
 	if next.sendingFullscreenKeys {
 		t.Fatal("expected fullscreen key mode to clear after Ctrl+Y submit")
+	}
+}
+
+func TestEnterSubmitsAwaitingInputPasswordWithImplicitEnter(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sudo ls",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionAwaitingInput,
+		StartedAt: time.Now(),
+	}
+	model.sendingFullscreenKeys = true
+	model.input = "password"
+	model.liveShellTail = "[sudo] password for localuser:"
+	model.observeActiveKeysLease("test")
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(Model)
+
+	if next.sendingFullscreenKeys {
+		t.Fatal("expected Enter submit to close KEYS> mode")
+	}
+	if next.input != "" {
+		t.Fatalf("expected KEYS> input to clear after submit, got %q", next.input)
+	}
+
+	msg := fullscreenKeysSentMsg{keys: "password\n"}
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+	last := next.entries[len(next.entries)-1]
+	if !strings.Contains(last.Body, "password\\n") {
+		t.Fatalf("expected implicit Enter send preview, got %q", last.Body)
+	}
+}
+
+func TestEnterSubmitsSSHPasswordWithImplicitEnterFromExecutionTail(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	model.activeExecution = &controller.CommandExecution{
+		ID:               "cmd-1",
+		Command:          "ssh root@omv",
+		Origin:           controller.CommandOriginUserShell,
+		State:            controller.CommandExecutionAwaitingInput,
+		StartedAt:        time.Now(),
+		LatestOutputTail: "root@omv's password",
+	}
+	model.sendingFullscreenKeys = true
+	model.input = "hunter2"
+	model.liveShellTail = ""
+	model.observeActiveKeysLease("test")
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(Model)
+
+	if next.sendingFullscreenKeys {
+		t.Fatal("expected Enter submit to close KEYS> mode for ssh password prompt")
+	}
+
+	msg := fullscreenKeysSentMsg{keys: "hunter2\n"}
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+	last := next.entries[len(next.entries)-1]
+	if !strings.Contains(last.Body, "hunter2\\n") {
+		t.Fatalf("expected implicit Enter send preview for ssh password prompt, got %q", last.Body)
+	}
+}
+
+func TestSuccessfulKeysSendSuppressesImmediateAutoReopen(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithTakeControl("shuttle-test", "shuttle-test", "%0", TakeControlKey)
+	execution := &controller.CommandExecution{
+		ID:               "cmd-1",
+		Command:          "ssh root@omv",
+		Origin:           controller.CommandOriginUserShell,
+		State:            controller.CommandExecutionAwaitingInput,
+		StartedAt:        time.Now(),
+		LatestOutputTail: "root@omv's password",
+	}
+	model.activeExecution = execution
+	model.sendingFullscreenKeys = true
+	model.input = "hunter2"
+	model.liveShellTail = "root@omv's password"
+	model.observeActiveKeysLease("test")
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(Model)
+	if next.sendingFullscreenKeys {
+		t.Fatal("expected KEYS> mode to close immediately after submit")
+	}
+	if next.suppressAutoKeysUntil.IsZero() {
+		t.Fatal("expected successful submit to start a KEYS> auto-open cooldown")
+	}
+
+	updated, _ = next.Update(activeExecutionMsg{execution: execution})
+	next = updated.(Model)
+	if next.sendingFullscreenKeys {
+		t.Fatal("expected awaiting_input refresh during cooldown not to auto-reopen KEYS> mode")
 	}
 }
 
@@ -1243,7 +1789,7 @@ func TestTakeControlFinishedPreservesExecutionAcrossTransientNilPoll(t *testing.
 	updated, _ := model.Update(takeControlFinishedMsg{})
 	model = updated.(Model)
 
-	updated, cmd := model.Update(activeExecutionMsg{execution: nil})
+	updated, cmd := model.Update(activeExecutionMsg{epoch: model.activeExecutionPollEpoch, execution: nil})
 	next := updated.(Model)
 
 	if next.activeExecution == nil {
@@ -1455,6 +2001,47 @@ func TestCtrlGResumesPausedInteractiveCheckIns(t *testing.T) {
 	}
 }
 
+func TestCtrlGContinuesAfterLatestCommandResultBeforeContinuingPlan(t *testing.T) {
+	ctrl := &fakeController{
+		continueEvents: []controller.TranscriptEvent{
+			{
+				Kind:    controller.EventAgentMessage,
+				Payload: controller.TextPayload{Text: "Reviewed the canceled command and proposed the next step."},
+			},
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.activePlan = &controller.ActivePlan{
+		Summary: "Run the loop twice and report the result.",
+		Steps: []controller.PlanStep{
+			{Text: "Run the first loop.", Status: controller.PlanStepInProgress},
+			{Text: "Report the result.", Status: controller.PlanStepPending},
+		},
+	}
+	model.pendingContinueAfterCommand = true
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
+	next := updated.(Model)
+
+	if next.pendingContinueAfterCommand {
+		t.Fatal("expected Ctrl+G to clear the pending continue-after-command state")
+	}
+	if cmd == nil {
+		t.Fatal("expected Ctrl+G to schedule ContinueAfterCommand")
+	}
+	msg := controllerEventsFromCmd(t, cmd)
+	updated, _ = next.Update(msg)
+	next = updated.(Model)
+
+	if ctrl.continueCalls != 1 {
+		t.Fatalf("expected one continue-after-command call, got %d", ctrl.continueCalls)
+	}
+	last := next.entries[len(next.entries)-1]
+	if last.Title != "agent" {
+		t.Fatalf("expected trailing agent continuation, got %s", last.Title)
+	}
+}
+
 func TestInteractivePauseActionRFocusesAgentComposer(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.mode = ShellMode
@@ -1578,7 +2165,7 @@ func TestCommandResultClearsLiveShellTailPreview(t *testing.T) {
 	}
 }
 
-func TestCommandResultFallsBackToLiveShellTailWhenSummaryEmpty(t *testing.T) {
+func TestCommandResultDoesNotReuseLiveShellTailWhenSummaryEmpty(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.showShellTail = true
 	model.liveShellTail = "file-a\nfile-b\nfile-c"
@@ -1611,8 +2198,89 @@ func TestCommandResultFallsBackToLiveShellTailWhenSummaryEmpty(t *testing.T) {
 	if last.Title != "result" {
 		t.Fatalf("expected result entry, got %#v", last)
 	}
-	if !strings.Contains(last.Body, "file-c") {
-		t.Fatalf("expected fallback output in result body, got %q", last.Body)
+	if strings.Contains(last.Body, "file-c") {
+		t.Fatalf("expected stale shell tail not to be reused in result body, got %q", last.Body)
+	}
+}
+
+func TestStaleActiveExecutionPollIgnoredAfterCommandResult(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.showShellTail = true
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "ls",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+	}
+
+	updated, _ := model.Update(controllerEventsMsg{
+		events: []controller.TranscriptEvent{
+			{
+				Kind: controller.EventCommandResult,
+				Payload: controller.CommandResultSummary{
+					ExecutionID: "cmd-1",
+					Command:     "ls",
+					Origin:      controller.CommandOriginUserShell,
+					ExitCode:    0,
+					Summary:     "file-a",
+				},
+			},
+		},
+	})
+	next := updated.(Model)
+
+	if next.activeExecution != nil {
+		t.Fatalf("expected active execution cleared after result, got %#v", next.activeExecution)
+	}
+
+	updated, _ = next.Update(activeExecutionMsg{
+		epoch: next.activeExecutionPollEpoch - 1,
+		execution: &controller.CommandExecution{
+			ID:        "cmd-1",
+			Command:   "ls",
+			Origin:    controller.CommandOriginUserShell,
+			State:     controller.CommandExecutionRunning,
+			StartedAt: time.Now(),
+		},
+	})
+	next = updated.(Model)
+
+	if next.activeExecution != nil {
+		t.Fatalf("expected stale active execution poll to be ignored, got %#v", next.activeExecution)
+	}
+}
+
+func TestShellTailPollIgnoredWhileWaitingForExecutionStart(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.showShellTail = true
+	model.directShellPending = true
+
+	updated, _ := model.Update(shellTailMsg{tail: "old remote scrollback"})
+	next := updated.(Model)
+
+	if next.liveShellTail != "" {
+		t.Fatalf("expected pre-start shell tail poll to be ignored, got %q", next.liveShellTail)
+	}
+}
+
+func TestShellTailPollAcceptedOnceExecutionAttached(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.showShellTail = true
+	model.directShellPending = true
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "find . -name '*.md'",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+	}
+
+	updated, _ := model.Update(shellTailMsg{tail: "fresh command output"})
+	next := updated.(Model)
+
+	if next.liveShellTail != "fresh command output" {
+		t.Fatalf("expected active execution shell tail to update, got %q", next.liveShellTail)
 	}
 }
 

@@ -10,12 +10,26 @@ import (
 	"testing"
 )
 
-func TestSlashProviderOpensActiveProviderSettings(t *testing.T) {
+func settingsFieldIndex(t *testing.T, form *onboardingFormState, key string) int {
+	t.Helper()
+	if form == nil {
+		t.Fatal("expected settings form")
+	}
+	for index, field := range form.fields {
+		if field.key == key {
+			return index
+		}
+	}
+	t.Fatalf("expected field %q", key)
+	return -1
+}
+
+func TestSlashProviderOpensConfigureProvidersSettings(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.mode = AgentMode
 	model.input = "/provider"
 	model = model.WithProviderOnboarding(
-		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5", BaseURL: "https://api.openai.com/v1"},
+		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5", BaseURL: "https://api.openai.com/v1", APIKeyEnvVar: "OPENAI_API_KEY"},
 		func() ([]provider.OnboardingCandidate, error) {
 			return []provider.OnboardingCandidate{
 				{Profile: provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5", BaseURL: "https://api.openai.com/v1"}},
@@ -34,21 +48,21 @@ func TestSlashProviderOpensActiveProviderSettings(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("expected /provider to open synchronously")
 	}
-	if !next.settingsOpen || next.settingsStep != settingsStepActiveProvider {
-		t.Fatalf("expected active provider settings, got open=%t step=%q", next.settingsOpen, next.settingsStep)
+	if !next.settingsOpen || next.settingsStep != settingsStepProviders {
+		t.Fatalf("expected configure providers list, got open=%t step=%q", next.settingsOpen, next.settingsStep)
 	}
 }
 
-func TestSlashModelOpensScopedActiveModelSettings(t *testing.T) {
+func TestSlashModelOpensCurrentProviderDetailAndLoadsModels(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.mode = AgentMode
 	model.input = "/model"
 	model = model.WithProviderOnboarding(
-		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5", BaseURL: "https://api.openai.com/v1"},
+		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5", BaseURL: "https://api.openai.com/v1", APIKeyEnvVar: "OPENAI_API_KEY"},
 		func() ([]provider.OnboardingCandidate, error) {
 			return []provider.OnboardingCandidate{
-				{Profile: provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5", BaseURL: "https://api.openai.com/v1"}},
-				{Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter", Model: "openai/gpt-5", BaseURL: "https://openrouter.ai/api/v1"}},
+				{Profile: provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5", BaseURL: "https://api.openai.com/v1", APIKeyEnvVar: "OPENAI_API_KEY"}},
+				{Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter", Model: "openai/gpt-5", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"}},
 			}, nil
 		},
 		func(profile provider.Profile) ([]provider.ModelOption, error) {
@@ -70,10 +84,10 @@ func TestSlashModelOpensScopedActiveModelSettings(t *testing.T) {
 	updated, cmd := model.submit()
 	next := updated.(Model)
 	if cmd == nil {
-		t.Fatal("expected /model to load models asynchronously")
+		t.Fatal("expected /model to open provider detail and load models")
 	}
-	if !next.settingsOpen || next.settingsStep != settingsStepActiveModels {
-		t.Fatalf("expected active model settings, got open=%t step=%q", next.settingsOpen, next.settingsStep)
+	if !next.settingsOpen || next.settingsStep != settingsStepProviderForm {
+		t.Fatalf("expected provider detail from /model, got open=%t step=%q", next.settingsOpen, next.settingsStep)
 	}
 	loaded := cmd().(settingsModelsLoadedMsg)
 	updated, _ = next.Update(loaded)
@@ -85,6 +99,9 @@ func TestSlashModelOpensScopedActiveModelSettings(t *testing.T) {
 		if choice.profile.Preset != provider.PresetOpenAI {
 			t.Fatalf("expected active provider model scope, got %#v", choice)
 		}
+	}
+	if next.settingsConfig == nil || next.settingsCurrentFieldKey() != "model" {
+		t.Fatalf("expected /model to focus the model field")
 	}
 }
 
@@ -248,7 +265,7 @@ func TestSlashApprovalsDangerousRequiresConfirmation(t *testing.T) {
 	}
 }
 
-func TestProviderOnboardingSelectionSwitchesController(t *testing.T) {
+func TestConfigureProvidersSelectionSwitchesController(t *testing.T) {
 	initialCtrl := &fakeController{}
 	switchedCtrl := &fakeController{}
 	model := NewModel(fakeWorkspace(), initialCtrl).WithProviderOnboarding(
@@ -268,30 +285,34 @@ func TestProviderOnboardingSelectionSwitchesController(t *testing.T) {
 	updated, cmd := model.openOnboarding()
 	model = updated.(Model)
 	if cmd != nil {
-		t.Fatal("expected onboarding open to be synchronous")
+		t.Fatal("expected configure providers to open synchronously")
+	}
+	if model.settingsStep != settingsStepProviders {
+		t.Fatalf("expected provider list, got %q", model.settingsStep)
 	}
 	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = updated.(Model)
 	if cmd == nil {
-		t.Fatal("expected model enumeration command")
+		t.Fatal("expected provider detail model load")
 	}
-	modelsMsg, ok := cmd().(providerModelsLoadedMsg)
+	loaded, ok := cmd().(settingsModelsLoadedMsg)
 	if !ok {
-		t.Fatalf("expected providerModelsLoadedMsg")
+		t.Fatalf("expected settingsModelsLoadedMsg")
 	}
-	updated, _ = model.Update(modelsMsg)
+	updated, _ = model.Update(loaded)
 	model = updated.(Model)
-	model.onboardingModelIdx = 1
-	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model.settingsConfig.fields[1].value = "openai/gpt-5-mini"
+	model.syncSettingsModelFilterFromConfig()
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyF8})
 	model = updated.(Model)
 	if cmd == nil {
-		t.Fatal("expected provider switch command")
+		t.Fatal("expected save+activate command")
 	}
-	switchMsg, ok := cmd().(providerSwitchedMsg)
+	savedMsg, ok := cmd().(settingsProviderSavedMsg)
 	if !ok {
-		t.Fatalf("expected providerSwitchedMsg")
+		t.Fatalf("expected settingsProviderSavedMsg")
 	}
-	updated, _ = model.Update(switchMsg)
+	updated, _ = model.Update(savedMsg)
 	model = updated.(Model)
 	if model.ctrl != switchedCtrl {
 		t.Fatal("expected controller to be replaced after provider switch")
@@ -299,12 +320,59 @@ func TestProviderOnboardingSelectionSwitchesController(t *testing.T) {
 	if model.activeProvider.Preset != provider.PresetOpenRouter || model.activeProvider.Model != "openai/gpt-5-mini" {
 		t.Fatalf("expected selected provider/model, got %#v", model.activeProvider)
 	}
-	if model.onboardingOpen {
-		t.Fatal("expected onboarding view to close after selection")
+	if !model.settingsOpen || model.settingsStep != settingsStepProviders {
+		t.Fatalf("expected settings to remain on provider list, got open=%t step=%q", model.settingsOpen, model.settingsStep)
 	}
 }
 
-func TestManualProviderOnboardingCollectsConfigAndPersists(t *testing.T) {
+func TestOpenOnboardingUsesCollapsedProviderSettingsList(t *testing.T) {
+	active := provider.Profile{Preset: provider.PresetCodexCLI, Name: "Codex CLI", Model: "gpt-5.3-codex", AuthMethod: provider.AuthCodexLogin}
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		active,
+		func() ([]provider.OnboardingCandidate, error) {
+			return []provider.OnboardingCandidate{
+				{Profile: provider.Profile{Preset: provider.PresetCodexCLI, Name: "Codex CLI", Model: "gpt-5-nano-2025-08-07", AuthMethod: provider.AuthCodexLogin}, AuthSource: "codex login", Source: provider.OnboardingCandidateDetected},
+				{Profile: provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1", APIKeyEnvVar: "OPENAI_API_KEY"}, AuthSource: "OPENAI_API_KEY", Source: provider.OnboardingCandidateDetected},
+				{Profile: active, AuthSource: "codex login", Source: provider.OnboardingCandidateStored},
+				{Profile: provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5.3-codex", BaseURL: "https://api.openai.com/v1", APIKeyEnvVar: "os_keyring"}, AuthSource: "os_keyring", Source: provider.OnboardingCandidateStored},
+				{Profile: provider.Profile{Preset: provider.PresetCodexCLI, Name: "Codex CLI", AuthMethod: provider.AuthCodexLogin}, Manual: true, Source: provider.OnboardingCandidateManual},
+			}, nil
+		},
+		nil,
+		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+			return &fakeController{}, profile, nil
+		},
+		func(provider.Profile) error { return nil },
+	)
+
+	updated, cmd := model.openOnboarding()
+	next := updated.(Model)
+	if cmd != nil {
+		t.Fatal("expected provider settings open to be synchronous")
+	}
+	if next.settingsStep != settingsStepProviders {
+		t.Fatalf("expected provider settings list, got %q", next.settingsStep)
+	}
+	if len(next.settingsProviders) != 2 {
+		t.Fatalf("expected one entry per preset, got %#v", next.settingsProviders)
+	}
+	if next.settingsProviders[0].candidate == nil || next.settingsProviders[0].candidate.Profile.Preset != provider.PresetCodexCLI || next.settingsProviders[0].candidate.Profile.Model != "gpt-5.3-codex" {
+		t.Fatalf("expected exact current codex profile to win collapsed entry, got %#v", next.settingsProviders[0])
+	}
+	if next.settingsProviderIdx != 0 {
+		t.Fatalf("expected current provider selection to point at collapsed current profile, got %d", next.settingsProviderIdx)
+	}
+	view := next.renderSettingsProviders(120)
+	joined := strings.Join(view, "\n")
+	if strings.Count(joined, "Codex CLI") != 1 {
+		t.Fatalf("expected deduped Codex entry, got %q", joined)
+	}
+	if !strings.Contains(joined, "Codex CLI (current)") {
+		t.Fatalf("expected exact current label, got %q", joined)
+	}
+}
+
+func TestManualProviderSettingsCollectConfigAndPersist(t *testing.T) {
 	switchedCtrl := &fakeController{}
 	var savedProfile provider.Profile
 	var savedCount int
@@ -327,22 +395,26 @@ func TestManualProviderOnboardingCollectsConfigAndPersists(t *testing.T) {
 	updated, cmd := model.openOnboarding()
 	model = updated.(Model)
 	if cmd != nil {
-		t.Fatal("expected onboarding open to be synchronous")
+		t.Fatal("expected provider settings open to be synchronous")
 	}
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	model = updated.(Model)
-	model.onboardingForm.index = 2
-	model.onboardingForm.fields[2].value = "router-secret"
 	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = updated.(Model)
+	if cmd != nil {
+		t.Fatal("expected manual provider detail to open synchronously")
+	}
+	apiKeyIndex := settingsFieldIndex(t, model.settingsConfig, "api_key")
+	model.settingsConfig.index = apiKeyIndex
+	model.settingsConfig.fields[apiKeyIndex].value = "router-secret"
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyF8})
+	model = updated.(Model)
 	if cmd == nil {
-		t.Fatal("expected provider switch command")
+		t.Fatal("expected save+activate command")
 	}
-	switchMsg, ok := cmd().(providerSwitchedMsg)
+	savedMsg, ok := cmd().(settingsProviderSavedMsg)
 	if !ok {
-		t.Fatalf("expected providerSwitchedMsg")
+		t.Fatalf("expected settingsProviderSavedMsg")
 	}
-	updated, _ = model.Update(switchMsg)
+	updated, _ = model.Update(savedMsg)
 	model = updated.(Model)
 	if model.ctrl != switchedCtrl {
 		t.Fatal("expected controller to switch")
@@ -352,7 +424,7 @@ func TestManualProviderOnboardingCollectsConfigAndPersists(t *testing.T) {
 	}
 }
 
-func TestF10OpensSettingsMenuWithSessionAndProviderEntries(t *testing.T) {
+func TestF10OpensSettingsMenuWithSessionAndConfigureProvidersEntries(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
 		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
 		func() ([]provider.OnboardingCandidate, error) {
@@ -370,30 +442,77 @@ func TestF10OpensSettingsMenuWithSessionAndProviderEntries(t *testing.T) {
 	)
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF10})
 	model = updated.(Model)
-	if !model.settingsOpen || model.settingsStep != settingsStepMenu || len(model.settingsProviders) < 4 {
+	if !model.settingsOpen || model.settingsStep != settingsStepMenu || len(model.settingsProviders) < 3 {
 		t.Fatalf("unexpected settings state")
 	}
 	view := model.View()
-	for _, fragment := range []string{"Session Settings", "Configure Providers", "Change Active Provider", "Select Model"} {
+	for _, fragment := range []string{"Session Settings", "Configure Providers"} {
 		if !strings.Contains(view, fragment) {
 			t.Fatalf("expected settings menu entry %q in view %q", fragment, view)
 		}
 	}
+	for _, fragment := range []string{"Change Active Provider", "Select Model"} {
+		if strings.Contains(view, fragment) {
+			t.Fatalf("did not expect legacy settings menu entry %q in view %q", fragment, view)
+		}
+	}
 }
 
-func TestSettingsActiveModelSelectionSwitchesProvider(t *testing.T) {
+func TestProviderDetailModelSelectionRunsTestFromModelField(t *testing.T) {
+	tested := provider.Profile{}
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openrouter/auto", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"},
+		func() ([]provider.OnboardingCandidate, error) {
+			return []provider.OnboardingCandidate{{Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openrouter/auto", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"}}}, nil
+		},
+		func(profile provider.Profile) ([]provider.ModelOption, error) {
+			return []provider.ModelOption{{ID: "openrouter/auto"}, {ID: "qwen/qwen3.5-9b"}}, nil
+		},
+		nil,
+		func(provider.Profile) error { return nil },
+	).WithProviderTester(func(profile provider.Profile) error {
+		tested = profile
+		return nil
+	})
+
+	updated, cmd := model.openActiveModelSettings()
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected model detail to load provider models")
+	}
+	loaded := cmd().(settingsModelsLoadedMsg)
+	updated, _ = model.Update(loaded)
+	model = updated.(Model)
+	model.settingsConfig.fields[1].value = ""
+	model.syncSettingsModelFilterFromConfig()
+	model.settingsModelIdx = 1
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected enter on model field to trigger provider test")
+	}
+	testMsg := cmd().(settingsProviderTestedMsg)
+	if testMsg.err != nil {
+		t.Fatalf("expected provider test success, got %v", testMsg.err)
+	}
+	if tested.Model != "qwen/qwen3.5-9b" {
+		t.Fatalf("expected highlighted model to be tested, got %#v", tested)
+	}
+}
+
+func TestSettingsProviderListSwitchesProviderFromDetail(t *testing.T) {
 	switchedCtrl := &fakeController{}
 	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
-		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
+		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1", APIKeyEnvVar: "OPENAI_API_KEY"},
 		func() ([]provider.OnboardingCandidate, error) {
 			return []provider.OnboardingCandidate{
-				{Profile: provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"}},
-				{Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openai/gpt-5", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"}},
+				{Profile: provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1", APIKeyEnvVar: "OPENAI_API_KEY"}},
+				{Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openrouter/auto", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"}},
 			}, nil
 		},
 		func(profile provider.Profile) ([]provider.ModelOption, error) {
 			if profile.Preset == provider.PresetOpenRouter {
-				return []provider.ModelOption{{ID: "openrouter/auto"}, {ID: "qwen/qwen3.5-9b"}}, nil
+				return []provider.ModelOption{{ID: "openrouter/auto"}}, nil
 			}
 			return []provider.ModelOption{{ID: profile.Model}}, nil
 		},
@@ -406,67 +525,37 @@ func TestSettingsActiveModelSelectionSwitchesProvider(t *testing.T) {
 	model = updated.(Model)
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
 	model = updated.(Model)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = updated.(Model)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
-	model = updated.(Model)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
-	model = updated.(Model)
+	if model.settingsStep != settingsStepProviders {
+		t.Fatalf("expected provider list, got %q", model.settingsStep)
+	}
+	model.settingsProviderIdx = 1
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected provider detail to load models")
+	}
 	loaded := cmd().(settingsModelsLoadedMsg)
 	updated, _ = model.Update(loaded)
 	model = updated.(Model)
-	model.settingsModelIdx = 3
-	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	model = updated.(Model)
-	switchMsg := cmd().(providerSwitchedMsg)
-	updated, _ = model.Update(switchMsg)
-	model = updated.(Model)
-	if model.ctrl != switchedCtrl || model.activeProvider.Preset != provider.PresetOpenRouter || model.activeProvider.Model != "qwen/qwen3.5-9b" || !model.settingsOpen || model.settingsStep != settingsStepActiveModels {
-		t.Fatalf("unexpected settings switch result %#v", model.activeProvider)
+	if model.settingsStep != settingsStepProviderForm {
+		t.Fatalf("expected provider detail step, got %q", model.settingsStep)
 	}
-}
-
-func TestSettingsActiveProviderSwitchesProviderWithoutChangingModel(t *testing.T) {
-	switchedCtrl := &fakeController{}
-	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
-		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
-		func() ([]provider.OnboardingCandidate, error) {
-			return []provider.OnboardingCandidate{
-				{Profile: provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"}},
-				{Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openrouter/auto", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"}},
-			}, nil
-		},
-		nil,
-		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
-			return switchedCtrl, profile, nil
-		},
-		func(provider.Profile) error { return nil },
-	)
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF10})
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyF8})
 	model = updated.(Model)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
-	model = updated.(Model)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
-	model = updated.(Model)
-	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	model = updated.(Model)
-	if model.settingsStep != settingsStepActiveProvider {
-		t.Fatalf("expected active provider step, got %q", model.settingsStep)
+	if cmd == nil {
+		t.Fatal("expected save+activate from provider detail")
 	}
-	model.settingsProviderIdx = 1
-	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	savedMsg := cmd().(settingsProviderSavedMsg)
+	updated, _ = model.Update(savedMsg)
 	model = updated.(Model)
-	switchMsg := cmd().(providerSwitchedMsg)
-	updated, _ = model.Update(switchMsg)
-	model = updated.(Model)
-	if model.ctrl != switchedCtrl || model.activeProvider.Preset != provider.PresetOpenRouter || model.activeProvider.Model != "openrouter/auto" || !model.settingsOpen || model.settingsStep != settingsStepActiveProvider {
+	if model.ctrl != switchedCtrl || model.activeProvider.Preset != provider.PresetOpenRouter || model.activeProvider.Model != "openrouter/auto" || !model.settingsOpen {
 		t.Fatalf("unexpected active provider switch result %#v", model.activeProvider)
 	}
 }
 
-func TestSettingsActiveProviderEscReturnsToMenu(t *testing.T) {
+func TestSettingsProviderListEscReturnsToMenu(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
 		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
 		func() ([]provider.OnboardingCandidate, error) {
@@ -485,12 +574,10 @@ func TestSettingsActiveProviderEscReturnsToMenu(t *testing.T) {
 	model = updated.(Model)
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
 	model = updated.(Model)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
-	model = updated.(Model)
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = updated.(Model)
-	if model.settingsStep != settingsStepActiveProvider {
-		t.Fatalf("expected active provider step, got %q", model.settingsStep)
+	if model.settingsStep != settingsStepProviders {
+		t.Fatalf("expected provider list step, got %q", model.settingsStep)
 	}
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	model = updated.(Model)
@@ -499,46 +586,221 @@ func TestSettingsActiveProviderEscReturnsToMenu(t *testing.T) {
 	}
 }
 
-func TestSettingsActiveModelFilterNarrowsChoices(t *testing.T) {
+func TestSettingsModelListRequiresF5ForKeyboardNavigation(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
-		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
+		provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openrouter/auto", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"},
 		func() ([]provider.OnboardingCandidate, error) {
-			return []provider.OnboardingCandidate{
-				{Profile: provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"}},
-				{Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openai/gpt-5", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"}},
-			}, nil
+			return []provider.OnboardingCandidate{{Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openrouter/auto", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"}}}, nil
 		},
 		func(profile provider.Profile) ([]provider.ModelOption, error) {
-			if profile.Preset == provider.PresetOpenRouter {
-				return []provider.ModelOption{{ID: "openrouter/auto"}, {ID: "qwen/qwen3.5-9b"}, {ID: "qwen/qwen3.5-32b"}}, nil
-			}
-			return []provider.ModelOption{{ID: profile.Model}}, nil
+			return []provider.ModelOption{{ID: "openrouter/auto"}, {ID: "qwen/qwen3.5-9b"}}, nil
 		},
 		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
 			return &fakeController{}, profile, nil
 		},
 		func(provider.Profile) error { return nil },
 	)
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF10})
-	model = updated.(Model)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
-	model = updated.(Model)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
-	model = updated.(Model)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
-	model = updated.(Model)
-	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := model.openActiveModelSettings()
 	model = updated.(Model)
 	loaded := cmd().(settingsModelsLoadedMsg)
 	updated, _ = model.Update(loaded)
 	model = updated.(Model)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q35")})
+	if !model.isSettingsModelFieldFocused() {
+		t.Fatal("expected model field focus")
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
 	model = updated.(Model)
-	if model.settingsModelFilter != "q35" || len(model.settingsModelCatalog) != 5 || len(model.settingsModels) != 2 || model.settingsModels[0].model.ID != "qwen/qwen3.5-9b" {
+	if model.settingsConfig.index != settingsFieldIndex(t, model.settingsConfig, "thinking") {
+		t.Fatalf("expected Down without F5 to move to next field, got index %d", model.settingsConfig.index)
+	}
+	model.settingsConfig.index = settingsFieldIndex(t, model.settingsConfig, "model")
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRight})
+	model = updated.(Model)
+	if !model.settingsModelListActive {
+		t.Fatal("expected F5 to activate model list")
+	}
+	if !model.settingsModelBrowseAll {
+		t.Fatal("expected F5 browse mode to expand beyond the current exact slug")
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(Model)
+	if model.settingsModelIdx != 1 {
+		t.Fatalf("expected Down in list mode to move highlighted model, got %d", model.settingsModelIdx)
+	}
+}
+
+func TestSettingsModelListRequiresRightArrowAndEscReturnsToFields(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openrouter/auto", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"},
+		func() ([]provider.OnboardingCandidate, error) {
+			return []provider.OnboardingCandidate{{Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openrouter/auto", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"}}}, nil
+		},
+		func(profile provider.Profile) ([]provider.ModelOption, error) {
+			return []provider.ModelOption{{ID: "openrouter/auto"}, {ID: "qwen/qwen3.5-9b"}}, nil
+		},
+		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+			return &fakeController{}, profile, nil
+		},
+		func(provider.Profile) error { return nil },
+	)
+	updated, cmd := model.openActiveModelSettings()
+	model = updated.(Model)
+	loaded := cmd().(settingsModelsLoadedMsg)
+	updated, _ = model.Update(loaded)
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRight})
+	model = updated.(Model)
+	if !model.settingsModelListActive {
+		t.Fatal("expected Right Arrow to enter model list")
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(Model)
+	if model.settingsModelListActive {
+		t.Fatal("expected Esc to leave model list")
+	}
+	if !model.isSettingsModelFieldFocused() {
+		t.Fatal("expected focus to remain on model field after Esc")
+	}
+}
+
+func TestSettingsModelListStaysFocusedAtCatalogEdges(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openrouter/auto", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"},
+		func() ([]provider.OnboardingCandidate, error) {
+			return []provider.OnboardingCandidate{{Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openrouter/auto", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"}}}, nil
+		},
+		func(profile provider.Profile) ([]provider.ModelOption, error) {
+			return []provider.ModelOption{{ID: "openrouter/auto"}, {ID: "qwen/qwen3.5-9b"}}, nil
+		},
+		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+			return &fakeController{}, profile, nil
+		},
+		func(provider.Profile) error { return nil },
+	)
+	updated, cmd := model.openActiveModelSettings()
+	model = updated.(Model)
+	loaded := cmd().(settingsModelsLoadedMsg)
+	updated, _ = model.Update(loaded)
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRight})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
+	model = updated.(Model)
+	if !model.settingsModelListActive || !model.isSettingsModelFieldFocused() || model.settingsConfig.index != settingsFieldIndex(t, model.settingsConfig, "model") {
+		t.Fatalf("expected top-edge Up to keep model list focus, got active=%t index=%d field=%d", model.settingsModelListActive, model.settingsModelIdx, model.settingsConfig.index)
+	}
+	model.settingsModelIdx = len(model.settingsModels) - 1
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(Model)
+	if !model.settingsModelListActive || !model.isSettingsModelFieldFocused() || model.settingsConfig.index != settingsFieldIndex(t, model.settingsConfig, "model") {
+		t.Fatalf("expected bottom-edge Down to keep model list focus, got active=%t index=%d field=%d", model.settingsModelListActive, model.settingsModelIdx, model.settingsConfig.index)
+	}
+}
+
+func TestSettingsModelListEnterReturnsToFieldsAfterSelection(t *testing.T) {
+	var tested provider.Profile
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openrouter/auto", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"},
+		func() ([]provider.OnboardingCandidate, error) {
+			return []provider.OnboardingCandidate{{Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openrouter/auto", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"}}}, nil
+		},
+		func(profile provider.Profile) ([]provider.ModelOption, error) {
+			return []provider.ModelOption{{ID: "openrouter/auto"}, {ID: "qwen/qwen3.5-9b"}}, nil
+		},
+		nil,
+		func(provider.Profile) error { return nil },
+	).WithProviderTester(func(profile provider.Profile) error {
+		tested = profile
+		return nil
+	})
+	updated, cmd := model.openActiveModelSettings()
+	model = updated.(Model)
+	loaded := cmd().(settingsModelsLoadedMsg)
+	updated, _ = model.Update(loaded)
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRight})
+	model = updated.(Model)
+	model.settingsModelIdx = 1
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected Enter in model list to trigger provider test")
+	}
+	if model.settingsModelListActive {
+		t.Fatal("expected Enter to leave model list mode")
+	}
+	if !model.isSettingsModelFieldFocused() {
+		t.Fatal("expected focus to return to model field after Enter")
+	}
+	msg := cmd().(settingsProviderTestedMsg)
+	if msg.err != nil || tested.Model != "qwen/qwen3.5-9b" {
+		t.Fatalf("unexpected tested profile %#v err=%v", tested, msg.err)
+	}
+}
+
+func TestTypingInModelFieldLeavesModelListMode(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openrouter/auto", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"},
+		func() ([]provider.OnboardingCandidate, error) {
+			return []provider.OnboardingCandidate{{Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openrouter/auto", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"}}}, nil
+		},
+		func(profile provider.Profile) ([]provider.ModelOption, error) {
+			return []provider.ModelOption{{ID: "openrouter/auto"}, {ID: "qwen/qwen3.5-9b"}}, nil
+		},
+		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+			return &fakeController{}, profile, nil
+		},
+		func(provider.Profile) error { return nil },
+	)
+	updated, cmd := model.openActiveModelSettings()
+	model = updated.(Model)
+	loaded := cmd().(settingsModelsLoadedMsg)
+	updated, _ = model.Update(loaded)
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRight})
+	model = updated.(Model)
+	if !model.settingsModelListActive {
+		t.Fatal("expected list mode active")
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	model = updated.(Model)
+	if model.settingsModelListActive {
+		t.Fatal("expected typing to leave list mode")
+	}
+	if !strings.Contains(model.settingsModelFilter, "q") {
+		t.Fatalf("expected typed filter update, got %q", model.settingsModelFilter)
+	}
+}
+
+func TestSettingsProviderDetailModelFilterNarrowsChoices(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openrouter/auto", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"},
+		func() ([]provider.OnboardingCandidate, error) {
+			return []provider.OnboardingCandidate{{Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openrouter/auto", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"}}}, nil
+		},
+		func(profile provider.Profile) ([]provider.ModelOption, error) {
+			return []provider.ModelOption{{ID: "openrouter/auto"}, {ID: "qwen/qwen3.5-9b"}, {ID: "qwen/qwen3.5-32b"}}, nil
+		},
+		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+			return &fakeController{}, profile, nil
+		},
+		func(provider.Profile) error { return nil },
+	)
+	updated, cmd := model.openActiveModelSettings()
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected provider detail to load models")
+	}
+	loaded := cmd().(settingsModelsLoadedMsg)
+	updated, _ = model.Update(loaded)
+	model = updated.(Model)
+	model.settingsConfig.fields[1].value = "q35"
+	model.syncSettingsModelFilterFromConfig()
+	if model.settingsModelFilter != "q35" || len(model.settingsModelCatalog) != 3 || len(model.settingsModels) != 2 || model.settingsModels[0].model.ID != "qwen/qwen3.5-9b" {
 		t.Fatalf("unexpected filtered settings state")
 	}
 	view := model.View()
-	if !strings.Contains(view, "Filter: q35  (2 matches)") || strings.Contains(view, "openrouter/auto") {
+	if !strings.Contains(view, "Model filter: q35  (2 matches)") || strings.Contains(view, "openrouter/auto") {
 		t.Fatalf("unexpected filtered view %q", view)
 	}
 }
@@ -559,7 +821,7 @@ func TestSaveSettingsProfileRejectsUnknownModelWhenCatalogIsAvailable(t *testing
 		Profile: provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
 	})
 	form.fields[1].value = "gpt-5-typo"
-	form.fields[2].value = "manual-secret"
+	form.fields[settingsFieldIndex(t, &form, "api_key")].value = "manual-secret"
 	model.settingsConfig = &form
 	model.settingsStep = settingsStepProviderForm
 
@@ -578,11 +840,11 @@ func TestSaveSettingsProfileRejectsUnknownModelWhenCatalogIsAvailable(t *testing
 	}
 }
 
-func TestSettingsActiveModelEscClearsFilterBeforeClosing(t *testing.T) {
+func TestSettingsProviderDetailEscReturnsToMenu(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
-		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
+		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1", APIKeyEnvVar: "OPENAI_API_KEY"},
 		func() ([]provider.OnboardingCandidate, error) {
-			return []provider.OnboardingCandidate{{Profile: provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"}}}, nil
+			return []provider.OnboardingCandidate{{Profile: provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1", APIKeyEnvVar: "OPENAI_API_KEY"}}}, nil
 		},
 		func(profile provider.Profile) ([]provider.ModelOption, error) {
 			return []provider.ModelOption{{ID: profile.Model}}, nil
@@ -592,38 +854,25 @@ func TestSettingsActiveModelEscClearsFilterBeforeClosing(t *testing.T) {
 		},
 		func(provider.Profile) error { return nil },
 	)
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF10})
-	model = updated.(Model)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
-	model = updated.(Model)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
-	model = updated.(Model)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
-	model = updated.(Model)
-	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := model.openActiveModelSettings()
 	model = updated.(Model)
 	loaded := cmd().(settingsModelsLoadedMsg)
 	updated, _ = model.Update(loaded)
 	model = updated.(Model)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("nano")})
-	model = updated.(Model)
+	model.settingsConfig.fields[1].value = "nano"
+	model.syncSettingsModelFilterFromConfig()
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	model = updated.(Model)
-	if model.settingsStep != settingsStepActiveModels || model.settingsModelFilter != "" {
-		t.Fatalf("expected esc to clear filter first")
-	}
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	model = updated.(Model)
-	if model.settingsStep != settingsStepMenu {
-		t.Fatalf("expected second esc to return to menu")
+	if model.settingsStep != settingsStepProviders {
+		t.Fatalf("expected esc to return to provider list, got %q", model.settingsStep)
 	}
 }
 
-func TestSettingsActiveModelInfoToggleShowsSelectedDetailsOnly(t *testing.T) {
+func TestSettingsProviderDetailModelInfoToggleShowsSelectedDetailsOnly(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
-		provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "allenai/olmo-3-7b-think", BaseURL: "https://openrouter.ai/api/v1"},
+		provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "allenai/olmo-3-7b-think", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"},
 		func() ([]provider.OnboardingCandidate, error) {
-			return []provider.OnboardingCandidate{{Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "allenai/olmo-3-7b-think", BaseURL: "https://openrouter.ai/api/v1"}}}, nil
+			return []provider.OnboardingCandidate{{Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "allenai/olmo-3-7b-think", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"}}}, nil
 		},
 		func(profile provider.Profile) ([]provider.ModelOption, error) {
 			return []provider.ModelOption{
@@ -636,32 +885,28 @@ func TestSettingsActiveModelInfoToggleShowsSelectedDetailsOnly(t *testing.T) {
 		},
 		func(provider.Profile) error { return nil },
 	)
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF10})
-	model = updated.(Model)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
-	model = updated.(Model)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
-	model = updated.(Model)
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
-	model = updated.(Model)
-	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := model.openActiveModelSettings()
 	model = updated.(Model)
 	loaded := cmd().(settingsModelsLoadedMsg)
 	updated, _ = model.Update(loaded)
 	model = updated.(Model)
+	model.width = 140
+	model.height = 40
 	view := model.View()
-	if !strings.Contains(view, "OpenRouter / allenai/olmo-3-7b-think") {
+	if !strings.Contains(view, "Current: OpenRouter Responses (openrouter) / allenai/olmo-3-7b-think") {
 		t.Fatalf("expected provider label next to model slug, got %q", view)
 	}
-	if !strings.Contains(view, "AllenAI: Olmo 3 7B Think  context 65536  max out 65536  pricing p=0.00000012 c=0.0000002") || !strings.Contains(view, "mode") || !strings.Contains(view, "text->text") || strings.Contains(view, "Long form provider description") || strings.Contains(view, "params reasoning,structured_outputs") {
+	if !strings.Contains(view, "AllenAI: Olmo 3 7B Think  context 65536  max out 65536  pricing p=0.00000012 c=0.0000002") || !strings.Contains(view, "mode") || !strings.Contains(view, "text->text") || strings.Contains(view, "Long form provider description") {
 		t.Fatalf("unexpected default model info view %q", view)
 	}
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("I")})
 	model = updated.(Model)
 	view = model.View()
-	if !model.settingsModelInfo || !strings.Contains(view, "Long form provider description") || !strings.Contains(view, "params reasoning,structured_outputs") {
+	if !model.settingsModelInfo || !strings.Contains(view, "Long form provider description") {
 		t.Fatalf("expected expanded model info, got %q", view)
 	}
+	model.settingsConfig.fields[1].value = ""
+	model.syncSettingsModelFilterFromConfig()
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
 	model = updated.(Model)
 	view = model.View()
@@ -687,7 +932,7 @@ func TestSaveSettingsProfileRefreshesCurrentProviderEvenWhenPersistenceFails(t *
 	form := buildOnboardingForm(provider.OnboardingCandidate{
 		Profile: provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
 	})
-	form.fields[2].value = "manual-secret"
+	form.fields[settingsFieldIndex(t, &form, "api_key")].value = "manual-secret"
 	model.settingsConfig = &form
 	model.settingsStep = settingsStepProviderForm
 
@@ -792,7 +1037,7 @@ func TestF7TestsProviderFromSettingsForm(t *testing.T) {
 			APIKeyEnvVar: "OPENROUTER_API_KEY",
 		},
 	})
-	form.fields[2].value = "router-secret"
+	form.fields[settingsFieldIndex(t, &form, "api_key")].value = "router-secret"
 	model.settingsConfig = &form
 
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyF7})
@@ -810,10 +1055,10 @@ func TestF7TestsProviderFromSettingsForm(t *testing.T) {
 	}
 	updated, _ = model.Update(testMsg)
 	model = updated.(Model)
-	if tested.Preset != provider.PresetOpenRouter || tested.APIKey != "router-secret" {
+	if tested.Preset != provider.PresetOpenRouter || tested.APIKey != "router-secret" || tested.Thinking != "on" || tested.ReasoningEffort != "medium" {
 		t.Fatalf("expected tested provider profile, got %#v", tested)
 	}
-	if model.settingsBanner != "Provider test succeeded for OpenRouter Responses." {
+	if model.settingsBanner != "Provider test succeeded for OpenRouter Responses (https://openrouter.ai/api/v1, auth OS keyring)." {
 		t.Fatalf("expected provider test success banner, got %q", model.settingsBanner)
 	}
 }

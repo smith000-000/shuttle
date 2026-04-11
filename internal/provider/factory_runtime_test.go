@@ -1,22 +1,12 @@
 package provider
 
 import (
-	"context"
 	"testing"
 
 	"aiterm/internal/config"
-	"aiterm/internal/controller"
 )
 
-func TestNewFromConfigWrapsRuntimeForMockProvider(t *testing.T) {
-	previous := runtimeLookPath
-	runtimeLookPath = func(file string) (string, error) {
-		return "/usr/bin/" + file, nil
-	}
-	t.Cleanup(func() {
-		runtimeLookPath = previous
-	})
-
+func TestNewFromConfigLeavesRuntimeSelectionToRuntimeLayer(t *testing.T) {
 	agent, profile, err := NewFromConfig(config.Config{
 		ProviderType: "mock",
 		RuntimeType:  RuntimePi,
@@ -27,11 +17,7 @@ func TestNewFromConfigWrapsRuntimeForMockProvider(t *testing.T) {
 	if profile.Preset != PresetMock {
 		t.Fatalf("expected mock profile, got %s", profile.Preset)
 	}
-	response, err := agent.Respond(context.Background(), controller.AgentInput{Prompt: "hello"})
-	if err != nil {
-		t.Fatalf("Respond() error = %v", err)
-	}
-	if response.Message == "" || response.ModelInfo == nil {
-		t.Fatalf("expected wrapped response metadata, got %#v", response)
+	if agent == nil {
+		t.Fatal("expected provider factory to return a base model agent")
 	}
 }

@@ -182,6 +182,7 @@ type stubContextReader struct {
 	snapshot       string
 	context        shell.PromptContext
 	contexts       []shell.PromptContext
+	observed       shell.ObservedShellState
 	err            error
 	resolvedPaneID string
 	paneIDs        []string
@@ -198,6 +199,10 @@ func (s *stubContextReader) CaptureRecentOutput(_ context.Context, paneID string
 	}
 
 	return s.output, nil
+}
+
+func (s *stubContextReader) CaptureRecentOutputDisplay(_ context.Context, paneID string, _ int) (string, error) {
+	return s.CaptureRecentOutput(context.Background(), paneID, 0)
 }
 
 func (s *stubContextReader) CaptureShellContext(context.Context, string) (shell.PromptContext, error) {
@@ -220,6 +225,24 @@ func (s *stubContextReader) CaptureShellContext(context.Context, string) (shell.
 		User:      "localuser",
 		Host:      "workstation",
 		Directory: "/workspace/project",
+	}, nil
+}
+
+func (s *stubContextReader) CaptureObservedShellState(ctx context.Context, paneID string) (shell.ObservedShellState, error) {
+	if s.err != nil {
+		return shell.ObservedShellState{}, s.err
+	}
+	if s.observed.PromptContext.PromptLine() != "" || s.observed.Location.Kind != "" || s.observed.HasPromptContext || s.observed.HasSemanticState || strings.TrimSpace(s.observed.CurrentPaneCommand) != "" || strings.TrimSpace(s.observed.SemanticSource) != "" {
+		return s.observed, nil
+	}
+	context, err := s.CaptureShellContext(ctx, paneID)
+	if err != nil {
+		return shell.ObservedShellState{}, err
+	}
+	return shell.ObservedShellState{
+		PromptContext:    context,
+		HasPromptContext: context.PromptLine() != "" || context.LastExitCode != nil,
+		Location:         shell.InferShellLocation(context, ""),
 	}, nil
 }
 

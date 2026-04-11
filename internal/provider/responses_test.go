@@ -242,6 +242,12 @@ func TestStructuredResponsesRequestIncludesSerialContinuationGuidance(t *testing
 	if !strings.Contains(systemPrompt, "ordered multi-step workflow") || !strings.Contains(systemPrompt, "do not stop at diagnosis") {
 		t.Fatalf("expected workflow checklist and unresolved-inspection guidance in system prompt, got %q", systemPrompt)
 	}
+	if !strings.Contains(systemPrompt, "\"plan_step_statuses\"") || !strings.Contains(systemPrompt, "always return \"plan_step_statuses\"") {
+		t.Fatalf("expected active plan status-update guidance in system prompt, got %q", systemPrompt)
+	}
+	if !strings.Contains(systemPrompt, "xinput test") || !strings.Contains(systemPrompt, "bounded form using \"timeout\"") {
+		t.Fatalf("expected monitor timeout guidance in system prompt, got %q", systemPrompt)
+	}
 	if !strings.Contains(systemPrompt, "git-style unified diff text") || !strings.Contains(systemPrompt, "Do not emit the non-standard \"*** Begin Patch\" format.") {
 		t.Fatalf("expected patch format guidance in system prompt, got %q", systemPrompt)
 	}
@@ -259,6 +265,24 @@ func TestStructuredResponsesRequestIncludesSerialContinuationGuidance(t *testing
 	}
 	if !strings.Contains(systemPrompt, "approval_mode=dangerous") || !strings.Contains(systemPrompt, "auto-apply agent patches without confirmation") {
 		t.Fatalf("expected approval dangerous-mode guidance in system prompt, got %q", systemPrompt)
+	}
+}
+
+func TestToAgentResponseParsesPlanStepStatuses(t *testing.T) {
+	agent := &ResponsesAgent{}
+
+	response, err := agent.toAgentResponse(shuttleStructuredResponse{
+		Message:          "Plan status updated.",
+		PlanStepStatuses: []string{"done", "in_progress", "pending"},
+	})
+	if err != nil {
+		t.Fatalf("toAgentResponse() error = %v", err)
+	}
+	if len(response.PlanStatuses) != 3 {
+		t.Fatalf("expected three plan statuses, got %#v", response.PlanStatuses)
+	}
+	if response.PlanStatuses[0] != controller.PlanStepDone || response.PlanStatuses[1] != controller.PlanStepInProgress || response.PlanStatuses[2] != controller.PlanStepPending {
+		t.Fatalf("unexpected plan statuses %#v", response.PlanStatuses)
 	}
 }
 
@@ -486,5 +510,41 @@ func jsonResponse(statusCode int, body string) *http.Response {
 		Status:     http.StatusText(statusCode),
 		Header:     make(http.Header),
 		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+func TestResponsesAgentIncludesConfiguredReasoningEffort(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("ReadAll() error = %v", err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("Unmarshal() error = %v", err)
+		}
+		reasoning, ok := payload["reasoning"].(map[string]any)
+		if !ok || reasoning["effort"] != "high" {
+			t.Fatalf("expected reasoning.effort=high, got %#v", payload["reasoning"])
+		}
+		return jsonResponse(http.StatusOK, `{"model":"gpt-5.4","output_text":"{\"message\":\"ok\"}"}`), nil
+	})}
+
+	agent, err := NewResponsesAgent(Profile{
+		BackendFamily:   BackendResponsesHTTP,
+		Preset:          PresetOpenAI,
+		AuthMethod:      AuthAPIKey,
+		BaseURL:         "https://provider.test/v1",
+		Model:           "gpt-5.4",
+		Thinking:        string(ThinkingOn),
+		ReasoningEffort: string(ReasoningEffortHigh),
+		APIKey:          "test-key",
+		APIKeyEnvVar:    "OPENAI_API_KEY",
+	}, client)
+	if err != nil {
+		t.Fatalf("NewResponsesAgent() error = %v", err)
+	}
+	if _, err := agent.Respond(context.Background(), controller.AgentInput{Prompt: "hello"}); err != nil {
+		t.Fatalf("Respond() error = %v", err)
 	}
 }

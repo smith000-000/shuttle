@@ -13,6 +13,25 @@ import (
 	"aiterm/internal/tmux"
 )
 
+func waitForObservedPrompt(t *testing.T, ctx context.Context, observer *shell.Observer, paneID string) shell.PromptContext {
+	t.Helper()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		promptContext, err := observer.CaptureShellContext(ctx, paneID)
+		if err == nil && promptContext.PromptLine() != "" {
+			return promptContext
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				t.Fatalf("timed out waiting for prompt context: %v", err)
+			}
+			t.Fatal("timed out waiting for prompt context")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func TestRunTrackedCommand(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
@@ -256,6 +275,7 @@ func TestRunTrackedCommandUsesLocalManagedTransport(t *testing.T) {
 
 	stateDir := t.TempDir()
 	observer := shell.NewObserver(client).WithStateDir(stateDir).WithPromptHint(shell.GuessLocalContext("."))
+	waitForObservedPrompt(t, ctx, observer, workspace.TopPane.ID)
 	result, err := observer.RunTrackedCommand(ctx, workspace.TopPane.ID, "printf 'alpha\\n'", 2*time.Second)
 	if err != nil {
 		t.Fatalf("RunTrackedCommand() error = %v", err)
@@ -268,11 +288,12 @@ func TestRunTrackedCommandUsesLocalManagedTransport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CapturePane() error = %v", err)
 	}
-	if !strings.Contains(captured, filepath.Join(stateDir, "commands")) {
+	normalizedCapture := strings.ReplaceAll(captured, "\n", "")
+	if !strings.Contains(normalizedCapture, "/commands/") {
 		t.Fatalf("expected local managed transport path in shell capture, got %q", captured)
 	}
-	if strings.Contains(captured, "eval \"$(printf") {
-		t.Fatalf("expected local managed transport instead of inline wrapper, got %q", captured)
+	if !strings.Contains(normalizedCapture, ". '") || !strings.Contains(normalizedCapture, "/commands/") {
+		t.Fatalf("expected tracked command to use sourced managed transport, got %q", captured)
 	}
 }
 

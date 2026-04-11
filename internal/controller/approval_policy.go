@@ -148,7 +148,7 @@ func commandQualifiesForAutoRun(session SessionContext, command string) bool {
 	if command == "" {
 		return false
 	}
-	if session.CurrentShell != nil && session.CurrentShell.Remote {
+	if isRemoteShellLocation(session.CurrentShellLocation, session.CurrentShell) {
 		return false
 	}
 	if hasDisallowedShellSyntax(command) {

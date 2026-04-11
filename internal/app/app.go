@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"aiterm/internal/agentruntime"
 	"aiterm/internal/config"
 	"aiterm/internal/controller"
 	"aiterm/internal/logging"
@@ -146,15 +147,17 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			"auth_source", providerLogAuthSource(profile),
 		)
 		ctrl := controller.New(agent, observer, observer, controller.SessionContext{
-			SessionName:          workspace.SessionName,
-			BottomPaneID:         workspace.BottomPane.ID,
-			TrackedShell:         controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
-			WorkingDirectory:     runtimeCfg.StartDir,
-			LocalWorkspaceRoot:   runtimeCfg.StartDir,
-			StateDir:             runtimeCfg.StateDir,
-			UserShellHistoryFile: historyFile,
-			CurrentShell:         initialShellContextPtr(initialShellContext),
+			SessionName:           workspace.SessionName,
+			BottomPaneID:          workspace.BottomPane.ID,
+			TrackedShell:          controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
+			WorkingDirectory:      runtimeCfg.StartDir,
+			LocalWorkingDirectory: runtimeCfg.StartDir,
+			LocalWorkspaceRoot:    runtimeCfg.StartDir,
+			StateDir:              runtimeCfg.StateDir,
+			UserShellHistoryFile:  historyFile,
+			CurrentShell:          initialShellContextPtr(initialShellContext),
 		})
+		ctrl.SetRuntime(buildConfiguredRuntime(runtimeCfg, profile))
 		agentCtx, cancel := context.WithTimeout(ctx, agentPromptTimeout)
 		defer cancel()
 
@@ -178,6 +181,10 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			logging.TraceError("app.bind_take_control.error", err, "key", tui.TakeControlKey)
 			return Result{}, fmt.Errorf("configure take-control key: %w", err)
 		}
+		if err := client.BindNoPrefixKey(ctx, tui.ExecutionTakeControlKey, "detach-client"); err != nil {
+			logging.TraceError("app.bind_take_control.error", err, "key", tui.ExecutionTakeControlKey)
+			return Result{}, fmt.Errorf("configure execution take-control key: %w", err)
+		}
 		initialShellContext := initialPromptContext(ctx, observer, workspace.TopPane.ID, runtimeCfg.StartDir)
 		observer.WithPromptHint(initialShellContext)
 		if err := observer.EnsureLocalShellIntegration(ctx, workspace.TopPane.ID); err != nil {
@@ -198,31 +205,36 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			"auth_source", providerLogAuthSource(profile),
 		)
 		ctrl := controller.New(agent, observer, observer, controller.SessionContext{
-			SessionName:          workspace.SessionName,
-			BottomPaneID:         workspace.BottomPane.ID,
-			TrackedShell:         controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
-			WorkingDirectory:     runtimeCfg.StartDir,
-			LocalWorkspaceRoot:   runtimeCfg.StartDir,
-			StateDir:             runtimeCfg.StateDir,
-			UserShellHistoryFile: historyFile,
-			CurrentShell:         initialShellContextPtr(initialShellContext),
+			SessionName:           workspace.SessionName,
+			BottomPaneID:          workspace.BottomPane.ID,
+			TrackedShell:          controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
+			WorkingDirectory:      runtimeCfg.StartDir,
+			LocalWorkingDirectory: runtimeCfg.StartDir,
+			LocalWorkspaceRoot:    runtimeCfg.StartDir,
+			StateDir:              runtimeCfg.StateDir,
+			UserShellHistoryFile:  historyFile,
+			CurrentShell:          initialShellContextPtr(initialShellContext),
 		})
+		ctrl.SetRuntime(buildConfiguredRuntime(runtimeCfg, profile))
 		switchProvider := func(profile provider.Profile, shellContext *shell.PromptContext) (controller.Controller, provider.Profile, error) {
 			agent, err := provider.NewFromProfile(profile, provider.FactoryOptions{})
 			if err != nil {
 				return nil, provider.Profile{}, err
 			}
 
-			return controller.New(agent, observer, observer, controller.SessionContext{
-				SessionName:          workspace.SessionName,
-				BottomPaneID:         workspace.BottomPane.ID,
-				TrackedShell:         controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
-				WorkingDirectory:     runtimeCfg.StartDir,
-				LocalWorkspaceRoot:   runtimeCfg.StartDir,
-				StateDir:             runtimeCfg.StateDir,
-				UserShellHistoryFile: historyFile,
-				CurrentShell:         shellContext,
-			}), profile, nil
+			ctrl := controller.New(agent, observer, observer, controller.SessionContext{
+				SessionName:           workspace.SessionName,
+				BottomPaneID:          workspace.BottomPane.ID,
+				TrackedShell:          controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
+				WorkingDirectory:      runtimeCfg.StartDir,
+				LocalWorkingDirectory: runtimeCfg.StartDir,
+				LocalWorkspaceRoot:    runtimeCfg.StartDir,
+				StateDir:              runtimeCfg.StateDir,
+				UserShellHistoryFile:  historyFile,
+				CurrentShell:          shellContext,
+			})
+			ctrl.SetRuntime(buildConfiguredRuntime(runtimeCfg, profile))
+			return ctrl, profile, nil
 		}
 		model := tui.NewModel(workspace, ctrl).
 			WithShellContext(initialShellContext).
@@ -323,6 +335,15 @@ func providerLogAuthSource(profile provider.Profile) string {
 		return "none"
 	}
 	return string(profile.AuthMethod)
+}
+
+func buildConfiguredRuntime(cfg config.Config, profile provider.Profile) agentruntime.Runtime {
+	return agentruntime.WrapRuntime(agentruntime.NewBuiltin(), agentruntime.RuntimeMetadata{
+		Type:           cfg.RuntimeType,
+		Command:        cfg.RuntimeCommand,
+		ProviderPreset: string(profile.Preset),
+		Model:          strings.TrimSpace(profile.Model),
+	})
 }
 
 func initialPromptContext(ctx context.Context, observer *shell.Observer, paneID string, startDir string) shell.PromptContext {

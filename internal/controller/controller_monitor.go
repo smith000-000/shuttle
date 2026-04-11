@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"aiterm/internal/agentruntime"
 	"aiterm/internal/logging"
 	"aiterm/internal/shell"
 )
@@ -84,7 +85,7 @@ func (c *LocalController) attachForegroundExecution(ctx context.Context) ([]Tran
 }
 
 func (c *LocalController) CheckActiveExecution(ctx context.Context) ([]TranscriptEvent, error) {
-	if c.agent == nil {
+	if c.runtimeHost == nil {
 		return nil, nil
 	}
 
@@ -133,24 +134,19 @@ func (c *LocalController) CheckActiveExecution(ctx context.Context) ([]Transcrip
 	}
 	c.task.RecoverySnapshot = recoverySnapshot
 	c.syncTaskExecutionViewsLocked()
-	session = c.session
 	task = c.task
 	c.mu.Unlock()
-	if strings.TrimSpace(recentOutput) != "" {
-		session.RecentShellOutput = recentOutput
-	}
 
-	response, err := c.agent.Respond(ctx, AgentInput{
-		Session: session,
-		Task:    task,
-		Prompt:  buildActiveExecutionCheckInPrompt(task.CurrentExecution),
+	outcome, err := c.runtime.Handle(ctx, c.runtimeHost, agentruntime.Request{
+		Kind:   agentruntime.RequestExecutionCheckIn,
+		Prompt: buildActiveExecutionCheckInPrompt(task.CurrentExecution),
 	})
 	if err != nil {
 		logging.TraceError("controller.check_active_execution.error", err)
 		return nil, err
 	}
 
-	if strings.TrimSpace(response.Message) == "" {
+	if strings.TrimSpace(outcome.Message) == "" {
 		return prependTranscriptEvent(nil, trackedShellEvent), nil
 	}
 
@@ -160,31 +156,31 @@ func (c *LocalController) CheckActiveExecution(ctx context.Context) ([]Transcrip
 		return prependTranscriptEvent(nil, trackedShellEvent), nil
 	}
 
-	event := c.newEvent(EventAgentMessage, TextPayload{Text: response.Message})
+	event := c.newEvent(EventAgentMessage, TextPayload{Text: outcome.Message})
 	c.appendEvents(event)
 	logging.Trace(
 		"controller.check_active_execution.complete",
 		"event_kinds", eventKinds([]TranscriptEvent{event}),
-		"message_preview", logging.Preview(response.Message, 600),
+		"message_preview", logging.Preview(outcome.Message, 600),
 	)
 	return prependTranscriptEvent([]TranscriptEvent{event}, trackedShellEvent), nil
 }
 
 func buildActiveExecutionCheckInPrompt(execution *CommandExecution) string {
+	basePrompt := activeExecutionCheckInPrompt
 	if execution == nil {
-		return activeExecutionCheckInPrompt
+		return appendPromptSuffix(basePrompt, stateAuthorityPromptSuffix)
 	}
 
 	switch execution.State {
 	case CommandExecutionAwaitingInput:
-		return awaitingInputCheckInPrompt
+		basePrompt = awaitingInputCheckInPrompt
 	case CommandExecutionInteractiveFullscreen, CommandExecutionHandoffActive:
-		return fullscreenCheckInPrompt
+		basePrompt = fullscreenCheckInPrompt
 	case CommandExecutionLost:
-		return lostTrackingCheckInPrompt
-	default:
-		return activeExecutionCheckInPrompt
+		basePrompt = lostTrackingCheckInPrompt
 	}
+	return appendPromptSuffix(basePrompt, stateAuthorityPromptSuffix)
 }
 
 func (c *LocalController) runTrackedCommand(ctx context.Context, executionID string, command string) (shell.TrackedExecution, error) {
@@ -237,6 +233,17 @@ func (c *LocalController) awaitAttachedMonitor(executionID string, monitor shell
 	if strings.TrimSpace(result.Captured) != "" {
 		execution.LatestOutputTail = result.Captured
 	}
+	if strings.TrimSpace(result.DisplayCaptured) != "" {
+		execution.LatestDisplayTail = result.DisplayCaptured
+	}
+	finalOutput := finalExecutionSummaryOutput(result, execution)
+	finalDisplayOutput := finalExecutionDisplayOutput(result, execution)
+	if strings.TrimSpace(finalOutput) != "" {
+		execution.LatestOutputTail = finalOutput
+	}
+	if strings.TrimSpace(finalDisplayOutput) != "" {
+		execution.LatestDisplayTail = finalDisplayOutput
+	}
 	if result.ExitCode != 0 || result.State == shell.MonitorStateCompleted || result.State == shell.MonitorStateCanceled {
 		exitCode := result.ExitCode
 		execution.ExitCode = &exitCode
@@ -257,7 +264,8 @@ func (c *LocalController) awaitAttachedMonitor(executionID string, monitor shell
 		SemanticShell:  result.SemanticShell,
 		SemanticSource: result.SemanticSource,
 		ExitCode:       result.ExitCode,
-		Summary:        result.Captured,
+		Summary:        finalOutput,
+		DisplaySummary: finalDisplayOutput,
 	}
 	if result.ShellContext.PromptLine() != "" {
 		contextCopy := result.ShellContext
@@ -331,6 +339,9 @@ func (c *LocalController) applyMonitorSnapshotLocked(executionID string, snapsho
 
 	if strings.TrimSpace(snapshot.LatestOutputTail) != "" {
 		execution.LatestOutputTail = snapshot.LatestOutputTail
+	}
+	if strings.TrimSpace(snapshot.LatestDisplayTail) != "" {
+		execution.LatestDisplayTail = snapshot.LatestDisplayTail
 	}
 	if strings.TrimSpace(snapshot.ForegroundCommand) != "" {
 		execution.ForegroundCommand = snapshot.ForegroundCommand

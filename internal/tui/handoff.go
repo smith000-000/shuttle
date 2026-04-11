@@ -17,6 +17,7 @@ import (
 )
 
 const TakeControlKey = "F2"
+const ExecutionTakeControlKey = "F3"
 
 type takeControlConfig struct {
 	SocketName    string

@@ -24,23 +24,14 @@ func (c *LocalController) ContinueAfterPatchApply(ctx context.Context) ([]Transc
 		c.mu.Unlock()
 		return []TranscriptEvent{errEvent}, nil
 	}
-	var planEvent *TranscriptEvent
 	prompt := continueAfterPatchFailurePrompt(lastResult.Target, lastResult.TargetLabel, lastResult.Error, c.task.PatchRepairCount > 1)
 	if lastResult.Applied {
-		planEvent = c.advanceActivePlanLocked()
-		if planEvent != nil {
-			c.appendEvents(*planEvent)
-		}
 		prompt = continueAfterPatchApplyPrompt(lastResult.Target, lastResult.TargetLabel)
 	}
 	c.mu.Unlock()
 
 	logging.Trace("controller.continue_after_patch_apply")
-	events, err := c.submitAgentTurn(ctx, "", prompt, nil, false)
-	if planEvent != nil {
-		events = append([]TranscriptEvent{*planEvent}, events...)
-	}
-	return events, err
+	return c.submitAgentTurn(ctx, "", prompt, nil, false)
 }
 
 func (c *LocalController) applyPatch(ctx context.Context, patch string, target PatchTarget) ([]TranscriptEvent, error) {

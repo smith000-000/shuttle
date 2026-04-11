@@ -44,6 +44,7 @@ type MonitorSnapshot struct {
 	StartedAt         time.Time
 	CompletedAt       *time.Time
 	LatestOutputTail  string
+	LatestDisplayTail string
 	ForegroundCommand string
 	SemanticShell     bool
 	SemanticSource    string
@@ -112,13 +113,14 @@ func (m *trackedCommandMonitor) setState(state MonitorState) {
 	m.publish(snapshot)
 }
 
-func (m *trackedCommandMonitor) updateTail(tail string) {
+func (m *trackedCommandMonitor) updateTail(tail string, displayTail string) {
 	m.mu.Lock()
-	if m.snapshot.LatestOutputTail == tail {
+	if m.snapshot.LatestOutputTail == tail && m.snapshot.LatestDisplayTail == displayTail {
 		m.mu.Unlock()
 		return
 	}
 	m.snapshot.LatestOutputTail = tail
+	m.snapshot.LatestDisplayTail = displayTail
 	snapshot := m.snapshot
 	m.mu.Unlock()
 	m.publish(snapshot)
@@ -175,6 +177,7 @@ func (m *trackedCommandMonitor) finish(result TrackedExecution, err error, state
 	m.snapshot.State = state
 	m.snapshot.CompletedAt = &completedAt
 	m.snapshot.LatestOutputTail = result.Captured
+	m.snapshot.LatestDisplayTail = result.DisplayCaptured
 	m.snapshot.SemanticShell = result.SemanticShell
 	m.snapshot.SemanticSource = result.SemanticSource
 	if result.ShellContext.PromptLine() != "" {
@@ -210,6 +213,21 @@ func monitorTail(body string, command string) string {
 	}
 
 	lines := splitLines(cleanBody)
+	if len(lines) > 40 {
+		lines = lines[len(lines)-40:]
+	}
+
+	return stringsJoin(lines, "\n")
+}
+
+func monitorDisplayTail(body string, command string) string {
+	displayBody := sanitizeDisplayBody(body)
+	displayBody = stripEchoedCommand(displayBody, command)
+	if displayBody == "" {
+		return ""
+	}
+
+	lines := splitLines(displayBody)
 	if len(lines) > 40 {
 		lines = lines[len(lines)-40:]
 	}

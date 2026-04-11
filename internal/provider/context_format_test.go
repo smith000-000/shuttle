@@ -61,8 +61,11 @@ func TestBuildTurnContextDeduplicatesRepeatedShellOutput(t *testing.T) {
 	if !strings.Contains(context, "Recent shell output:\n") {
 		t.Fatalf("expected recent shell output section, got %q", context)
 	}
-	if !strings.Contains(context, "tracked_session=shuttle-test") || !strings.Contains(context, "tracked_pane=%9") {
+	if !strings.Contains(context, "tracked_session=shuttle-test") {
 		t.Fatalf("expected tracked shell metadata, got %q", context)
+	}
+	if strings.Contains(context, "tracked_pane=%9") {
+		t.Fatalf("did not expect tracked pane id in agent context, got %q", context)
 	}
 	if !strings.Contains(context, "Last command result:\n") {
 		t.Fatalf("expected last command result section, got %q", context)
@@ -145,8 +148,11 @@ func TestBuildTurnContextIncludesExecutionMetadata(t *testing.T) {
 	if !strings.Contains(context, "elapsed_seconds=") {
 		t.Fatalf("expected elapsed_seconds metadata, got %q", context)
 	}
-	if !strings.Contains(context, "execution_session=shuttle-test") || !strings.Contains(context, "execution_pane=%9") {
+	if !strings.Contains(context, "execution_session=shuttle-test") {
 		t.Fatalf("expected execution target metadata, got %q", context)
+	}
+	if strings.Contains(context, "execution_pane=%9") {
+		t.Fatalf("did not expect execution pane id in agent context, got %q", context)
 	}
 	if !strings.Contains(context, "prompt_before=localuser@workstation ~/repo %") {
 		t.Fatalf("expected prompt_before metadata, got %q", context)
@@ -230,6 +236,12 @@ func TestBuildTurnContextIncludesWorkspaceRootAndPatchResult(t *testing.T) {
 	}
 	if !strings.Contains(context, "approval_mode=auto") {
 		t.Fatalf("expected approval mode, got %q", context)
+	}
+	if !strings.Contains(context, "shell_location=remote") {
+		t.Fatalf("expected shell location, got %q", context)
+	}
+	if !strings.Contains(context, "cwd_source=prompt") || !strings.Contains(context, "cwd_confidence=medium") || !strings.Contains(context, "cwd_authoritative=false") {
+		t.Fatalf("expected cwd authority metadata, got %q", context)
 	}
 	if !strings.Contains(context, "remote_patch_root=/tmp/remote") {
 		t.Fatalf("expected remote patch root, got %q", context)

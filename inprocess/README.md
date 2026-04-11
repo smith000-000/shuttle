@@ -2,7 +2,7 @@
 
 Shuttle is a tmux-backed AI terminal assistant.
 
-It runs a persistent real shell in the top tmux pane and a Bubble Tea TUI in the bottom pane. Agent-approved commands can also run in owned tmux execution panes for local work. The persistent shell remains the continuity surface for `$>`, cwd, recent manual shell activity, and remote SSH continuity, while `F2` can temporarily hand off into an owned interactive execution pane when that pane is the thing waiting for input.
+It runs a persistent real shell in the top tmux pane and a Bubble Tea TUI in the bottom pane. Agent-approved commands can also run in owned tmux execution panes for local work. The persistent shell remains the continuity surface for shell-command input, cwd, recent manual shell activity, and remote SSH continuity. `F2` always hands control to that persistent tracked shell, while `F3` targets a separate owned execution pane when Shuttle is actively running a command there.
 
 ## Status
 
@@ -19,22 +19,34 @@ What is working now:
 - approval and refine flow
 - local and remote handoff with `F2`
 - `KEYS>` mode for sending raw terminal input
-- bounded agent check-ins for interactive/fullscreen waits, with explicit `Ctrl+G` resume after Shuttle pauses automatic retries
+- bounded agent check-ins for interactive/fullscreen waits, with explicit `Ctrl+G` continuation cards after Shuttle pauses automatic retries or needs confirmation to continue from the latest command result
 - partial semantic shell integration for local shells
 - serial agentic command loops with one proposal at a time and auto-continue after results
+- active checklist reconciliation on continuation turns, so plan cards can reflect explicit agent status updates instead of only command-completion guesses
+- fresh user prompts now supersede stale active checklists unless the user is explicitly asking to continue or resume the current plan
+- fresh user prompts and continuation turns now explicitly treat rerun/retry requests and shell-target shifts as reasons to distrust earlier completion and reassess the work in the current shell context
+- agent prompt decoration now explicitly classifies requests by execution surface and treats controller session state, not matching path strings, as the source of truth for shell identity and target context
 - first-class shell-context inspection support so the model can refresh authoritative user@host/cwd state instead of guessing from stale prompt text
+- inspect-context and provider turn context now include cwd source/confidence metadata so prompt-derived remote directories like `~` are treated as approximate while probe-confirmed directories are treated as authoritative
+- ordinary agent turns refresh tracked-shell identity and manual shell history without blindly reusing whatever old scrollback is still visible in the top pane as fresh command output
+- Shuttle now preserves ANSI-colored command output for display while still using sanitized plain-text captures for controller logic and prompt reconciliation
 - native unified-diff patch proposals with explicit apply/reject/ask-agent flow
 - controller-synthesized patch proposals for common single-file text edits, so the model can express insert/replace intent without hand-authoring unified hunks
 - target-aware patch application for both the local workspace and the active tracked remote shell
 - local file creation and edits through native patch application
 - remote tracked-shell file edits through the same patch UX, preferring native remote patches over ad hoc shell rewrites and using staged remote payloads with transport selection `git`, then `python3`, then verified shell fallback
 - foreground attach and handoff reconciliation for manually started shell commands
+- tracked `ssh` and similar transport transitions now surface password/confirmation waits as `awaiting_input`, distinguish the outer transport from the inner remote command, and reconcile `F2` return from observed shell state even when prompt text is incomplete
 - real OpenAI Responses API path with API-key auth
-- provider settings UI with:
+- provider onboarding and settings UI with:
+  - one shared provider settings flow behind `F10`, `/onboard`, `/provider`, and `/model`
+  - `/onboard` and `/provider` jumping straight to `Configure Providers`
+  - `/model` jumping to the current provider detail with the model field focused
+  - provider detail editing with the discovered model list on the same screen
+  - provider detail `Thinking` controls for OpenAI, OpenRouter, Anthropic, and Ollama
+  - conditional `Reasoning Effort` controls for OpenAI and OpenRouter when `Thinking` is enabled
+  - clearer auth-source and provider-test feedback during provider/settings flows
   - session-local approval-mode selection
-  - active provider switching
-  - active model switching
-  - provider detail editing
   - `F7` provider health/auth test from provider details
   - `F8` save-and-activate from provider details
 - saved provider profiles and startup reloading
@@ -53,10 +65,11 @@ What is working now:
 What is still in progress:
 - broader semantic shell integration (`OSC 133` / `OSC 7`) consumption and subshell/bootstrap support
 - deeper shell-transition verification for more interactive and nested remote cases beyond the current prompt-plus-probe state machine
-- provider onboarding polish and provider-auth validation
+- broader provider onboarding polish for additional backends and more proactive pre-selection health probes
 - provider registry/plugin architecture instead of static first-class wiring
 - any richer shell bootstrap/helper mode beyond those standards
 - transcript/UI cleanup and continued TUI/controller decomposition
+- stronger bounded-command guidance for event-stream listeners such as `xinput test`, `tail -f`, and similar monitors
 - multi-card or parallel execution UI
 - package-manager distribution and other post-archive release UX
 
@@ -180,6 +193,10 @@ Integration-only tests:
 make test-integration
 ```
 
+Interactive tmux harness tests under `./integration/harness` are currently
+opt-in only while UX automation is paused. Run them explicitly with
+`SHUTTLE_RUN_INTERACTIVE_HARNESS=1`.
+
 Run from source without the launcher:
 
 ```bash
@@ -272,7 +289,7 @@ Codex CLI model selection:
 
 Core controls:
 - `F1`: open the in-app help view
-- `Ctrl+]`: switch Agent/Shell mode
+- `Shift-Tab`: switch Agent/Shell mode
 - `Tab`: cycle composer completions, or insert a literal tab when no completion is available
 - `Right Arrow`: accept the current ghost-text completion
 - `Enter`: submit composer input
@@ -281,11 +298,16 @@ Core controls:
 - `Ctrl+Home` / `Ctrl+End`: jump the transcript to the top or bottom
 - `Insert`: toggle composer overwrite mode
 - `Esc`: clear composer or interrupt active work, depending on state
-- `F2`: take control of the live shell pane, or the active temporary execution pane when an owned interactive command is waiting for input
+- `F2`: take control of the live shell pane, or the active temporary execution pane when an owned command is currently running there
 - `Ctrl+G`: continue an active plan, or resume paused interactive agent check-ins after you handled a prompt/fullscreen app
 - `S`: enter `KEYS>` mode when the active terminal is waiting for input or a fullscreen app owns the pane
-- in `KEYS>` mode, `Enter` sends the current buffer exactly as typed, `Ctrl+Y` sends the current buffer plus `Enter`, and `Ctrl+J` inserts a literal `Enter` into the key sequence
+- Shuttle also auto-enters `KEYS>` once when a fresh `awaiting_input` prompt is observed, such as a `sudo` password prompt
+- in `KEYS>` mode, `Enter` normally sends the current buffer; for password, passphrase, confirmation, and menu-style prompts including common `ssh`/`sudo` auth waits Shuttle also appends `Enter` automatically, while true "press any key" prompts stay exact
+- `Ctrl+Y` sends the current buffer plus `Enter`, and `Ctrl+J` inserts a literal `Enter` into the key sequence
+- in `KEYS>` mode, `Shift-Tab` dismisses `KEYS>` and suppresses auto-reopen for the current waiting prompt until Shuttle observes a material prompt-state change
 - `KEYS>` also accepts explicit tmux control-key tokens such as `<Ctrl+C>` or `<Esc>` for key events the TUI cannot capture directly
+- each `KEYS>` send requires a fresh observed read of the active terminal; after Shuttle sends keys it refreshes the active execution and shell tail before allowing another send, and it briefly suppresses `KEYS>` auto-reopen while the prompt state settles so successful auth/input transitions do not bounce the composer back into key-send mode
+- text selection while Bubble Tea mouse mode is active depends on the terminal emulator: iTerm2 uses `Option`-drag, while some other terminals use `Shift`-drag
 - `Ctrl+O`: inspect the selected transcript entry
 - while the `Ctrl+O` detail view is open, typing incrementally filters visible detail lines; `Backspace` edits the filter and `Esc` clears it before closing the view
 - `F10`: open settings
@@ -295,7 +317,7 @@ Slash commands in agent mode:
 - `/approvals`: show or change the current session approval mode
 - `/new`: start a fresh task without restarting Shuttle or losing shell continuity
 - `/compact`: summarize older task context and keep a shorter live context window
-- `/onboard`, `/provider`, `/model`, `/quit`: existing provider/settings/session commands
+- `/onboard`, `/provider`, `/model`, `/quit`: provider/settings/session commands; `/onboard` and `/provider` open `Configure Providers`, and `/model` opens the current provider detail focused on model selection
 
 Approval modes:
 - `confirm`: current default; safe commands stay as explicit proposals and risky actions still require approval
@@ -304,8 +326,11 @@ Approval modes:
 - `/approvals` without an argument shows the current session mode; `/approvals confirm`, `/approvals auto`, and `/approvals dangerous` switch it
 
 Settings notes:
-- `F10` opens a menu with `Session Settings`, `Configure Providers`, `Change Active Provider`, and `Select Model`
-- provider detail editing supports `F7` to test the provider config and `F8` to save and activate it immediately
+- `F10` opens settings with `Session Settings` and `Configure Providers`; selecting a provider opens the shared provider detail screen that also contains model selection
+- provider detail editing supports `F7` to test the provider config, automatic provider validation when loading that provider's model list, and `F8` to save and activate it immediately
+- supported providers expose a `Thinking` radio control; OpenAI and OpenRouter also expose `Reasoning Effort` when `Thinking` is on
+- the provider list and model list support direct mouse clicks; `Thinking` and `Reasoning Effort` stay keyboard toggles via `Space` or `Left`/`Right`
+- pressing `Enter` on the `Model` field selects the highlighted filtered model result and runs a provider/model test without saving immediately
 - multiline composer rendering is capped to 15 visible lines and scrolls older lines off the top as you keep inserting newlines
 
 Terminal selection notes:
@@ -330,20 +355,19 @@ Status line notes:
 - the active model renders as `provider / model`, and context usage shows as a color-coded ASCII fill bar with current usage against the known window when available
 - active work renders as a braille spinner plus a fixed-width elapsed-seconds label until it grows into minute-scale durations
 
-The TUI is intentionally keyboard-first. Current behavior is still evolving, so see [ui-scratchpad.md](ui-scratchpad.md) for active UX backlog notes.
+The TUI is intentionally keyboard-first. Current priorities now live in [../BACKLOG.md](../BACKLOG.md), and older UX scratch notes are archived in [../completed/ui-scratchpad.md](../completed/ui-scratchpad.md).
 
 ## Important Docs
 
 - [shell-tracking-architecture.md](shell-tracking-architecture.md)
 - [architecture.md](architecture.md)
-- [implementation-plan.md](implementation-plan.md)
+- [../BACKLOG.md](../BACKLOG.md)
 - [provider-auth-guide.md](provider-auth-guide.md)
 - [shell-execution-strategy.md](shell-execution-strategy.md)
-- [provider-integration-plan.md](provider-integration-plan.md)
 - [agent-runtime-design.md](agent-runtime-design.md)
 - [runtime-management-design.md](runtime-management-design.md)
-- [requirements-mvp.md](requirements-mvp.md)
-- [patch-apply-research.md](patch-apply-research.md)
+- [provider-integration-design.md](provider-integration-design.md)
+- [../completed/implementation-plan.md](../completed/implementation-plan.md)
 
 ## Current Limitations
 

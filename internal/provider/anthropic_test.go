@@ -73,3 +73,26 @@ func TestAnthropicAgentRespondsWithStructuredOutput(t *testing.T) {
 		t.Fatalf("expected model info, got %#v", response.ModelInfo)
 	}
 }
+
+func TestAnthropicAgentIncludesThinkingConfigWhenEnabled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("Decode() error = %v", err)
+		}
+		thinking, ok := payload["thinking"].(map[string]any)
+		if !ok || thinking["type"] != "enabled" || thinking["budget_tokens"] != float64(1024) {
+			t.Fatalf("expected anthropic thinking config, got %#v", payload["thinking"])
+		}
+		io.WriteString(w, `{"id":"msg_124","type":"message","model":"claude-sonnet-4-20250514","content":[{"type":"text","text":"{\"message\":\"ok\"}"}]}`)
+	}))
+	defer server.Close()
+
+	agent, err := NewAnthropicAgent(Profile{BackendFamily: BackendAnthropic, Preset: PresetAnthropic, AuthMethod: AuthAPIKey, BaseURL: server.URL, Model: "claude-sonnet-4-20250514", APIKey: "anthropic-key", Thinking: string(ThinkingOn)}, server.Client())
+	if err != nil {
+		t.Fatalf("NewAnthropicAgent() error = %v", err)
+	}
+	if _, err := agent.Respond(context.Background(), controller.AgentInput{Prompt: "hello"}); err != nil {
+		t.Fatalf("Respond() error = %v", err)
+	}
+}

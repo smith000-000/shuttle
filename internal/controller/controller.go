@@ -7,17 +7,21 @@ import (
 	"sync/atomic"
 	"time"
 
+	"aiterm/internal/agentruntime"
 	"aiterm/internal/patchapply"
 	"aiterm/internal/shell"
 )
 
-const autoContinuePrompt = "The previously approved or proposed command has completed. First summarize the result briefly. If there is an active plan, continue it from the current step. If there is no active plan, prefer stopping after reporting the outcome once the user's request is satisfied. Only propose more shell work when the transcript or command result clearly shows unresolved work. Do not propose extra verification just because a command succeeded unless the user explicitly asked for verification or the result is ambiguous. If risky, request approval."
+const autoContinuePrompt = "The previously approved or proposed command has completed. Before continuing, reconcile the latest command result against the current shell identity and current user intent. First summarize the result briefly. If there is an active plan, continue it from the current step. If there is no active plan, prefer stopping after reporting the outcome once the user's request is satisfied. Only propose more shell work when the transcript or command result clearly shows unresolved work. Do not propose extra verification just because a command succeeded unless the user explicitly asked for verification or the result is ambiguous. If risky, request approval."
 const autoContinuePromptSerialSuffix = "The recent transcript indicates the user asked for serial or ordered shell work. If the completed command only unlocked the next step, propose exactly one next command now instead of waiting for another nudge. Do not lump multiple shell actions together, and do not wait for the user to say 'go' unless they explicitly asked to approve each step separately."
 const autoContinuePromptUnresolvedInspectionSuffix = "The latest command was a read-only inspection and the transcript still shows unresolved work. Do not stop at diagnosis. Propose exactly one next action now as a command, patch, or approval, whichever best addresses the unresolved issue."
 const autoContinuePromptPatchRebaseSuffix = "The task is to repair a failed patch after a read-only inspection. Use the exact latest command result as the source of truth for file contents and anchor text. Do not search again if the needed file lines are already in the latest command result. If you propose a patch, copy the required context lines exactly from the latest command result instead of paraphrasing or normalizing them."
 const autoContinuePromptChecklistSuffix = "The user's request is an ordered multi-step workflow. If there is no active plan yet, emit a concise checklist in plan_summary and plan_steps for the remaining steps, then propose only the next immediate action."
-const continuePlanPrompt = "Continue the active plan from the current step. Propose the next safe action if one is needed. If the next action is risky, request approval. If the plan is complete, answer briefly."
-const resumeAfterTakeControlPrompt = "The user temporarily took control of the shell to handle an interactive step such as a password prompt, remote login, or fullscreen terminal app. Reassess the latest shell state and continue the task. If another action is needed, propose it. If risky, request approval. If the task is complete, answer briefly."
+const stateAuthorityPromptSuffix = "Classify the request before acting: informational answer, local-host task, tracked-shell task, remote-shell task, or controller-only recovery. The controller session state is the source of truth for shell identity, execution state, and target context. Treat tracked-shell context and local-host context as distinct, even when paths look similar. Do not infer that two environments are the same just because cwd strings match."
+const rerunOrContextShiftPromptSuffix = "Treat the latest user instruction and the current shell context as the source of truth. If the user asks to rerun, retry, repeat, or check again, perform the work again instead of relying on earlier completion. If the active shell identity, remote/local target, user@host, or cwd changed since the last relevant result, treat prior completion, checklist progress, and earlier conclusions as potentially stale. Reassess whether the task should be redone in the current context before claiming it is already complete."
+const continuePlanPrompt = "Continue the active plan from the current step. If the current shell context or latest user instruction materially differs from the context in which earlier steps were completed, first reassess the plan status before continuing. Propose the next safe action if one is needed. If the next action is risky, request approval. If the plan is complete, answer briefly."
+const resumeAfterTakeControlPrompt = "The user temporarily took control of the shell to handle an interactive step such as a password prompt, remote login, or fullscreen terminal app. The user may have changed targets, hosts, directories, or task intent while in control. Reassess the latest shell state before relying on prior completion or checklist status, then continue the task. If another action is needed, propose it. If risky, request approval. If the task is complete, answer briefly."
+const activePlanStatusCheckPromptSuffix = "An active checklist is present in context. Before deciding on the next action, perform a status check against the latest shell state and update the checklist on this turn by returning plan_step_statuses with exactly one status per existing step, using only done, in_progress, or pending. Do not omit the status update while a checklist is active. Reuse the existing checklist instead of replacing it unless the task scope changed materially."
 const activeExecutionCheckInPrompt = "An agent-started shell command is still active. Use the execution state and latest shell output to decide whether it is running normally or merely quiet. If there is no new output, say that no new shell output has appeared yet. Do not claim the command has completed or that the shell returned to a prompt unless the context shows that. Do not propose a new command, plan, or approval unless the shell is clearly blocked and needs user intervention; if so, say that the user should press F2 to take control."
 const awaitingInputCheckInPrompt = "An agent-started shell command is waiting for shell input. Use the latest shell output and recovery snapshot to explain what input is likely needed. Do not claim the command has completed. Prefer a concise recovery message that tells the user to press F2 to take control. If the task only needs a small raw key sequence, mention KEYS> as an option."
 const fullscreenCheckInPrompt = "An agent-started shell command has occupied a fullscreen terminal app. Use the latest shell output and recovery snapshot to identify the app or state as best you can. Do not claim the command has completed. Prefer a concise recovery message telling the user to press F2 to take control, or use KEYS> if they only need to send a few raw keys."
@@ -85,6 +89,8 @@ type TrackedPaneResolver interface {
 
 type ShellContextReader interface {
 	CaptureRecentOutput(ctx context.Context, paneID string, lines int) (string, error)
+	CaptureRecentOutputDisplay(ctx context.Context, paneID string, lines int) (string, error)
+	CaptureObservedShellState(ctx context.Context, paneID string) (shell.ObservedShellState, error)
 	CaptureShellContext(ctx context.Context, paneID string) (shell.PromptContext, error)
 }
 
@@ -116,7 +122,8 @@ type CommandStartPayload struct {
 }
 
 type LocalController struct {
-	agent        Agent
+	runtime      agentruntime.Runtime
+	runtimeHost  agentruntime.Host
 	runner       ShellRunner
 	reader       ShellContextReader
 	session      SessionContext
@@ -137,7 +144,7 @@ type LocalController struct {
 func New(agent Agent, runner ShellRunner, reader ShellContextReader, session SessionContext) *LocalController {
 	session = normalizeSessionContext(session)
 	controller := &LocalController{
-		agent:   agent,
+		runtime: agentruntime.NewBuiltin(),
 		runner:  runner,
 		reader:  reader,
 		session: session,
@@ -145,6 +152,7 @@ func New(agent Agent, runner ShellRunner, reader ShellContextReader, session Ses
 			TaskID: "task-1",
 		},
 	}
+	controller.runtimeHost = newBuiltinRuntimeHost(controller, agent)
 	controller.remoteCaps = newRemoteCapabilityStore(session.StateDir)
 	if session.LocalWorkspaceRoot != "" {
 		patches, err := patchapply.New(session.LocalWorkspaceRoot)
@@ -162,6 +170,10 @@ func normalizeSessionContext(session SessionContext) SessionContext {
 	session.SessionName = strings.TrimSpace(session.SessionName)
 	session.BottomPaneID = strings.TrimSpace(session.BottomPaneID)
 	session.WorkingDirectory = normalizeWorkingDirectory(session.WorkingDirectory)
+	session.LocalWorkingDirectory = resolveLocalWorkingDirectory(session.LocalWorkingDirectory)
+	session.LocalHomeDirectory = resolveLocalHomeDirectory(session.LocalHomeDirectory)
+	session.LocalUsername = resolveLocalUsername(session.LocalUsername)
+	session.LocalHostname = resolveLocalHostname(session.LocalHostname)
 	session.LocalWorkspaceRoot = normalizeWorkingDirectory(session.LocalWorkspaceRoot)
 	session.StateDir = strings.TrimSpace(session.StateDir)
 	session.UserShellHistoryFile = strings.TrimSpace(session.UserShellHistoryFile)
@@ -175,12 +187,19 @@ func normalizeSessionContext(session SessionContext) SessionContext {
 		contextCopy := *session.CurrentShell
 		session.CurrentShell = &contextCopy
 		if session.WorkingDirectory == "" {
-			session.WorkingDirectory = normalizeWorkingDirectory(contextCopy.Directory)
+			session.WorkingDirectory = normalizeShellWorkingDirectory(contextCopy.Directory, session.CurrentShellLocation)
 		}
+	}
+	if session.CurrentShellLocation != nil {
+		locationCopy := *session.CurrentShellLocation
+		session.CurrentShellLocation = &locationCopy
 	}
 	if session.RemoteCapabilities != nil {
 		capsCopy := *session.RemoteCapabilities
 		session.RemoteCapabilities = &capsCopy
+	}
+	if session.LocalWorkspaceRoot == "" {
+		session.LocalWorkspaceRoot = session.LocalWorkingDirectory
 	}
 	if session.LocalWorkspaceRoot == "" {
 		session.LocalWorkspaceRoot = session.WorkingDirectory
@@ -213,4 +232,20 @@ func trimStringSlice(values []string) []string {
 		return nil
 	}
 	return trimmed
+}
+
+func (c *LocalController) SetRuntime(runtime agentruntime.Runtime) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if runtime == nil {
+		c.runtime = agentruntime.NewBuiltin()
+		return
+	}
+	c.runtime = runtime
+}
+
+func (c *LocalController) SetRuntimeHost(host agentruntime.Host) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.runtimeHost = host
 }

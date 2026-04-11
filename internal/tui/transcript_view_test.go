@@ -61,7 +61,7 @@ func TestAgentAndShellHistoryStaySeparate(t *testing.T) {
 	updated, _ = model.Update(msg)
 	model = updated.(Model)
 
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlCloseBracket})
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	model = updated.(Model)
 	model.input = "show plan"
 	updated, cmd = model.submit()
@@ -77,7 +77,7 @@ func TestAgentAndShellHistoryStaySeparate(t *testing.T) {
 		t.Fatalf("expected agent history entry, got %q", model.input)
 	}
 
-	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyCtrlCloseBracket})
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	model = updated.(Model)
 	model.input = ""
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyUp})
@@ -190,6 +190,23 @@ func TestTranscriptPinnedStateControlsAutoFollow(t *testing.T) {
 	}
 }
 
+func TestSelectedTranscriptEntryDoesNotTintBodyOrFillWhitespace(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.width = 80
+	model.height = 20
+	model.entries = []Entry{{Title: "shell", Body: "ls -lah"}}
+	model.selectedEntry = 0
+
+	selectedLines := model.renderEntryLines(0, model.entries[0], model.currentTranscriptWidth())
+	unselectedLines := model.renderEntryLines(1, model.entries[0], model.currentTranscriptWidth())
+	if len(selectedLines) == 0 || len(unselectedLines) == 0 {
+		t.Fatal("expected rendered transcript lines")
+	}
+	if selectedLines[0].text != unselectedLines[0].text {
+		t.Fatalf("expected selection not to alter shell body rendering, selected=%q unselected=%q", selectedLines[0].text, unselectedLines[0].text)
+	}
+}
+
 func TestMainViewDoesNotRenderHeaderOrSideRails(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.width = 80
@@ -263,7 +280,7 @@ func TestShortTranscriptSitsAboveComposer(t *testing.T) {
 
 	composer := -1
 	for index, line := range lines {
-		if strings.Contains(line, "$>") || strings.Contains(line, "#>") || strings.Contains(line, "Œ>") {
+		if strings.Contains(line, shellComposerPrompt) || strings.Contains(line, rootComposerPrompt) || strings.Contains(line, agentComposerPrompt) || strings.Contains(line, keysComposerPrompt) {
 			composer = index
 			break
 		}
@@ -487,14 +504,14 @@ func TestComposerPrefixUsesAgentAndRootPrompts(t *testing.T) {
 	model.mode = AgentMode
 	model.input = ""
 	view := model.View()
-	if !strings.Contains(view, "Œ>") {
+	if !strings.Contains(view, agentComposerPrompt) {
 		t.Fatalf("expected agent prompt prefix, got %q", view)
 	}
 
 	model.mode = ShellMode
 	model.shellContext = shell.PromptContext{Root: true}
 	view = model.View()
-	if !strings.Contains(view, "#>") {
+	if !strings.Contains(view, rootComposerPrompt) {
 		t.Fatalf("expected root shell prompt prefix, got %q", view)
 	}
 }

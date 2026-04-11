@@ -12,10 +12,10 @@ import (
 	"time"
 )
 
-func TestCtrlCloseBracketTogglesMode(t *testing.T) {
+func TestShiftTabTogglesMode(t *testing.T) {
 	model := NewModel(fakeWorkspace(), nil)
 
-	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyCtrlCloseBracket})
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	next := updated.(Model)
 
 	if next.mode != AgentMode {
@@ -41,7 +41,7 @@ func TestF1OpensAndClosesHelpView(t *testing.T) {
 
 func TestHelpViewContainsSlashCommandsAndShortcuts(t *testing.T) {
 	view := strings.Join(helpContentLines(120, ShellMode, true), "\n")
-	for _, fragment := range []string{"/help", "/approvals", "/approvals dangerous", "/new", "/compact", "/onboard", "/provider", "/model", "/quit", "Ctrl+]", "F2", "Shift-drag", "Ctrl+Shift+C / Ctrl+Shift+V", "KEYS> Enter", "KEYS> Ctrl+Y", "KEYS> Ctrl+J"} {
+	for _, fragment := range []string{"/help", "/approvals", "/approvals dangerous", "/new", "/compact", "/onboard", "/provider", "/model", "/quit", "Shift-Tab", "F2", "Option-drag", "Shift-drag", "Ctrl+Shift+C / Ctrl+Shift+V", "KEYS> Enter", "KEYS> Ctrl+Y", "KEYS> Ctrl+J"} {
 		if !strings.Contains(view, fragment) {
 			t.Fatalf("expected help view to contain %q, got %q", fragment, view)
 		}
@@ -88,6 +88,64 @@ func TestTabInsertsTabIntoComposer(t *testing.T) {
 
 	if next.input != "\t" {
 		t.Fatalf("expected tab inserted into composer, got %q", next.input)
+	}
+}
+
+func TestMouseReportRunesDoNotLeakIntoComposer(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("<64;85;43M<64;85;43M")})
+	next := updated.(Model)
+
+	if next.input != "" {
+		t.Fatalf("expected mouse report fragments to be ignored, got %q", next.input)
+	}
+}
+
+func TestShiftMousePressDoesNotTriggerTUIClickActions(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.width = 80
+	model.height = 24
+	model.entries = []Entry{
+		{Title: "agent", Body: "first"},
+		{Title: "agent", Body: "second"},
+	}
+	model.selectedEntry = 0
+
+	updated, _ := model.Update(tea.MouseMsg{
+		X:      3,
+		Y:      0,
+		Shift:  true,
+		Button: tea.MouseButtonLeft,
+		Action: tea.MouseActionPress,
+	})
+	next := updated.(Model)
+
+	if next.selectedEntry != 0 {
+		t.Fatalf("expected shift-click to leave selection unchanged, got %d", next.selectedEntry)
+	}
+	if next.detailOpen {
+		t.Fatal("expected shift-click not to open detail view")
+	}
+}
+
+func TestAgentSubmitClearsDisplayedSupersededPlan(t *testing.T) {
+	model := NewModel(fakeWorkspace(), nil)
+	model.mode = AgentMode
+	model.activePlan = &controller.ActivePlan{
+		Summary: "Old task plan",
+		Steps: []controller.PlanStep{
+			{Text: "Do the old thing.", Status: controller.PlanStepInProgress},
+		},
+	}
+	model.input = "inspect the current repo status instead"
+	model.cursor = len([]rune(model.input))
+
+	updated, _ := model.submit()
+	next := updated.(Model)
+
+	if next.activePlan != nil {
+		t.Fatalf("expected superseded displayed plan to clear, got %#v", next.activePlan)
 	}
 }
 
@@ -905,6 +963,8 @@ func TestMouseClickProposalSendKeysRunsKeySend(t *testing.T) {
 		Keys:        ":q!\n",
 		Description: "Exit the fullscreen app.",
 	}
+	model.liveShellTail = "vim"
+	model.observeActiveKeysLease("test")
 
 	x, y := actionCardButtonPoint(t, model, 0)
 	updated, cmd := model.Update(tea.MouseMsg{
@@ -919,5 +979,91 @@ func TestMouseClickProposalSendKeysRunsKeySend(t *testing.T) {
 	}
 	if next.pendingProposal != nil {
 		t.Fatalf("expected key proposal to clear after click, got %#v", next.pendingProposal)
+	}
+}
+
+func mouseYForSettingsModel(t *testing.T, model Model, modelIndex int) int {
+	t.Helper()
+	for y := 0; y < 240; y++ {
+		if index, ok := model.settingsModelIndexAtMouse(y); ok && index == modelIndex {
+			return y
+		}
+	}
+	t.Fatalf("no mouse Y for model index %d", modelIndex)
+	return -1
+}
+
+func TestMouseClickProviderRowOpensProviderDetail(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5", BaseURL: "https://api.openai.com/v1", APIKeyEnvVar: "OPENAI_API_KEY"},
+		func() ([]provider.OnboardingCandidate, error) {
+			return []provider.OnboardingCandidate{
+				{Profile: provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5", BaseURL: "https://api.openai.com/v1", APIKeyEnvVar: "OPENAI_API_KEY"}},
+				{Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openai/gpt-5", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"}},
+			}, nil
+		},
+		func(profile provider.Profile) ([]provider.ModelOption, error) {
+			return []provider.ModelOption{{ID: profile.Model}}, nil
+		},
+		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+			return &fakeController{}, profile, nil
+		},
+		func(provider.Profile) error { return nil },
+	)
+	model.width = 120
+	model.height = 40
+	updated, _ := model.openOnboarding()
+	model = updated.(Model)
+	y := model.settingsHeaderLineCount() + 3
+	updated, cmd := model.Update(tea.MouseMsg{X: 4, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	next := updated.(Model)
+	if !next.settingsOpen || next.settingsStep != settingsStepProviderForm {
+		t.Fatalf("expected provider detail after click, got open=%t step=%q", next.settingsOpen, next.settingsStep)
+	}
+	if cmd == nil {
+		t.Fatal("expected model load command from provider click")
+	}
+}
+
+func TestMouseClickModelRowSelectsAndTestsModel(t *testing.T) {
+	var tested provider.Profile
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openrouter/auto", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"},
+		func() ([]provider.OnboardingCandidate, error) {
+			return []provider.OnboardingCandidate{{Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openrouter/auto", BaseURL: "https://openrouter.ai/api/v1", APIKeyEnvVar: "OPENROUTER_API_KEY"}}}, nil
+		},
+		func(profile provider.Profile) ([]provider.ModelOption, error) {
+			return []provider.ModelOption{{ID: "openrouter/auto"}, {ID: "qwen/qwen3.5-9b"}}, nil
+		},
+		nil,
+		func(provider.Profile) error { return nil },
+	).WithProviderTester(func(profile provider.Profile) error {
+		tested = profile
+		return nil
+	})
+	model.width = 140
+	model.height = 40
+	updated, cmd := model.openActiveModelSettings()
+	model = updated.(Model)
+	loaded := cmd().(settingsModelsLoadedMsg)
+	updated, _ = model.Update(loaded)
+	model = updated.(Model)
+	model.settingsConfig.fields[settingsFormFieldIndexByKey(model.settingsConfig, "model")].value = ""
+	model.syncSettingsModelFilterFromConfig()
+	y := mouseYForSettingsModel(t, model, 1)
+	updated, cmd = model.Update(tea.MouseMsg{X: 8, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected mouse model click to trigger provider test")
+	}
+	testMsg, ok := cmd().(settingsProviderTestedMsg)
+	if !ok {
+		t.Fatalf("expected settingsProviderTestedMsg, got %T", cmd())
+	}
+	if testMsg.err != nil {
+		t.Fatalf("expected successful provider test, got %v", testMsg.err)
+	}
+	if tested.Model != "qwen/qwen3.5-9b" {
+		t.Fatalf("expected clicked model to be tested, got %#v", tested)
 	}
 }

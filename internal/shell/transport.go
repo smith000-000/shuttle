@@ -24,11 +24,12 @@ func (o *Observer) buildLocalManagedTransport(ctx context.Context, paneID string
 		return "", nil, false
 	}
 
-	promptContext, err := o.CaptureShellContext(ctx, paneID)
-	if err != nil || promptContext.PromptLine() == "" {
-		promptContext = o.promptHint
+	observed, err := o.CaptureObservedShellState(ctx, paneID)
+	if err != nil {
+		observed = ObservedShellState{PromptContext: o.promptHint, HasPromptContext: o.promptHint.PromptLine() != ""}
+		observed.Location = inferShellLocation(observed.PromptContext, "", shellTransitionNone)
 	}
-	if promptContext.PromptLine() == "" || promptContext.Remote {
+	if !observed.HasPromptContext || observed.PromptContext.PromptLine() == "" || observed.Location.Kind == ShellLocationRemote {
 		return "", nil, false
 	}
 

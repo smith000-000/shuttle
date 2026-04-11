@@ -120,6 +120,28 @@ func TestDetectOnboardingCandidatesIncludesCodexCLI(t *testing.T) {
 	}
 }
 
+func TestDetectOnboardingCandidatesRanksCodexAheadOfAPIKeys(t *testing.T) {
+	script := writeFakeCodexCLI(t)
+	withTestCodexCommand(t, script)
+	withTestOllamaProbe(t, false)
+	t.Setenv("FAKE_CODEX_LOGIN_STATUS", "Logged in using ChatGPT")
+	t.Setenv("OPENAI_API_KEY", "openai-key")
+
+	candidates, err := DetectOnboardingCandidates()
+	if err != nil {
+		t.Fatalf("DetectOnboardingCandidates() error = %v", err)
+	}
+	if len(candidates) < 2 {
+		t.Fatalf("expected codex and OpenAI candidates, got %d", len(candidates))
+	}
+	if candidates[0].Profile.Preset != PresetCodexCLI {
+		t.Fatalf("expected Codex CLI candidate first, got %#v", candidates[0])
+	}
+	if candidates[1].Profile.Preset != PresetOpenAI {
+		t.Fatalf("expected OpenAI candidate second, got %#v", candidates[1])
+	}
+}
+
 func TestDetectOnboardingCandidatesIncludesOllama(t *testing.T) {
 	withTestCodexCommand(t, "/missing-codex")
 	withTestOllamaProbe(t, true)
@@ -164,8 +186,8 @@ func TestBuildOnboardingCandidatesIncludesStoredAndManualChoices(t *testing.T) {
 	if len(candidates) < 6 {
 		t.Fatalf("expected stored plus manual candidates, got %d", len(candidates))
 	}
-	if candidates[0].Reason != "Currently selected Shuttle provider configuration." {
-		t.Fatalf("expected saved profile first, got %q", candidates[0].Reason)
+	if candidates[0].Source != OnboardingCandidateStored {
+		t.Fatalf("expected stored candidates first when nothing is freshly detected, got %#v", candidates[0])
 	}
 
 	manualFound := false
@@ -177,6 +199,51 @@ func TestBuildOnboardingCandidatesIncludesStoredAndManualChoices(t *testing.T) {
 	}
 	if !manualFound {
 		t.Fatal("expected manual anthropic candidate")
+	}
+}
+
+func TestBuildOnboardingCandidatesRanksDetectedAheadOfStoredAndManual(t *testing.T) {
+	withTestCodexCommand(t, "/missing-codex")
+	withTestOllamaProbe(t, false)
+	withTestKeyring(t)
+	stateDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stateDir, "provider.json"), []byte(`{
+  "version": 1,
+  "provider": "openrouter",
+  "auth_method": "api_key",
+  "base_url": "https://openrouter.ai/api/v1",
+  "model": "openai/gpt-5",
+  "api_key_ref": "OPENROUTER_API_KEY"
+}`), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	t.Setenv("OPENAI_API_KEY", "openai-key")
+
+	candidates, err := BuildOnboardingCandidates(stateDir)
+	if err != nil {
+		t.Fatalf("BuildOnboardingCandidates() error = %v", err)
+	}
+	if len(candidates) < 3 {
+		t.Fatalf("expected at least three onboarding candidates, got %d", len(candidates))
+	}
+	if candidates[0].Profile.Preset != PresetOpenAI || candidates[0].Source != OnboardingCandidateDetected {
+		t.Fatalf("expected detected OpenAI candidate first, got %#v", candidates[0])
+	}
+	storedIndex := -1
+	manualIndex := -1
+	for i, candidate := range candidates {
+		if storedIndex == -1 && candidate.Source == OnboardingCandidateStored {
+			storedIndex = i
+		}
+		if manualIndex == -1 && candidate.Source == OnboardingCandidateManual {
+			manualIndex = i
+		}
+	}
+	if storedIndex == -1 || manualIndex == -1 {
+		t.Fatalf("expected stored and manual candidates in %#v", candidates)
+	}
+	if !(storedIndex < manualIndex) {
+		t.Fatalf("expected stored candidates before manual candidates, got stored=%d manual=%d", storedIndex, manualIndex)
 	}
 }
 

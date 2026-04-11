@@ -73,7 +73,14 @@ Shuttle now has a usable first pass of the redesigned execution stack on `main`:
 - local managed transport using sourced temp scripts instead of giant inline wrappers where possible
 - active execution states including `awaiting_input`, `interactive_fullscreen`, `background_monitoring`, `canceled`, and `lost`
 - `F2` take-control handoff and reconciliation back into Shuttle
+- returning from `F2` while a tracked command is still active now resumes monitoring only; it does not force an immediate extra agent turn before the command has actually reconciled
 - raw `KEYS>` input for active prompts and fullscreen apps, including explicit control-key tokens such as `<Ctrl+C>`
+- TUI-level guardrails for `KEYS>` and agent key proposals so each send requires a fresh observed execution/tail snapshot and consumes that lease until Shuttle refreshes again
+- automatic `KEYS>` entry for fresh `awaiting_input` prompts, with explicit `Shift-Tab` dismissal that suppresses re-entry until the observed prompt state changes
+- successful `KEYS>` sends also suppress auto-reentry for that same unchanged prompt state, so password or menu prompts do not immediately reopen after an answer is sent
+- manual `KEYS>` Enter now distinguishes likely submit prompts from exact-key prompts:
+  - password / passphrase / confirmation / menu-style waits append Enter automatically
+  - "press any key" style waits remain exact and do not append Enter unless the user explicitly uses `Ctrl+Y` or inserts a newline
 - agent-side recovery guidance informed by a larger recovery snapshot
 - first-class agent `keys` proposals so the model can ask Shuttle to send small raw key sequences instead of only narrating them
 - bounded interactive/fullscreen check-ins that eventually pause automatic model retries and require an explicit `Ctrl+G` resume
@@ -82,6 +89,10 @@ Shuttle now has a usable first pass of the redesigned execution stack on `main`:
 - plan cards demoted to informational state instead of approval-like control flow, with continuation turns now suppressing stale replacement plans and emitting explicit plan-complete state when needed
 - quiet commands like `sleep 20` no longer reconcile as completed from stale prompt scrollback after `F2`
 - transcript result entries now reflect exit status instead of always presenting a green success result
+- transcript and active-execution views now preserve ANSI-colored shell output for display while keeping sanitized plain-text summaries for controller state and prompt reconciliation
+- prompt-inference transport commands such as `ssh` now distinguish the outer transport from the inner remote command, surface auth waits as `awaiting_input`, and settle more reliably after `F2` return
+- tracked-shell recovery now rewrites any live user-shell execution to the new pane target when tmux respawns the tracked shell, instead of leaving active execution state bound to a dead pane ID
+- `exit` / `logout` transitions now have fallback settlement when Shuttle can see either a disconnect tail or a respawned tracked shell even if the prompt parser never produces one final clean trailing prompt line
 
 What is still not done:
 - fullscreen/interactive detection still needs stronger terminal-behavior signals beyond current tmux metadata heuristics
@@ -91,10 +102,15 @@ What is still not done:
 - `internal/controller/controller.go` and `internal/tui/model.go` are now large enough that further point fixes should come with a decomposition backlog:
   - controller: execution lifecycle/state machine, agent-turn normalization, plan management, and tracked-shell ownership helpers
   - TUI: composer/input routing, transcript rendering, proposal/approval state, and handoff/fullscreen control
+- the recent shell hardening did require an architecture review before more behavior was added, and that review has already driven a first cleanup pass across:
+  - exit/logout transition settlement
+  - tracked-pane migration into active executions
+  - prompt-return fallback rules across local and remote flows
+  - controller/TUI ownership boundaries during `F2`/`F3` reconciliation
 
 Recent direction change that is now the baseline on `main`:
 - keep one persistent user shell pane as the continuity surface for cwd, `$>`, and recent manual shell history
-- let `F2` normally target that persistent shell, but temporarily follow an owned interactive execution pane when that pane is what needs direct user control
+- keep `F2` permanently bound to that persistent tracked shell and use `F3` for a separate active owned execution pane when one exists
 - run approved agent shell commands in owned tmux execution panes by default
 - exception: when the tracked user shell is remote, keep agent shell execution in that tracked remote shell instead of opening a local owned pane
 - feed the agent structured recent manual commands/actions plus full command results, instead of forcing both concerns through one shared pane
@@ -109,6 +125,7 @@ For this branch, the better direction is:
 - keep the current hybrid shell model stable
 - clean up transcript/UI noise around results, plans, and handoff
 - split the large controller/TUI files before layering more behavior onto them
+- do an explicit architecture review of the shell-tracking and handoff stack before another recovery-oriented behavior slice
 - defer multi-card / parallel execution work to a later branch
 
 Semantic-shell expansion remains valuable, but it is no longer the immediate blocker for normal serial use. When that work resumes, it should still stay standards-based:
@@ -186,6 +203,8 @@ Before changing subshell/bootstrap behavior, manually verify:
 - nested local subshell such as `bash`
   - local prompt still stabilizes
   - tracked commands still complete normally
+
+This checklist is also the manual hardening gate for shell-tracking refactors that touch prompt-return reconciliation, attached foreground monitoring, or remote transition settling, even when they are not changing bootstrap behavior directly.
 
 ### 1. Introduce First-Class Command Executions
 Every shell command should create a tracked execution record.
@@ -580,7 +599,7 @@ Expect:
 Run:
 
 ```bash
-nano ui-scratchpad.md
+nano completed/ui-scratchpad.md
 ```
 
 Expect:

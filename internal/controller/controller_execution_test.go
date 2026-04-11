@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,6 +98,32 @@ func TestLocalControllerTakeControlTargetUsesOwnedInteractivePane(t *testing.T) 
 	}
 }
 
+func TestLocalControllerTakeControlTargetUsesOwnedRunningPane(t *testing.T) {
+	controller := New(nil, nil, nil, SessionContext{
+		SessionName:  "shuttle-test",
+		TrackedShell: TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
+	})
+	setPrimaryExecutionForTest(controller, CommandExecution{
+		ID:        "cmd-1",
+		Command:   "for i in $(seq 1 15); do echo $i; sleep 1; done",
+		Origin:    CommandOriginAgentProposal,
+		State:     CommandExecutionRunning,
+		StartedAt: time.Now(),
+		TrackedShell: TrackedShellTarget{
+			SessionName: "shuttle-test",
+			PaneID:      "%9",
+		},
+	})
+
+	target := controller.TakeControlTarget()
+	if target.PaneID != "%9" {
+		t.Fatalf("expected take-control target pane %%9, got %#v", target)
+	}
+	if controller.TrackedShellTarget().PaneID != "%0" {
+		t.Fatalf("expected persistent tracked shell pane to remain %%0, got %#v", controller.TrackedShellTarget())
+	}
+}
+
 func TestLocalControllerSubmitShellCommandReturnsTrackedShellChangeNotice(t *testing.T) {
 	runner := &stubRunner{
 		result:         shell.TrackedExecution{CommandID: "cmd-1", Command: "ls", ExitCode: 0},
@@ -118,6 +145,43 @@ func TestLocalControllerSubmitShellCommandReturnsTrackedShellChangeNotice(t *tes
 	notice, ok := events[0].Payload.(TextPayload)
 	if !ok || !strings.Contains(notice.Text, "Tracked shell pane changed from %0 to %5.") {
 		t.Fatalf("expected tracked-shell change notice, got %#v", events[0].Payload)
+	}
+}
+
+func TestLocalControllerSyncTrackedShellTargetUpdatesTrackedExecutionTarget(t *testing.T) {
+	reader := &stubContextReader{resolvedPaneID: "%5"}
+	controller := New(nil, nil, reader, SessionContext{
+		SessionName:  "shuttle-test",
+		TrackedShell: TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
+	})
+	setPrimaryExecutionForTest(controller, CommandExecution{
+		ID:        "cmd-1",
+		Command:   "exit",
+		Origin:    CommandOriginUserShell,
+		State:     CommandExecutionRunning,
+		StartedAt: time.Now(),
+		TrackedShell: TrackedShellTarget{
+			SessionName: "shuttle-test",
+			PaneID:      "%0",
+		},
+	})
+
+	updated, notice := controller.syncTrackedShellTargetWithNotice(context.Background())
+	if updated.PaneID != "%5" {
+		t.Fatalf("expected tracked shell pane %%5, got %#v", updated)
+	}
+	if notice == nil {
+		t.Fatal("expected tracked-shell change notice")
+	}
+	active := controller.ActiveExecution()
+	if active == nil {
+		t.Fatal("expected active execution to remain present")
+	}
+	if active.TrackedShell.PaneID != "%5" {
+		t.Fatalf("expected active execution pane %%5 after tracked-shell move, got %#v", active.TrackedShell)
+	}
+	if target := controller.TakeControlTarget(); target.PaneID != "%5" {
+		t.Fatalf("expected take-control target pane %%5 after tracked-shell move, got %#v", target)
 	}
 }
 
@@ -272,6 +336,12 @@ func TestLocalControllerResumeAfterTakeControlReconcilesOwnedInteractivePane(t *
 	if controller.task.LastCommandResult == nil || controller.task.LastCommandResult.State != CommandExecutionCompleted {
 		t.Fatalf("expected completed last command result, got %#v", controller.task.LastCommandResult)
 	}
+	if !strings.Contains(agent.lastInput.Prompt, resumeAfterTakeControlPrompt) {
+		t.Fatalf("expected resume-after-take-control prompt, got %q", agent.lastInput.Prompt)
+	}
+	if !strings.Contains(agent.lastInput.Prompt, stateAuthorityPromptSuffix) {
+		t.Fatalf("expected state-authority guidance, got %q", agent.lastInput.Prompt)
+	}
 }
 
 func TestLocalControllerResumeAfterTakeControlInfersCanceledWhenPromptReturnedWithoutExitCode(t *testing.T) {
@@ -319,6 +389,114 @@ func TestLocalControllerResumeAfterTakeControlInfersCanceledWhenPromptReturnedWi
 	}
 }
 
+func TestLocalControllerResumeAfterTakeControlReconcilesCtrlCWithUnparseableLocalPrompt(t *testing.T) {
+	reader := &stubContextReader{
+		snapshot: "^C\n➜ shuttle git:(uitweaks) ✗",
+		observed: shell.ObservedShellState{
+			CurrentPaneCommand: "zsh",
+		},
+	}
+	controller := New(nil, nil, reader, SessionContext{
+		TrackedShell: TrackedShellTarget{PaneID: "%0"},
+		CurrentShell: &shell.PromptContext{
+			User:         "localuser",
+			Host:         "workstation",
+			Directory:    "/workspace/project",
+			GitBranch:    "uitweaks",
+			PromptSymbol: "%",
+			RawLine:      "localuser@workstation /workspace/project git:(uitweaks) %",
+		},
+	})
+	setPrimaryExecutionForTest(controller, CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 15",
+		Origin:    CommandOriginUserShell,
+		State:     CommandExecutionRunning,
+		StartedAt: time.Now().Add(-10 * time.Second),
+	})
+
+	events, err := controller.ResumeAfterTakeControl(context.Background())
+	if err != nil {
+		t.Fatalf("ResumeAfterTakeControl() error = %v", err)
+	}
+	if len(events) != 1 || events[0].Kind != EventCommandResult {
+		t.Fatalf("expected command result only, got %#v", events)
+	}
+	result, ok := events[0].Payload.(CommandResultSummary)
+	if !ok {
+		t.Fatalf("expected command result payload, got %#v", events[0].Payload)
+	}
+	if result.State != CommandExecutionCanceled || result.ExitCode != shell.InterruptedExitCode {
+		t.Fatalf("expected canceled handoff reconcile, got %#v", result)
+	}
+	if result.ShellContext != nil {
+		t.Fatalf("expected no fabricated shell context, got %#v", result.ShellContext)
+	}
+	if controller.ActiveExecution() != nil {
+		t.Fatal("expected active execution to clear after local ctrl-c reconcile")
+	}
+}
+
+func TestLocalControllerResumeAfterTakeControlReconcilesCtrlCInRemoteShellWrapper(t *testing.T) {
+	reader := &stubContextReader{
+		snapshot: "^C\nopenclaw@openclaw [~] custom-prompt",
+		observed: shell.ObservedShellState{
+			CurrentPaneCommand: "ssh",
+			Location: shell.ShellLocation{
+				Kind:      shell.ShellLocationRemote,
+				User:      "openclaw",
+				Host:      "openclaw",
+				Directory: "/home/openclaw",
+			},
+		},
+	}
+	controller := New(nil, nil, reader, SessionContext{
+		TrackedShell: TrackedShellTarget{PaneID: "%0"},
+		CurrentShell: &shell.PromptContext{
+			User:         "openclaw",
+			Host:         "openclaw",
+			Directory:    "/home/openclaw",
+			PromptSymbol: "$",
+			Remote:       true,
+			RawLine:      "openclaw@openclaw /home/openclaw $",
+		},
+		CurrentShellLocation: &shell.ShellLocation{
+			Kind:      shell.ShellLocationRemote,
+			User:      "openclaw",
+			Host:      "openclaw",
+			Directory: "/home/openclaw",
+		},
+	})
+	setPrimaryExecutionForTest(controller, CommandExecution{
+		ID:        "cmd-1",
+		Command:   "tail -f AGENTS.md",
+		Origin:    CommandOriginUserShell,
+		State:     CommandExecutionRunning,
+		StartedAt: time.Now().Add(-10 * time.Second),
+	})
+
+	events, err := controller.ResumeAfterTakeControl(context.Background())
+	if err != nil {
+		t.Fatalf("ResumeAfterTakeControl() error = %v", err)
+	}
+	if len(events) != 1 || events[0].Kind != EventCommandResult {
+		t.Fatalf("expected command result only, got %#v", events)
+	}
+	result, ok := events[0].Payload.(CommandResultSummary)
+	if !ok {
+		t.Fatalf("expected command result payload, got %#v", events[0].Payload)
+	}
+	if result.State != CommandExecutionCanceled || result.ExitCode != shell.InterruptedExitCode {
+		t.Fatalf("expected canceled remote handoff reconcile, got %#v", result)
+	}
+	if result.ShellContext != nil {
+		t.Fatalf("expected no fabricated remote shell context, got %#v", result.ShellContext)
+	}
+	if controller.ActiveExecution() != nil {
+		t.Fatal("expected active execution to clear after remote ctrl-c reconcile")
+	}
+}
+
 func TestLocalControllerResumeAfterTakeControlDoesNotReconcileWithoutCurrentPrompt(t *testing.T) {
 	reader := &stubContextReader{
 		snapshot: "localuser@workstation ~/workspace/project %\n. '/run/user/1000/shuttle/shell-integration/zsh-pane0.sh'\nsleep 20",
@@ -340,6 +518,47 @@ func TestLocalControllerResumeAfterTakeControlDoesNotReconcileWithoutCurrentProm
 	}
 	if len(events) != 0 {
 		t.Fatalf("expected no reconcile events without a current prompt, got %#v", events)
+	}
+	if active := controller.ActiveExecution(); active == nil || active.ID != "cmd-1" {
+		t.Fatalf("expected active execution to remain running, got %#v", active)
+	}
+}
+
+func TestLocalControllerResumeAfterTakeControlDoesNotReenterAgentWhileTrackedExecutionStillActive(t *testing.T) {
+	agent := &stubAgent{
+		response: AgentResponse{
+			Message: "This should not be called.",
+		},
+	}
+	reader := &stubContextReader{
+		snapshot: "still scanning",
+		contexts: []shell.PromptContext{{}},
+	}
+	controller := New(agent, nil, reader, SessionContext{
+		SessionName:  "shuttle-test",
+		TrackedShell: TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
+	})
+	setPrimaryExecutionForTest(controller, CommandExecution{
+		ID:        "cmd-1",
+		Command:   "find . -type f -name '*.md'",
+		Origin:    CommandOriginAgentProposal,
+		State:     CommandExecutionRunning,
+		StartedAt: time.Now().Add(-10 * time.Second),
+		TrackedShell: TrackedShellTarget{
+			SessionName: "shuttle-test",
+			PaneID:      "%0",
+		},
+	})
+
+	events, err := controller.ResumeAfterTakeControl(context.Background())
+	if err != nil {
+		t.Fatalf("ResumeAfterTakeControl() error = %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected no resume events while tracked execution is still active, got %#v", events)
+	}
+	if agent.lastInput.Prompt != "" {
+		t.Fatalf("expected no agent re-entry while command is still active, got %#v", agent.lastInput)
 	}
 	if active := controller.ActiveExecution(); active == nil || active.ID != "cmd-1" {
 		t.Fatalf("expected active execution to remain running, got %#v", active)
@@ -512,8 +731,11 @@ func TestLocalControllerAgentOwnedLostTriggersRecoveryInference(t *testing.T) {
 		t.Fatalf("unexpected event kinds: %#v", events)
 	}
 
-	if agent.lastInput.Prompt != lostTrackingCheckInPrompt {
+	if !strings.Contains(agent.lastInput.Prompt, lostTrackingCheckInPrompt) {
 		t.Fatalf("expected lost recovery prompt, got %q", agent.lastInput.Prompt)
+	}
+	if !strings.Contains(agent.lastInput.Prompt, stateAuthorityPromptSuffix) {
+		t.Fatalf("expected state-authority guidance, got %q", agent.lastInput.Prompt)
 	}
 	if agent.lastInput.Task.CurrentExecution == nil || agent.lastInput.Task.CurrentExecution.State != CommandExecutionLost {
 		t.Fatalf("expected lost current execution in agent input, got %#v", agent.lastInput.Task.CurrentExecution)
@@ -604,12 +826,46 @@ func TestLocalControllerSubmitProposedShellCommandUsesOwnedExecutionPane(t *test
 	if len(events) != 3 || events[0].Kind != EventSystemNotice || events[1].Kind != EventCommandStart || events[2].Kind != EventCommandResult {
 		t.Fatalf("expected owned-execution notice plus start/result, got %#v", events)
 	}
+	notice, ok := events[0].Payload.(TextPayload)
+	if !ok || strings.Contains(notice.Text, "%9") || !strings.Contains(notice.Text, "owned execution pane") {
+		t.Fatalf("expected generic owned execution notice, got %#v", events[0].Payload)
+	}
 	startPayload, ok := events[1].Payload.(CommandStartPayload)
 	if !ok {
 		t.Fatalf("expected command start payload, got %#v", events[1].Payload)
 	}
 	if startPayload.Execution.TrackedShell.PaneID != "%9" {
 		t.Fatalf("expected execution target pane %%9, got %#v", startPayload.Execution.TrackedShell)
+	}
+}
+
+func TestLocalControllerBlocksInternalTmuxPaneProposal(t *testing.T) {
+	controller := New(nil, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	setPrimaryExecutionForTest(controller, CommandExecution{
+		ID:        "cmd-1",
+		Command:   "sleep 15",
+		Origin:    CommandOriginAgentProposal,
+		State:     CommandExecutionRunning,
+		StartedAt: time.Now(),
+		TrackedShell: TrackedShellTarget{
+			SessionName: "shuttle-test",
+			PaneID:      "%9",
+		},
+	})
+
+	events, err := controller.SubmitProposedShellCommand(context.Background(), "tmux capture-pane -pt %9 -S -80")
+	if err != nil {
+		t.Fatalf("SubmitProposedShellCommand() error = %v", err)
+	}
+	if len(events) != 1 || events[0].Kind != EventSystemNotice {
+		t.Fatalf("expected internal tmux guard notice, got %#v", events)
+	}
+	notice, ok := events[0].Payload.(TextPayload)
+	if !ok || !strings.Contains(notice.Text, "Shuttle-managed tmux pane IDs") {
+		t.Fatalf("expected guard notice payload, got %#v", events[0].Payload)
+	}
+	if controller.ActiveExecution() == nil || controller.ActiveExecution().Command != "sleep 15" {
+		t.Fatalf("expected active execution to remain unchanged, got %#v", controller.ActiveExecution())
 	}
 }
 
@@ -923,7 +1179,61 @@ func TestLocalControllerActiveExecutionVisibleWhileCommandRuns(t *testing.T) {
 	}
 }
 
+func TestLocalControllerSubmitProposedShellCommandUsesTrackedShellWhenFreshPromptIsRemote(t *testing.T) {
+	runner := &ownedExecutionRunner{
+		ownedPane: shell.OwnedExecutionPane{SessionName: "shuttle-test", PaneID: "%9"},
+	}
+	runner.result = shell.TrackedExecution{
+		CommandID: "cmd-1",
+		Command:   "find . -name implementation-plan.md",
+		ExitCode:  0,
+		Captured:  "implementation-plan.md",
+	}
+	reader := &stubContextReader{
+		context: shell.PromptContext{
+			User:         "openclaw",
+			Host:         "openclaw",
+			Directory:    "~",
+			PromptSymbol: "$",
+			RawLine:      "openclaw@openclaw ~ $",
+			Remote:       true,
+		},
+	}
+	controller := New(nil, runner, reader, SessionContext{
+		SessionName:  "shuttle-test",
+		TrackedShell: TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
+		CurrentShell: &shell.PromptContext{
+			User:         "jsmith",
+			Host:         "linuxdesktop",
+			Directory:    "~/source/repos/aiterm",
+			PromptSymbol: "%",
+			RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm %",
+			Remote:       false,
+		},
+	})
+
+	if _, err := controller.SubmitProposedShellCommand(context.Background(), "find . -name implementation-plan.md"); err != nil {
+		t.Fatalf("SubmitProposedShellCommand() error = %v", err)
+	}
+	if runner.startDir != "" {
+		t.Fatalf("expected no owned execution pane for fresh remote prompt, got start dir %q", runner.startDir)
+	}
+	if len(runner.paneIDs) != 1 || runner.paneIDs[0] != "%0" {
+		t.Fatalf("expected command to run in tracked shell pane %%0, got %#v", runner.paneIDs)
+	}
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if controller.session.CurrentShell == nil || !controller.session.CurrentShell.Remote || controller.session.CurrentShell.Host != "openclaw" {
+		t.Fatalf("expected session current shell to refresh to remote prompt, got %#v", controller.session.CurrentShell)
+	}
+}
+
 func TestSubmitProposedShellCommandRepairsRemoteLocalPathProposal(t *testing.T) {
+	homeDirectory, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("UserHomeDir() error = %v", err)
+	}
+
 	agent := &stubAgent{
 		response: AgentResponse{
 			Message: "Use a remote-relative inspection command instead.",
@@ -936,7 +1246,8 @@ func TestSubmitProposedShellCommandRepairsRemoteLocalPathProposal(t *testing.T) 
 	}
 	controller := New(agent, nil, nil, SessionContext{
 		TrackedShell:       TrackedShellTarget{PaneID: "%0"},
-		LocalWorkspaceRoot: "/home/jsmith/source/repos/aiterm",
+		LocalHomeDirectory: filepath.Join(homeDirectory, "..", "stale-home"),
+		LocalWorkspaceRoot: filepath.Join(homeDirectory, "source", "repos", "aiterm"),
 		CurrentShell: &shell.PromptContext{
 			User:         "openclaw",
 			Host:         "openclaw",
@@ -947,7 +1258,7 @@ func TestSubmitProposedShellCommandRepairsRemoteLocalPathProposal(t *testing.T) 
 		},
 	})
 
-	events, err := controller.SubmitProposedShellCommand(context.Background(), `find /home/jsmith -name foo.txt -type f -print`)
+	events, err := controller.SubmitProposedShellCommand(context.Background(), fmt.Sprintf("find %s -name foo.txt -type f -print", homeDirectory))
 	if err != nil {
 		t.Fatalf("SubmitProposedShellCommand() error = %v", err)
 	}
@@ -1073,8 +1384,11 @@ func TestLocalControllerCheckActiveExecutionUsesAgentContext(t *testing.T) {
 	if len(events) != 1 || events[0].Kind != EventAgentMessage {
 		t.Fatalf("unexpected check-in events: %#v", events)
 	}
-	if agent.lastInput.Prompt != activeExecutionCheckInPrompt {
+	if !strings.Contains(agent.lastInput.Prompt, activeExecutionCheckInPrompt) {
 		t.Fatalf("expected running check-in prompt, got %q", agent.lastInput.Prompt)
+	}
+	if !strings.Contains(agent.lastInput.Prompt, stateAuthorityPromptSuffix) {
+		t.Fatalf("expected state-authority guidance, got %q", agent.lastInput.Prompt)
 	}
 	if agent.lastInput.Task.CurrentExecution == nil || agent.lastInput.Task.CurrentExecution.State != CommandExecutionBackgroundMonitor {
 		t.Fatalf("expected background monitoring state, got %#v", agent.lastInput.Task.CurrentExecution)
@@ -1130,8 +1444,11 @@ func TestLocalControllerCheckActiveExecutionPreservesAwaitingInputState(t *testi
 	if err != nil {
 		t.Fatalf("CheckActiveExecution() error = %v", err)
 	}
-	if agent.lastInput.Prompt != awaitingInputCheckInPrompt {
+	if !strings.Contains(agent.lastInput.Prompt, awaitingInputCheckInPrompt) {
 		t.Fatalf("expected awaiting-input prompt, got %q", agent.lastInput.Prompt)
+	}
+	if !strings.Contains(agent.lastInput.Prompt, stateAuthorityPromptSuffix) {
+		t.Fatalf("expected state-authority guidance, got %q", agent.lastInput.Prompt)
 	}
 	if agent.lastInput.Task.CurrentExecution == nil || agent.lastInput.Task.CurrentExecution.State != CommandExecutionAwaitingInput {
 		t.Fatalf("expected awaiting_input state to be preserved, got %#v", agent.lastInput.Task.CurrentExecution)
@@ -1161,8 +1478,11 @@ func TestLocalControllerCheckActiveExecutionPreservesInteractiveFullscreenState(
 	if err != nil {
 		t.Fatalf("CheckActiveExecution() error = %v", err)
 	}
-	if agent.lastInput.Prompt != fullscreenCheckInPrompt {
+	if !strings.Contains(agent.lastInput.Prompt, fullscreenCheckInPrompt) {
 		t.Fatalf("expected fullscreen prompt, got %q", agent.lastInput.Prompt)
+	}
+	if !strings.Contains(agent.lastInput.Prompt, stateAuthorityPromptSuffix) {
+		t.Fatalf("expected state-authority guidance, got %q", agent.lastInput.Prompt)
 	}
 	if agent.lastInput.Task.CurrentExecution == nil || agent.lastInput.Task.CurrentExecution.State != CommandExecutionInteractiveFullscreen {
 		t.Fatalf("expected interactive_fullscreen state to be preserved, got %#v", agent.lastInput.Task.CurrentExecution)
@@ -1192,8 +1512,11 @@ func TestLocalControllerCheckActiveExecutionUsesLostPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckActiveExecution() error = %v", err)
 	}
-	if agent.lastInput.Prompt != lostTrackingCheckInPrompt {
+	if !strings.Contains(agent.lastInput.Prompt, lostTrackingCheckInPrompt) {
 		t.Fatalf("expected lost prompt, got %q", agent.lastInput.Prompt)
+	}
+	if !strings.Contains(agent.lastInput.Prompt, stateAuthorityPromptSuffix) {
+		t.Fatalf("expected state-authority guidance, got %q", agent.lastInput.Prompt)
 	}
 	if agent.lastInput.Task.RecoverySnapshot != "recovery lines" {
 		t.Fatalf("expected recovery snapshot, got %q", agent.lastInput.Task.RecoverySnapshot)
@@ -1720,5 +2043,66 @@ func TestLocalControllerCheckActiveExecutionSkipsUserShellCommands(t *testing.T)
 	}
 	if agent.lastInput.Prompt != "" {
 		t.Fatalf("expected agent not to be called, got input %#v", agent.lastInput)
+	}
+}
+
+func TestLocalControllerSubmitShellCommandPreservesMonitoredTailWhenCompletionCaptureEmpty(t *testing.T) {
+	monitor := newManualMonitor()
+	runner := &monitoringRunner{monitor: monitor, started: make(chan struct{}, 1)}
+	controller := New(nil, runner, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+
+	done := make(chan struct{})
+	var (
+		events []TranscriptEvent
+		err    error
+	)
+	go func() {
+		events, err = controller.SubmitShellCommand(context.Background(), "find . -name '*.md'")
+		close(done)
+	}()
+
+	runner.waitForStart(t)
+	monitor.publish(shell.MonitorSnapshot{
+		State:            shell.MonitorStateRunning,
+		LatestOutputTail: "docs/a.md\ndocs/b.md\n... (2004 more lines)",
+	})
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		active := controller.ActiveExecution()
+		if active != nil && strings.Contains(active.LatestOutputTail, "docs/a.md") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected active execution tail to update before completion, got %#v", active)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	monitor.finish(shell.TrackedExecution{
+		CommandID: "cmd-1",
+		Command:   "find . -name '*.md'",
+		ExitCode:  0,
+		Captured:  "",
+	}, nil)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for monitored command to finish")
+	}
+	if err != nil {
+		t.Fatalf("SubmitShellCommand() error = %v", err)
+	}
+	if len(events) != 2 || events[1].Kind != EventCommandResult {
+		t.Fatalf("expected start/result events, got %#v", events)
+	}
+	payload, ok := events[1].Payload.(CommandResultSummary)
+	if !ok {
+		t.Fatalf("expected command result payload, got %#v", events[1].Payload)
+	}
+	if !strings.Contains(payload.Summary, "docs/a.md") {
+		t.Fatalf("expected result summary to preserve monitored tail, got %q", payload.Summary)
+	}
+	if controller.task.LastCommandResult == nil || !strings.Contains(controller.task.LastCommandResult.Summary, "docs/b.md") {
+		t.Fatalf("expected last command result to preserve monitored tail, got %#v", controller.task.LastCommandResult)
 	}
 }

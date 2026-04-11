@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -50,17 +52,28 @@ func (m Model) pollShellTailCmd() tea.Cmd {
 	}
 }
 
+func (m Model) shouldAcceptPolledShellTail() bool {
+	if !m.showShellTail {
+		return false
+	}
+	if m.activeExecution != nil {
+		return true
+	}
+	return !(m.directShellPending || m.proposalRunPending || m.approvalInFlight)
+}
+
 func (m Model) pollActiveExecutionCmd() tea.Cmd {
 	if m.ctrl == nil {
 		return nil
 	}
+	epoch := m.activeExecutionPollEpoch
 
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
 		events, execution, err := m.ctrl.RefreshActiveExecution(ctx)
-		return activeExecutionMsg{execution: execution, events: events, err: err}
+		return activeExecutionMsg{execution: execution, events: events, err: err, epoch: epoch}
 	}
 }
 
@@ -68,13 +81,35 @@ func (m Model) pollActiveExecutionAfter(delay time.Duration) tea.Cmd {
 	if m.ctrl == nil {
 		return nil
 	}
+	epoch := m.activeExecutionPollEpoch
 
 	return tea.Tick(delay, func(time.Time) tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
 		events, execution, err := m.ctrl.RefreshActiveExecution(ctx)
-		return activeExecutionMsg{execution: execution, events: events, err: err}
+		return activeExecutionMsg{execution: execution, events: events, err: err, epoch: epoch}
+	})
+}
+
+func (m *Model) invalidateActiveExecutionPolls() {
+	m.activeExecutionPollEpoch++
+}
+
+func (m Model) resumeAfterTakeControlAfter(delay time.Duration) tea.Cmd {
+	if m.ctrl == nil {
+		return nil
+	}
+
+	return tea.Tick(delay, func(time.Time) tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), m.currentAgentTurnTimeout())
+		defer cancel()
+
+		events, err := m.ctrl.ResumeAfterTakeControl(ctx)
+		return controllerEventsMsg{
+			events: events,
+			err:    err,
+		}
 	})
 }
 
@@ -127,6 +162,31 @@ func sendFullscreenKeysCmd(config takeControlConfig, paneID string, keys string)
 
 		return fullscreenKeysSentMsg{keys: keys}
 	}
+}
+
+const activeKeysLeaseTTL = 3 * time.Second
+const autoFullscreenKeysCooldown = 1500 * time.Millisecond
+
+var awaitingInputSubmitEnterPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)password(?: for [^:]+)?:\s*$`),
+	regexp.MustCompile(`(?i)(?:^|[[:space:]])password(?: for [^:]+)?\s*$`),
+	regexp.MustCompile(`(?i)passphrase(?: for [^:]+)?:\s*$`),
+	regexp.MustCompile(`(?i)(?:^|[[:space:]])passphrase(?: for [^:]+)?\s*$`),
+	regexp.MustCompile(`(?i)continue connecting.*\(yes/no`),
+	regexp.MustCompile(`(?i)\(yes/no(?:/\[[^\]]+\])?\)\??\s*$`),
+	regexp.MustCompile(`(?i)\[[yYnN]/[yYnN]\]\s*$`),
+	regexp.MustCompile(`(?i)enter [^:]{1,80}:\s*$`),
+	regexp.MustCompile(`(?i)(choice|selection|select|choose|option):\s*$`),
+}
+
+var awaitingInputCommandSubmitPrefixes = []string{
+	"ssh ",
+	"ssh\n",
+	"sudo ",
+	"sudo\n",
+	"su ",
+	"su\n",
+	"passwd",
 }
 
 type fullscreenKeyEvent struct {
@@ -247,10 +307,30 @@ func (m *Model) abandonControllerExecution(reason string) *controller.CommandExe
 	}
 
 	execution := m.ctrl.AbandonActiveExecution(reason)
-	if execution != nil && strings.TrimSpace(execution.LatestOutputTail) != "" {
-		m.liveShellTail = execution.LatestOutputTail
+	if displayTail := executionDisplayTail(execution); strings.TrimSpace(displayTail) != "" {
+		m.liveShellTail = displayTail
 	}
 	return execution
+}
+
+func executionDisplayTail(execution *controller.CommandExecution) string {
+	if execution == nil {
+		return ""
+	}
+	if strings.TrimSpace(execution.LatestDisplayTail) != "" {
+		return execution.LatestDisplayTail
+	}
+	return execution.LatestOutputTail
+}
+
+func commandResultDisplaySummary(result *controller.CommandResultSummary) string {
+	if result == nil {
+		return ""
+	}
+	if strings.TrimSpace(result.DisplaySummary) != "" {
+		return result.DisplaySummary
+	}
+	return result.Summary
 }
 
 func interruptedExecutionEntry(execution *controller.CommandExecution, summary string) Entry {
@@ -262,8 +342,9 @@ func interruptedExecutionEntry(execution *controller.CommandExecution, summary s
 	}
 
 	bodyLines := []string{"status=canceled"}
-	if strings.TrimSpace(execution.LatestOutputTail) != "" {
-		bodyLines = append(bodyLines, compactResultPreview(strings.TrimSpace(execution.LatestOutputTail), 6))
+	displayTail := executionDisplayTail(execution)
+	if strings.TrimSpace(displayTail) != "" {
+		bodyLines = append(bodyLines, compactResultPreview(strings.TrimSpace(displayTail), 6))
 	} else {
 		bodyLines = append(bodyLines, "(no output)")
 	}
@@ -278,8 +359,8 @@ func interruptedExecutionEntry(execution *controller.CommandExecution, summary s
 	if strings.TrimSpace(summary) != "" {
 		detail = append(detail, "", "summary:", summary)
 	}
-	if strings.TrimSpace(execution.LatestOutputTail) != "" {
-		detail = append(detail, "", "output so far:", strings.TrimSpace(execution.LatestOutputTail))
+	if strings.TrimSpace(displayTail) != "" {
+		detail = append(detail, "", "output so far:", strings.TrimSpace(displayTail))
 	}
 
 	return Entry{
@@ -324,14 +405,21 @@ func (m Model) activeExecutionUsesTrackedShell() bool {
 }
 
 func (m Model) takeControlTargetsActiveExecution() bool {
+	return strings.TrimSpace(m.activeExecutionTakeControlPaneID()) != ""
+}
+
+func (m Model) activeExecutionTakeControlPaneID() string {
 	if m.activeExecution == nil {
-		return false
+		return ""
 	}
 	executionPane := strings.TrimSpace(m.activeExecution.TrackedShell.PaneID)
 	if executionPane == "" {
-		return false
+		return ""
 	}
-	return executionPane == strings.TrimSpace(m.takeControl.TrackedPaneID)
+	if executionPane == m.persistentTrackedPaneID() {
+		return ""
+	}
+	return executionPane
 }
 
 func errString(err error) string {
@@ -409,9 +497,15 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 	}
 
 	if execution == nil {
+		m.invalidateActiveExecutionPolls()
 		m.handoffReturnGraceUntil = time.Time{}
 		m.activeExecutionMissingSince = time.Time{}
 		m.activeExecution = nil
+		m.clearActiveKeysLease()
+		m.activeKeysLease.lastNoticeID = ""
+		m.dismissedAutoKeysFingerprint = ""
+		m.suppressAutoKeysUntil = time.Time{}
+		m.autoOpenedFullscreenKeys = false
 		m.pendingFullscreen = nil
 		m.lastFullscreenKeys = ""
 		m.lastFullscreenKeysAt = time.Time{}
@@ -419,6 +513,7 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 		m.lastCheckInAt = time.Time{}
 		m.interactiveCheckInCount = 0
 		m.interactiveCheckInPaused = false
+		m.pendingContinueAfterCommand = false
 		m.lastInterruptNoticeID = ""
 		m.handoffVisible = false
 		m.handoffPriorState = ""
@@ -431,12 +526,18 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 
 	m.activeExecutionMissingSince = time.Time{}
 	if currentID != execution.ID {
+		m.clearActiveKeysLease()
+		m.activeKeysLease.lastNoticeID = ""
+		m.dismissedAutoKeysFingerprint = ""
+		m.suppressAutoKeysUntil = time.Time{}
+		m.autoOpenedFullscreenKeys = false
 		m.lastFullscreenKeys = ""
 		m.lastFullscreenKeysAt = time.Time{}
 		m.checkInInFlight = false
 		m.lastCheckInAt = time.Time{}
 		m.interactiveCheckInCount = 0
 		m.interactiveCheckInPaused = false
+		m.pendingContinueAfterCommand = false
 		m.lastInterruptNoticeID = ""
 		m.handoffVisible = false
 		m.handoffPriorState = ""
@@ -459,9 +560,35 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 		m.lastFullscreenKeys = ""
 		m.lastFullscreenKeysAt = time.Time{}
 	}
+	if execution.State != controller.CommandExecutionInteractiveFullscreen &&
+		execution.State != controller.CommandExecutionAwaitingInput {
+		m.clearActiveKeysLease()
+		m.activeKeysLease.lastNoticeID = ""
+		m.dismissedAutoKeysFingerprint = ""
+		m.suppressAutoKeysUntil = time.Time{}
+		m.autoOpenedFullscreenKeys = false
+	}
 	if !executionNeedsUserDrivenResume(execution) {
 		m.interactiveCheckInCount = 0
 		m.interactiveCheckInPaused = false
+	}
+}
+
+func (m *Model) updatePendingContinueAfterCommand(events []controller.TranscriptEvent, autoContinue bool) {
+	if autoContinue || m.activePlan == nil {
+		m.pendingContinueAfterCommand = false
+		return
+	}
+	if containsEventKind(events, controller.EventProposal) || containsEventKind(events, controller.EventApproval) || containsEventKind(events, controller.EventPatchApplyResult) {
+		m.pendingContinueAfterCommand = false
+		return
+	}
+	if containsEventKind(events, controller.EventCommandStart) {
+		m.pendingContinueAfterCommand = false
+		return
+	}
+	if containsEventKind(events, controller.EventCommandResult) {
+		m.pendingContinueAfterCommand = true
 	}
 }
 
@@ -515,18 +642,8 @@ func (m *Model) syncTrackedShellTarget() {
 		m.takeControl.SessionName = sessionName
 	}
 	m.workspace.TopPane.ID = paneID
-	takeControlTarget := m.ctrl.TakeControlTarget()
-	takeControlSession := strings.TrimSpace(takeControlTarget.SessionName)
-	takeControlPaneID := strings.TrimSpace(takeControlTarget.PaneID)
-	if takeControlSession != "" {
-		m.takeControl.SessionName = takeControlSession
-	}
-	if takeControlPaneID != "" {
-		m.takeControl.TrackedPaneID = takeControlPaneID
-	} else {
-		m.takeControl.TrackedPaneID = paneID
-	}
-	m.takeControl.TemporaryPane = m.takeControl.TrackedPaneID != "" && m.takeControl.TrackedPaneID != paneID
+	m.takeControl.TrackedPaneID = paneID
+	m.takeControl.TemporaryPane = false
 
 	if previousSession != m.workspace.SessionName || previousPane != m.workspace.TopPane.ID {
 		logging.Trace(
@@ -587,6 +704,9 @@ func (m Model) formatShellError(err error) string {
 func (m *Model) syncActionState(events []controller.TranscriptEvent) {
 	if shellContext := latestShellContext(events); shellContext != nil {
 		m.shellContext = *shellContext
+	}
+	if result := latestCommandResult(events); result != nil {
+		m.lastCommandResult = result
 	}
 	if modelInfo := latestModelInfo(events); modelInfo != nil {
 		m.lastModelInfo = modelInfo
@@ -664,8 +784,10 @@ func (m Model) planProgressSummary() string {
 	if done == len(m.activePlan.Steps) {
 		return fmt.Sprintf("Plan complete (%d/%d)", done, len(m.activePlan.Steps))
 	}
-
-	return fmt.Sprintf("Plan %d/%d", current, len(m.activePlan.Steps))
+	if done > 0 {
+		return fmt.Sprintf("Step %d of %d in progress (%d complete)", current, len(m.activePlan.Steps), done)
+	}
+	return fmt.Sprintf("Step %d of %d in progress", current, len(m.activePlan.Steps))
 }
 
 func planStepMarker(status controller.PlanStepStatus) string {
@@ -757,6 +879,24 @@ func latestShellContext(events []controller.TranscriptEvent) *shell.PromptContex
 
 		context := *payload.ShellContext
 		return &context
+	}
+
+	return nil
+}
+
+func latestCommandResult(events []controller.TranscriptEvent) *controller.CommandResultSummary {
+	for index := len(events) - 1; index >= 0; index-- {
+		if events[index].Kind != controller.EventCommandResult {
+			continue
+		}
+
+		payload, ok := events[index].Payload.(controller.CommandResultSummary)
+		if !ok {
+			continue
+		}
+
+		result := payload
+		return &result
 	}
 
 	return nil
@@ -865,6 +1005,225 @@ func (m Model) canSendActiveKeys() bool {
 		m.activeExecution != nil &&
 		(m.activeExecution.State == controller.CommandExecutionInteractiveFullscreen ||
 			m.activeExecution.State == controller.CommandExecutionAwaitingInput)
+}
+
+func (m *Model) observeActiveKeysLease(source string) {
+	if !m.canSendActiveKeys() {
+		m.clearActiveKeysLease()
+		return
+	}
+
+	fingerprint := activeKeysLeaseFingerprint(m.activeExecution, m.liveShellTail)
+	if fingerprint == "" {
+		m.clearActiveKeysLease()
+		return
+	}
+
+	noticeID := m.activeKeysLease.lastNoticeID
+	m.activeKeysLease = activeKeysLease{
+		executionID:  m.activeExecution.ID,
+		state:        m.activeExecution.State,
+		fingerprint:  fingerprint,
+		observedAt:   time.Now(),
+		source:       source,
+		lastNoticeID: noticeID,
+	}
+}
+
+func (m *Model) clearActiveKeysLease() {
+	m.activeKeysLease.executionID = ""
+	m.activeKeysLease.state = ""
+	m.activeKeysLease.fingerprint = ""
+	m.activeKeysLease.observedAt = time.Time{}
+	m.activeKeysLease.source = ""
+}
+
+func activeKeysLeaseFingerprint(execution *controller.CommandExecution, shellTail string) string {
+	if execution == nil {
+		return ""
+	}
+
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(execution.ID))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(execution.Command))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(execution.TrackedShell.SessionName))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(execution.TrackedShell.PaneID))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(execution.State))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(execution.LatestOutputTail))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(shellTail))
+	return fmt.Sprintf("%x", hash.Sum64())
+}
+
+func (m Model) hasFreshActiveKeysLease() bool {
+	if !m.canSendActiveKeys() || m.activeExecution == nil {
+		return false
+	}
+	if m.activeKeysLease.executionID != m.activeExecution.ID {
+		return false
+	}
+	if m.activeKeysLease.state != m.activeExecution.State {
+		return false
+	}
+	if m.activeKeysLease.fingerprint == "" {
+		return false
+	}
+	if time.Since(m.activeKeysLease.observedAt) > activeKeysLeaseTTL {
+		return false
+	}
+	return m.activeKeysLease.fingerprint == activeKeysLeaseFingerprint(m.activeExecution, m.liveShellTail)
+}
+
+func (m *Model) consumeFreshActiveKeysLease() bool {
+	if !m.hasFreshActiveKeysLease() {
+		return false
+	}
+	m.clearActiveKeysLease()
+	return true
+}
+
+func (m *Model) activeKeysGuardCmd() tea.Cmd {
+	if m.activeExecution == nil {
+		return nil
+	}
+
+	noticeID := m.activeExecution.ID + "|" + string(m.activeExecution.State)
+	if m.activeKeysLease.lastNoticeID != noticeID {
+		m.appendTranscriptEntry(Entry{
+			Title: "system",
+			Body:  "Shuttle needs a fresh read of the active terminal before sending keys. It refreshed the active execution and shell tail; review the latest output, then retry KEYS>.",
+		})
+		m.activeKeysLease.lastNoticeID = noticeID
+	}
+	return tea.Batch(m.pollActiveExecutionCmd(), m.pollShellTailCmd())
+}
+
+func (m Model) shouldAutoOpenFullscreenKeys() bool {
+	if m.sendingFullscreenKeys || m.activeExecution == nil {
+		return false
+	}
+	if !m.suppressAutoKeysUntil.IsZero() && time.Now().Before(m.suppressAutoKeysUntil) {
+		return false
+	}
+	if m.activeExecution.State != controller.CommandExecutionAwaitingInput {
+		return false
+	}
+	if !m.hasFreshActiveKeysLease() {
+		return false
+	}
+	if strings.TrimSpace(m.input) != "" {
+		return false
+	}
+	if m.helpOpen || m.settingsOpen || m.onboardingOpen || m.detailOpen {
+		return false
+	}
+	if m.pendingDangerousConfirm != nil || m.pendingFullscreen != nil || m.pendingProposal != nil || m.pendingApproval != nil {
+		return false
+	}
+	if m.editingProposal != nil || m.refiningProposal != nil || m.refiningApproval != nil {
+		return false
+	}
+	return m.dismissedAutoKeysFingerprint != m.activeKeysLease.fingerprint
+}
+
+func (m *Model) autoOpenFullscreenKeysIfNeeded() {
+	if !m.shouldAutoOpenFullscreenKeys() {
+		return
+	}
+	m.sendingFullscreenKeys = true
+	m.autoOpenedFullscreenKeys = true
+	m.setInput("")
+}
+
+func (m *Model) dismissFullscreenKeysAutoOpen() {
+	if m.activeKeysLease.fingerprint != "" {
+		m.dismissedAutoKeysFingerprint = m.activeKeysLease.fingerprint
+	}
+	m.sendingFullscreenKeys = false
+	m.autoOpenedFullscreenKeys = false
+	m.setInput("")
+}
+
+func (m *Model) suppressAutoFullscreenKeysForCurrentPrompt() {
+	if m.activeExecution == nil {
+		return
+	}
+	fingerprint := m.activeKeysLease.fingerprint
+	if fingerprint == "" {
+		fingerprint = activeKeysLeaseFingerprint(m.activeExecution, m.liveShellTail)
+	}
+	if fingerprint != "" {
+		m.dismissedAutoKeysFingerprint = fingerprint
+	}
+	m.suppressAutoKeysUntil = time.Now().Add(autoFullscreenKeysCooldown)
+	m.autoOpenedFullscreenKeys = false
+}
+
+func shouldAutoAppendEnterForAwaitingInput(tail string) bool {
+	lines := recentNonEmptyLines(tail, 3)
+	if len(lines) == 0 {
+		return false
+	}
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		trimmed = strings.Trim(trimmed, `"'`)
+		trimmed = strings.TrimSpace(trimmed)
+		if trimmed == "" {
+			continue
+		}
+		for _, pattern := range awaitingInputSubmitEnterPatterns {
+			if pattern.MatchString(trimmed) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func shouldAutoAppendEnterForAwaitingInputCommand(command string) bool {
+	command = strings.ToLower(strings.TrimSpace(command))
+	if command == "" {
+		return false
+	}
+	for _, prefix := range awaitingInputCommandSubmitPrefixes {
+		if strings.HasPrefix(command, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldAutoAppendEnterForActiveExecution(execution *controller.CommandExecution, tails ...string) bool {
+	for _, tail := range tails {
+		if shouldAutoAppendEnterForAwaitingInput(tail) {
+			return true
+		}
+	}
+	if execution == nil || execution.State != controller.CommandExecutionAwaitingInput {
+		return false
+	}
+	return shouldAutoAppendEnterForAwaitingInputCommand(execution.Command)
+}
+
+func recentNonEmptyLines(value string, limit int) []string {
+	parts := strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
+	lines := make([]string, 0, limit)
+	for idx := len(parts) - 1; idx >= 0 && len(lines) < limit; idx-- {
+		if strings.TrimSpace(parts[idx]) == "" {
+			continue
+		}
+		lines = append(lines, parts[idx])
+	}
+	for left, right := 0, len(lines)-1; left < right; left, right = left+1, right-1 {
+		lines[left], lines[right] = lines[right], lines[left]
+	}
+	return lines
 }
 
 func (m *Model) appendInterruptNotice(body string) {
@@ -982,12 +1341,51 @@ func humanizeExecutionElapsed(startedAt time.Time) string {
 
 func (m Model) currentProviderChoiceIndex() int {
 	for index, choice := range m.onboardingChoices {
-		if choice.Profile.Preset == m.activeProvider.Preset && choice.Profile.Model == m.activeProvider.Model && choice.Profile.BaseURL == m.activeProvider.BaseURL {
+		if onboardingCandidateMatchesProfile(choice, m.activeProvider) {
 			return index
 		}
 	}
 
 	return 0
+}
+
+func collapseOnboardingChoices(candidates []provider.OnboardingCandidate, active provider.Profile) []provider.OnboardingCandidate {
+	collapsed := make([]provider.OnboardingCandidate, 0, len(candidates))
+	indexByPreset := map[provider.ProviderPreset]int{}
+	selectedCurrent := map[provider.ProviderPreset]bool{}
+
+	for _, candidate := range candidates {
+		preset := candidate.Profile.Preset
+		if preset == "" {
+			continue
+		}
+		current := onboardingCandidateMatchesProfile(candidate, active)
+		index, exists := indexByPreset[preset]
+		if !exists {
+			indexByPreset[preset] = len(collapsed)
+			collapsed = append(collapsed, candidate)
+			selectedCurrent[preset] = current
+			continue
+		}
+		if current && !selectedCurrent[preset] {
+			collapsed[index] = candidate
+			selectedCurrent[preset] = true
+		}
+	}
+
+	return collapsed
+}
+
+func onboardingCandidateMatchesProfile(candidate provider.OnboardingCandidate, profile provider.Profile) bool {
+	if candidate.Profile.Preset == "" || profile.Preset == "" {
+		return false
+	}
+	return candidate.Profile.Preset == profile.Preset &&
+		strings.TrimSpace(candidate.Profile.BaseURL) == strings.TrimSpace(profile.BaseURL) &&
+		strings.TrimSpace(candidate.Profile.Model) == strings.TrimSpace(profile.Model) &&
+		strings.TrimSpace(candidate.Profile.CLICommand) == strings.TrimSpace(profile.CLICommand) &&
+		strings.TrimSpace(candidate.Profile.Thinking) == strings.TrimSpace(profile.Thinking) &&
+		strings.TrimSpace(candidate.Profile.ReasoningEffort) == strings.TrimSpace(profile.ReasoningEffort)
 }
 
 func (m Model) currentProviderModelIndex() int {
@@ -1006,15 +1404,19 @@ func (m Model) currentProviderModelIndex() int {
 }
 
 func (m Model) currentSettingsProviderIndex() int {
+	fallback := 0
 	for index, entry := range m.settingsProviders {
 		if entry.candidate == nil {
 			continue
 		}
-		if entry.candidate.Profile.Preset == m.activeProvider.Preset {
+		if onboardingCandidateMatchesProfile(*entry.candidate, m.activeProvider) {
 			return index
 		}
+		if entry.candidate.Profile.Preset == m.activeProvider.Preset {
+			fallback = index
+		}
 	}
-	return 0
+	return fallback
 }
 
 func currentSettingsApprovalIndex(ctrl controller.Controller) int {
@@ -1031,8 +1433,12 @@ func currentSettingsApprovalIndex(ctrl controller.Controller) int {
 }
 
 func (m Model) currentSettingsModelIndex() int {
+	profile := m.activeProvider
+	if m.settingsConfig != nil {
+		profile = m.settingsConfig.profile
+	}
 	for index, choice := range m.settingsModels {
-		if choice.profile.Preset == m.activeProvider.Preset && choice.model.ID == m.activeProvider.Model {
+		if choice.profile.Preset == profile.Preset && choice.model.ID == profile.Model {
 			return index
 		}
 	}
@@ -1126,32 +1532,6 @@ func (m *Model) collapseCommandEntries(entries []Entry) []Entry {
 	return collapsed
 }
 
-func (m *Model) withCommandResultFallback(entries []Entry) []Entry {
-	if len(entries) == 0 {
-		return entries
-	}
-
-	fallback := strings.TrimSpace(m.liveShellTail)
-	if fallback == "" && m.activeExecution != nil {
-		fallback = strings.TrimSpace(m.activeExecution.LatestOutputTail)
-	}
-	if fallback == "" {
-		return entries
-	}
-
-	enriched := append([]Entry(nil), entries...)
-	for index := range enriched {
-		entry := &enriched[index]
-		if entry.Title != "result" || strings.TrimSpace(entry.Command) == "" || strings.TrimSpace(entry.Body) != "" {
-			continue
-		}
-		entry.Body = fallback
-		break
-	}
-
-	return enriched
-}
-
 func (m *Model) attachLatestModelInfo(events []controller.TranscriptEvent, entries []Entry) []Entry {
 	info := latestModelInfo(events)
 	if info == nil {
@@ -1207,7 +1587,11 @@ func (m *Model) applySettingsModelFilter() {
 	}
 
 	m.settingsModelInfo = false
-	m.settingsModels = filterSettingsModels(m.settingsModelCatalog, m.settingsModelFilter)
+	if m.settingsModelBrowseAll {
+		m.settingsModels = append([]settingsModelChoice(nil), m.settingsModelCatalog...)
+	} else {
+		m.settingsModels = filterSettingsModels(m.settingsModelCatalog, m.settingsModelFilter)
+	}
 	switch {
 	case len(m.settingsModels) == 0:
 		m.settingsModelIdx = 0

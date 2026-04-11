@@ -85,6 +85,7 @@ type activeExecutionMsg struct {
 	execution *controller.CommandExecution
 	events    []controller.TranscriptEvent
 	err       error
+	epoch     uint64
 }
 
 type transcriptRenderLine struct {
@@ -158,6 +159,15 @@ type fullscreenKeysSentMsg struct {
 	err  error
 }
 
+type activeKeysLease struct {
+	executionID  string
+	state        controller.CommandExecutionState
+	fingerprint  string
+	observedAt   time.Time
+	source       string
+	lastNoticeID string
+}
+
 type fullscreenActionKind string
 
 const (
@@ -218,6 +228,8 @@ type onboardingField struct {
 	placeholder string
 	required    bool
 	secret      bool
+	options     []string
+	hidden      bool
 }
 
 type onboardingFormState struct {
@@ -231,12 +243,10 @@ type onboardingFormState struct {
 type settingsStep string
 
 const (
-	settingsStepMenu           settingsStep = "menu"
-	settingsStepSession        settingsStep = "session"
-	settingsStepProviders      settingsStep = "providers"
-	settingsStepActiveProvider settingsStep = "active_provider"
-	settingsStepActiveModels   settingsStep = "active_models"
-	settingsStepProviderForm   settingsStep = "provider_form"
+	settingsStepMenu         settingsStep = "menu"
+	settingsStepSession      settingsStep = "session"
+	settingsStepProviders    settingsStep = "providers"
+	settingsStepProviderForm settingsStep = "provider_form"
 )
 
 type settingsMenuEntry struct {
@@ -261,6 +271,7 @@ type settingsModelChoice struct {
 }
 
 type settingsModelsLoadedMsg struct {
+	profile provider.Profile
 	choices []settingsModelChoice
 	err     error
 }
@@ -291,101 +302,113 @@ const (
 )
 
 var (
-	ansiCSIPattern = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
-	ansiOSCPattern = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
-	ansiEscPattern = regexp.MustCompile(`\x1b[@-_]`)
+	ansiCSIPattern     = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+	ansiOSCPattern     = regexp.MustCompile(`\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
+	ansiEscPattern     = regexp.MustCompile(`\x1b[@-_]`)
+	mouseReportPattern = regexp.MustCompile(`(?:\x1b\[)?<\d+;\d+;\d+[mM]`)
 )
 
 type Model struct {
-	workspace                   tmux.Workspace
-	ctrl                        controller.Controller
-	mode                        Mode
-	input                       string
-	cursor                      int
-	entries                     []Entry
-	selectedEntry               int
-	width                       int
-	height                      int
-	busy                        bool
-	busyStartedAt               time.Time
-	transcriptScroll            int
-	transcriptFollow            bool
-	expandedCommandEntry        int
-	helpOpen                    bool
-	helpScroll                  int
-	detailOpen                  bool
-	detailScroll                int
-	detailFilter                string
-	shellHistory                composerHistory
-	agentHistory                composerHistory
-	activePlan                  *controller.ActivePlan
-	shellContext                shell.PromptContext
-	pendingLocalEcho            *Entry
-	pendingApproval             *controller.ApprovalRequest
-	pendingProposal             *controller.ProposalPayload
-	startupNotice               *startupSecurityNotice
-	refiningApproval            *controller.ApprovalRequest
-	refiningProposal            *controller.ProposalPayload
-	editingProposal             *controller.ProposalPayload
-	approvalInFlight            bool
-	proposalRunPending          bool
-	directShellPending          bool
-	inFlightCancel              context.CancelFunc
-	suppressCancelErr           bool
-	resumeAfterHandoff          bool
-	handoffVisible              bool
-	handoffPriorState           controller.CommandExecutionState
-	handoffReturnGraceUntil     time.Time
-	activeExecutionMissingSince time.Time
-	takeControl                 takeControlConfig
-	liveShellTail               string
-	showShellTail               bool
-	activeExecution             *controller.CommandExecution
-	pendingFullscreen           *fullscreenAction
-	sendingFullscreenKeys       bool
-	lastFullscreenKeys          string
-	lastFullscreenKeysAt        time.Time
-	exitConfirmUntil            time.Time
-	exitConfirmToken            uint64
-	checkInInFlight             bool
-	lastCheckInAt               time.Time
-	interactiveCheckInCount     int
-	interactiveCheckInPaused    bool
-	lastInterruptNoticeID       string
-	activeProvider              provider.Profile
-	overwriteMode               bool
-	onboardingOpen              bool
-	onboardingStep              onboardingStep
-	onboardingIndex             int
-	onboardingChoices           []provider.OnboardingCandidate
-	onboardingSelected          *provider.OnboardingCandidate
-	onboardingForm              *onboardingFormState
-	onboardingModels            []provider.ModelOption
-	onboardingModelIdx          int
-	loadOnboarding              func() ([]provider.OnboardingCandidate, error)
-	loadModels                  func(provider.Profile) ([]provider.ModelOption, error)
-	switchProvider              func(provider.Profile, *shell.PromptContext) (controller.Controller, provider.Profile, error)
-	saveProvider                func(provider.Profile) error
-	testProvider                func(provider.Profile) error
-	settingsOpen                bool
-	settingsStep                settingsStep
-	settingsIndex               int
-	settingsApprovalIdx         int
-	settingsProviders           []settingsProviderEntry
-	settingsProviderIdx         int
-	settingsConfig              *onboardingFormState
-	settingsModelCatalog        []settingsModelChoice
-	settingsModels              []settingsModelChoice
-	settingsModelIdx            int
-	settingsModelFilter         string
-	settingsModelScope          provider.ProviderPreset
-	settingsModelInfo           bool
-	settingsBanner              string
-	lastModelInfo               *controller.AgentModelInfo
-	pendingContextAction        contextActionKind
-	pendingDangerousConfirm     *dangerousApprovalConfirm
-	completion                  *composerCompletion
-	styles                      styles
+	workspace                    tmux.Workspace
+	ctrl                         controller.Controller
+	mode                         Mode
+	input                        string
+	cursor                       int
+	entries                      []Entry
+	selectedEntry                int
+	width                        int
+	height                       int
+	busy                         bool
+	busyStartedAt                time.Time
+	transcriptScroll             int
+	transcriptFollow             bool
+	expandedCommandEntry         int
+	helpOpen                     bool
+	helpScroll                   int
+	detailOpen                   bool
+	detailScroll                 int
+	detailFilter                 string
+	shellHistory                 composerHistory
+	agentHistory                 composerHistory
+	activePlan                   *controller.ActivePlan
+	shellContext                 shell.PromptContext
+	pendingLocalEcho             *Entry
+	pendingApproval              *controller.ApprovalRequest
+	pendingProposal              *controller.ProposalPayload
+	startupNotice                *startupSecurityNotice
+	refiningApproval             *controller.ApprovalRequest
+	refiningProposal             *controller.ProposalPayload
+	editingProposal              *controller.ProposalPayload
+	approvalInFlight             bool
+	proposalRunPending           bool
+	directShellPending           bool
+	inFlightCancel               context.CancelFunc
+	suppressCancelErr            bool
+	resumeAfterHandoff           bool
+	handoffVisible               bool
+	handoffPriorState            controller.CommandExecutionState
+	handoffResumeRetryBudget     int
+	handoffReturnGraceUntil      time.Time
+	activeExecutionMissingSince  time.Time
+	takeControl                  takeControlConfig
+	liveShellTail                string
+	showShellTail                bool
+	activeExecution              *controller.CommandExecution
+	activeExecutionPollEpoch     uint64
+	pendingFullscreen            *fullscreenAction
+	sendingFullscreenKeys        bool
+	autoOpenedFullscreenKeys     bool
+	lastFullscreenKeys           string
+	lastFullscreenKeysAt         time.Time
+	activeKeysLease              activeKeysLease
+	dismissedAutoKeysFingerprint string
+	suppressAutoKeysUntil        time.Time
+	exitConfirmUntil             time.Time
+	exitConfirmToken             uint64
+	checkInInFlight              bool
+	lastCheckInAt                time.Time
+	interactiveCheckInCount      int
+	interactiveCheckInPaused     bool
+	pendingContinueAfterCommand  bool
+	lastCommandResult            *controller.CommandResultSummary
+	lastInterruptNoticeID        string
+	activeProvider               provider.Profile
+	overwriteMode                bool
+	onboardingOpen               bool
+	onboardingStep               onboardingStep
+	onboardingIndex              int
+	onboardingChoices            []provider.OnboardingCandidate
+	onboardingSelected           *provider.OnboardingCandidate
+	onboardingForm               *onboardingFormState
+	onboardingModels             []provider.ModelOption
+	onboardingModelIdx           int
+	loadOnboarding               func() ([]provider.OnboardingCandidate, error)
+	loadModels                   func(provider.Profile) ([]provider.ModelOption, error)
+	switchProvider               func(provider.Profile, *shell.PromptContext) (controller.Controller, provider.Profile, error)
+	saveProvider                 func(provider.Profile) error
+	testProvider                 func(provider.Profile) error
+	settingsOpen                 bool
+	settingsStep                 settingsStep
+	settingsIndex                int
+	settingsApprovalIdx          int
+	settingsProviders            []settingsProviderEntry
+	settingsProviderIdx          int
+	settingsConfig               *onboardingFormState
+	settingsModelCatalog         []settingsModelChoice
+	settingsModels               []settingsModelChoice
+	settingsModelIdx             int
+	settingsModelFilter          string
+	settingsModelScope           provider.ProviderPreset
+	settingsModelInfo            bool
+	settingsModelListActive      bool
+	settingsModelBrowseAll       bool
+	settingsBanner               string
+	settingsDetailReturnStep     settingsStep
+	lastModelInfo                *controller.AgentModelInfo
+	pendingContextAction         contextActionKind
+	pendingDangerousConfirm      *dangerousApprovalConfirm
+	completion                   *composerCompletion
+	styles                       styles
 }
 
 func (m Model) currentAgentTurnTimeout() time.Duration {
@@ -494,7 +517,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 		pinned := m.isTranscriptPinned()
 		autoContinue := m.shouldAutoContinue(msg.events)
-		eventEntries := m.withCommandResultFallback(m.collapseCommandEntries(m.consumePendingLocalEcho(eventsToEntries(msg.events, !m.directShellPending))))
+		eventEntries := m.collapseCommandEntries(m.consumePendingLocalEcho(eventsToEntries(msg.events, !m.directShellPending)))
 		eventEntries = m.attachLatestModelInfo(msg.events, eventEntries)
 		m.busy = false
 		m.busyStartedAt = time.Time{}
@@ -547,6 +570,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.pollShellTailCmd()
 		}
 		if autoContinue {
+			m.pendingContinueAfterCommand = false
 			m.busy = true
 			m.busyStartedAt = time.Now()
 			m.showShellTail = false
@@ -576,8 +600,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}, tickBusy(), m.pollShellTailCmd())
 		}
+		m.updatePendingContinueAfterCommand(msg.events, autoContinue)
 		m.syncTrackedShellTarget()
-		return m, m.pollShellTailCmd()
+		if len(msg.events) == 0 && m.activeExecution != nil && m.handoffResumeRetryBudget > 0 {
+			if m.ctrl != nil && m.ctrl.ActiveExecution() == nil {
+				m.handoffResumeRetryBudget = 0
+				m.syncActiveExecution(nil)
+				return m, m.pollShellTailCmd()
+			}
+			m.handoffResumeRetryBudget--
+			return m, tea.Batch(
+				m.resumeAfterTakeControlAfter(150*time.Millisecond),
+				m.pollActiveExecutionAfter(150*time.Millisecond),
+				m.pollShellTailCmd(),
+			)
+		}
+		m.handoffResumeRetryBudget = 0
+		followUpCmds := []tea.Cmd{m.pollShellTailCmd()}
+		if m.activeExecution != nil || !m.handoffReturnGraceUntil.IsZero() {
+			followUpCmds = append([]tea.Cmd{m.pollActiveExecutionCmd()}, followUpCmds...)
+		}
+		return m, tea.Batch(followUpCmds...)
 	case takeControlFinishedMsg:
 		logging.Trace(
 			"tui.take_control.finished",
@@ -597,6 +640,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, restoreMouseTrackingCmd()
 		}
 		m.handoffVisible = false
+		m.invalidateActiveExecutionPolls()
 		m.syncTrackedShellTarget()
 		if m.activeExecution != nil && m.activeExecution.State == controller.CommandExecutionHandoffActive {
 			updated := *m.activeExecution
@@ -618,6 +662,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resumeAfterHandoff = false
 			m.busy = true
 			m.busyStartedAt = time.Now()
+			m.handoffResumeRetryBudget = 3
 			m.handoffReturnGraceUntil = time.Now().Add(2 * time.Second)
 			m.showShellTail = false
 			m.liveShellTail = ""
@@ -631,8 +676,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					events: events,
 					err:    err,
 				}
-			}, tickBusy(), m.refreshShellContextCmd(), m.pollShellTailCmd(), restoreMouseTrackingCmd())
+			}, tickBusy(), m.refreshShellContextCmd(), m.pollActiveExecutionCmd(), m.pollShellTailCmd(), restoreMouseTrackingCmd())
 		}
+		m.handoffResumeRetryBudget = 0
 		m.handoffReturnGraceUntil = time.Time{}
 		followUpCmds = append(followUpCmds, restoreMouseTrackingCmd())
 		return m, tea.Batch(followUpCmds...)
@@ -644,21 +690,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case shellTailMsg:
 		if msg.err == nil {
+			if !m.shouldAcceptPolledShellTail() {
+				return m, nil
+			}
 			m.liveShellTail = msg.tail
 			if m.activeExecution != nil {
 				updated := *m.activeExecution
 				updated.LatestOutputTail = msg.tail
 				m.activeExecution = &updated
 			}
+			m.observeActiveKeysLease("shell_tail")
+			m.autoOpenFullscreenKeysIfNeeded()
 		}
 		return m, nil
 	case activeExecutionMsg:
+		if msg.epoch != m.activeExecutionPollEpoch {
+			return m, nil
+		}
 		if msg.err != nil {
 			return m, nil
 		}
 		if len(msg.events) > 0 {
 			pinned := m.isTranscriptPinned()
-			eventEntries := m.withCommandResultFallback(m.collapseCommandEntries(eventsToEntries(msg.events, !m.directShellPending)))
+			eventEntries := m.collapseCommandEntries(eventsToEntries(msg.events, !m.directShellPending))
 			eventEntries = m.attachLatestModelInfo(msg.events, eventEntries)
 			m.entries = append(m.entries, eventEntries...)
 			m.syncActionState(msg.events)
@@ -693,6 +747,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeExecutionMissingSince = time.Time{}
 		}
 		m.syncActiveExecution(msg.execution)
+		m.observeActiveKeysLease("active_execution")
+		m.autoOpenFullscreenKeysIfNeeded()
 		m.syncTrackedShellTarget()
 		return m, nil
 	case activeExecutionCheckInMsg:
@@ -727,7 +783,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		pinned := m.isTranscriptPinned()
-		eventEntries := m.withCommandResultFallback(m.collapseCommandEntries(eventsToEntries(msg.events, true)))
+		eventEntries := m.collapseCommandEntries(eventsToEntries(msg.events, true))
 		eventEntries = m.attachLatestModelInfo(msg.events, eventEntries)
 		m.entries = append(m.entries, eventEntries...)
 		if pinned {
@@ -779,6 +835,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.lastFullscreenKeys = msg.keys
 			m.lastFullscreenKeysAt = time.Now()
+			m.autoOpenedFullscreenKeys = false
 			m.entries = append(m.entries, Entry{
 				Title: "system",
 				Body:  "Sent keys to active terminal app: " + previewFullscreenKeys(msg.keys),
@@ -799,7 +856,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.entries = append(m.entries, Entry{
 				Title: "error",
-				Body:  fmt.Sprintf("switch provider: %v", msg.err),
+				Body:  fmt.Sprintf("switch provider to %s (%s, base %s, auth %s): %v", msg.profile.Name, msg.profile.Preset, msg.profile.BaseURL, providerAuthSourceLabel(msg.profile), msg.err),
 			})
 			m.selectedEntry = len(m.entries) - 1
 			m.clampSelection()
@@ -831,10 +888,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.settingsStep = msg.settingsStep
 			m.settingsConfig = nil
 			m.settingsProviderIdx = m.currentSettingsProviderIndex()
-			m.settingsBanner = fmt.Sprintf("Active provider switched to %s.", msg.profile.Name)
-			if msg.settingsStep == settingsStepActiveModels {
-				m.applySettingsModelFilter()
-			}
+			m.settingsBanner = fmt.Sprintf("Active provider switched to %s (%s).", msg.profile.Name, providerAuthSourceLabel(msg.profile))
 		} else {
 			m.settingsOpen = false
 			m.settingsStep = settingsStepMenu
@@ -859,7 +913,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.directShellPending = false
 		m.entries = append(m.entries, Entry{
 			Title: "system",
-			Body:  fmt.Sprintf("Provider switched to %s (%s, %s, auth %s).", msg.profile.Name, msg.profile.Preset, msg.profile.Model, providerAuthSourceLabel(msg.profile)),
+			Body:  fmt.Sprintf("Provider switched to %s (%s, model %s, base %s, auth %s).", msg.profile.Name, msg.profile.Preset, msg.profile.Model, msg.profile.BaseURL, providerAuthSourceLabel(msg.profile)),
 		})
 		if msg.persistErr != nil {
 			m.entries = append(m.entries, Entry{
@@ -877,7 +931,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.entries = append(m.entries, Entry{
 				Title: "error",
-				Body:  fmt.Sprintf("load models for %s: %v", msg.candidate.Profile.Name, msg.err),
+				Body:  fmt.Sprintf("load models for %s (%s, base %s, auth %s): %v", msg.candidate.Profile.Name, msg.candidate.Profile.Preset, msg.candidate.Profile.BaseURL, providerAuthSourceLabel(msg.candidate.Profile), msg.err),
 			})
 			m.selectedEntry = len(m.entries) - 1
 			m.clampSelection()
@@ -894,6 +948,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busyStartedAt = time.Time{}
 		m.inFlightCancel = nil
 		if msg.err != nil {
+			if m.settingsStep == settingsStepProviderForm {
+				m.settingsBanner = fmt.Sprintf("Model list/test failed for %s (%s, auth %s): %v", msg.profile.Name, msg.profile.BaseURL, providerAuthSourceLabel(msg.profile), msg.err)
+				return m, nil
+			}
 			m.entries = append(m.entries, Entry{
 				Title: "error",
 				Body:  fmt.Sprintf("load active models: %v", msg.err),
@@ -902,11 +960,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.clampSelection()
 			return m, nil
 		}
-		m.settingsStep = settingsStepActiveModels
 		m.settingsModelCatalog = append([]settingsModelChoice(nil), msg.choices...)
-		m.settingsModelFilter = ""
 		m.settingsModelInfo = false
-		m.settingsBanner = ""
+		if m.settingsStep == settingsStepProviderForm {
+			m.syncSettingsModelFilterFromConfig()
+			m.settingsBanner = fmt.Sprintf("Loaded %d models for %s.", len(msg.choices), msg.profile.Name)
+			return m, nil
+		}
+		m.settingsModelFilter = ""
+		m.settingsBanner = fmt.Sprintf("Loaded %d models for %s.", len(msg.choices), msg.profile.Name)
 		m.applySettingsModelFilter()
 		return m, nil
 	case settingsProviderSavedMsg:
@@ -972,10 +1034,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.busyStartedAt = time.Time{}
 		m.inFlightCancel = nil
 		if msg.err != nil {
-			m.settingsBanner = fmt.Sprintf("Provider test failed for %s: %v", msg.profile.Name, msg.err)
+			m.settingsBanner = fmt.Sprintf("Provider test failed for %s (%s, auth %s): %v", msg.profile.Name, msg.profile.BaseURL, providerAuthSourceLabel(msg.profile), msg.err)
 			return m, nil
 		}
-		m.settingsBanner = fmt.Sprintf("Provider test succeeded for %s.", msg.profile.Name)
+		m.settingsBanner = fmt.Sprintf("Provider test succeeded for %s (%s, auth %s).", msg.profile.Name, msg.profile.BaseURL, providerAuthSourceLabel(msg.profile))
 		return m, nil
 	case busyTickMsg:
 		if !m.busy && m.activeExecution == nil {
@@ -989,8 +1051,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(tickShellContext(), m.refreshShellContextCmd())
 	case tea.MouseMsg:
-		if m.helpOpen || m.settingsOpen || m.onboardingOpen || m.detailOpen {
+		if m.helpOpen || m.onboardingOpen || m.detailOpen {
 			return m, nil
+		}
+		if m.settingsOpen {
+			return m.handleSettingsMouse(msg)
 		}
 		return m.handleMouse(msg)
 	case tea.KeyMsg:
@@ -1028,7 +1093,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlC:
 			return m.handleComposerCtrlC()
 		case tea.KeyF2:
-			return m.takeControlNow()
+			return m.takeControlPersistentShellNow()
+		case tea.KeyF3:
+			return m.takeControlExecutionNow()
 		case tea.KeyF10:
 			return m.openSettings()
 		case tea.KeyEsc:
@@ -1038,6 +1105,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.sendingFullscreenKeys {
 				m.sendingFullscreenKeys = false
+				m.autoOpenedFullscreenKeys = false
 				m.setInput("")
 				return m, nil
 			}
@@ -1071,8 +1139,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.setInput("")
 			return m, nil
-		case tea.KeyCtrlCloseBracket:
+		case tea.KeyShiftTab:
 			if m.sendingFullscreenKeys {
+				m.dismissFullscreenKeysAutoOpen()
 				return m, nil
 			}
 			if m.composerLocked() {
@@ -1202,6 +1271,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.pendingApproval == nil && m.pendingProposal == nil && m.interactiveCheckInPaused && executionNeedsUserDrivenResume(m.activeExecution) {
 				return m.resumePausedInteractiveCheckIns()
 			}
+			if m.pendingApproval == nil && m.pendingProposal == nil && m.pendingContinueAfterCommand {
+				return m.continueAfterLatestCommand()
+			}
 			if m.pendingApproval == nil && m.pendingProposal == nil && m.activePlan != nil {
 				return m.continueActivePlan()
 			}
@@ -1295,6 +1367,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				if len(msg.Runes) == 1 && unicode.ToUpper(msg.Runes[0]) == 'S' && m.canSendActiveKeys() && strings.TrimSpace(m.input) == "" {
 					m.sendingFullscreenKeys = true
+					m.autoOpenedFullscreenKeys = false
 					m.setInput("")
 					return m, nil
 				}
@@ -1334,6 +1407,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				inserted := string(msg.Runes)
 				if msg.Paste {
 					inserted = sanitizePastedText(inserted)
+				} else {
+					inserted = sanitizeComposerInsertText(inserted)
 				}
 				if inserted == "" {
 					return m, nil
@@ -1349,6 +1424,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) composerLocked() bool {
 	return (m.startupNotice != nil || m.pendingDangerousConfirm != nil || m.pendingFullscreen != nil || m.pendingProposal != nil || m.pendingApproval != nil) && m.editingProposal == nil && m.refiningProposal == nil && m.refiningApproval == nil
+}
+
+func shouldReplaceDisplayedActivePlan(activePlan *controller.ActivePlan, prompt string) bool {
+	if activePlan == nil {
+		return false
+	}
+
+	prompt = strings.ToLower(strings.TrimSpace(prompt))
+	if prompt == "" {
+		return false
+	}
+
+	for _, marker := range []string{
+		"continue",
+		"resume",
+		"keep going",
+		"go on",
+		"what next",
+		"what's next",
+		"whats next",
+		"next step",
+		"next steps",
+		"current plan",
+		"active plan",
+		"current checklist",
+		"active checklist",
+	} {
+		if strings.Contains(prompt, marker) {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (m Model) handleActionCardKey(msg tea.KeyMsg) (tea.Model, bool, tea.Cmd) {
@@ -1432,12 +1540,20 @@ func (m Model) submitWithOptions(appendEnterToFullscreenKeys bool) (tea.Model, t
 
 	text := strings.TrimSpace(m.input)
 	if m.sendingFullscreenKeys {
-		rawKeys := fullscreenKeysForSubmit(m.input, appendEnterToFullscreenKeys)
+		autoAppendEnter := !appendEnterToFullscreenKeys &&
+			m.activeExecution != nil &&
+			m.activeExecution.State == controller.CommandExecutionAwaitingInput &&
+			shouldAutoAppendEnterForActiveExecution(m.activeExecution, m.liveShellTail, m.activeExecution.LatestOutputTail)
+		rawKeys := fullscreenKeysForSubmit(m.input, appendEnterToFullscreenKeys || autoAppendEnter)
 		if rawKeys == "" {
 			return m, nil
 		}
+		if !m.consumeFreshActiveKeysLease() {
+			return m, m.activeKeysGuardCmd()
+		}
 		logging.Trace("tui.fullscreen_keys.submit", "keys", rawKeys)
 		m.sendingFullscreenKeys = false
+		m.suppressAutoFullscreenKeysForCurrentPrompt()
 		m.setInput("")
 		return m, sendFullscreenKeysCmd(m.takeControl, m.activeExecutionPaneID(), rawKeys)
 	}
@@ -1458,6 +1574,10 @@ func (m Model) submitWithOptions(appendEnterToFullscreenKeys bool) (tea.Model, t
 
 	if handled, next, cmd := m.handleComposerCommand(text); handled {
 		return next, cmd
+	}
+
+	if m.mode == AgentMode && shouldReplaceDisplayedActivePlan(m.activePlan, text) {
+		m.activePlan = nil
 	}
 
 	m.setInput("")
@@ -1697,6 +1817,9 @@ func (m Model) startControllerRequest(mark func(*Model), invoke func(context.Con
 	m.busy = true
 	m.busyStartedAt = time.Now()
 	m.showShellTail = followsShell
+	if followsShell {
+		m.invalidateActiveExecutionPolls()
+	}
 	if !followsShell {
 		m.liveShellTail = ""
 		m.syncActiveExecution(nil)
@@ -1756,6 +1879,30 @@ func (m Model) resumePausedInteractiveCheckIns() (tea.Model, tea.Cmd) {
 	m.interactiveCheckInCount = 0
 	m.lastCheckInAt = time.Time{}
 	return m, tea.Batch(tickBusy(), m.pollActiveExecutionCmd(), m.pollShellTailCmd())
+}
+
+func (m Model) continueAfterLatestCommand() (tea.Model, tea.Cmd) {
+	if m.busy || m.ctrl == nil {
+		return m, nil
+	}
+
+	m.pendingContinueAfterCommand = false
+	m.busy = true
+	m.busyStartedAt = time.Now()
+	m.showShellTail = false
+	m.liveShellTail = ""
+	m.activeExecution = nil
+	ctx, cancel := context.WithTimeout(context.Background(), m.currentAgentTurnTimeout())
+	m.inFlightCancel = cancel
+	return m, tea.Batch(func() tea.Msg {
+		defer cancel()
+
+		events, err := m.ctrl.ContinueAfterCommand(ctx)
+		return controllerEventsMsg{
+			events: events,
+			err:    err,
+		}
+	}, tickBusy(), m.pollShellTailCmd(), m.pollActiveExecutionCmd())
 }
 
 func (m Model) focusAgentComposerForActiveExecution() (tea.Model, tea.Cmd) {
@@ -1862,10 +2009,45 @@ func (m Model) continueActivePlan() (tea.Model, tea.Cmd) {
 	}, tickBusy(), m.pollShellTailCmd(), m.pollActiveExecutionCmd())
 }
 
-func (m Model) takeControlNow() (tea.Model, tea.Cmd) {
-	if !m.takeControl.enabled() {
+func (m Model) persistentTakeControlConfig() takeControlConfig {
+	config := m.takeControl
+	config.TrackedPaneID = m.persistentTrackedPaneID()
+	config.TemporaryPane = false
+	return config
+}
+
+func (m Model) executionTakeControlConfig() takeControlConfig {
+	if m.activeExecution == nil {
+		return takeControlConfig{}
+	}
+	paneID := m.activeExecutionTakeControlPaneID()
+	if strings.TrimSpace(paneID) == "" {
+		return takeControlConfig{}
+	}
+
+	config := m.takeControl
+	config.TrackedPaneID = paneID
+	config.TemporaryPane = true
+	config.DetachKey = ExecutionTakeControlKey
+	if strings.TrimSpace(m.activeExecution.TrackedShell.SessionName) != "" {
+		config.SessionName = strings.TrimSpace(m.activeExecution.TrackedShell.SessionName)
+	}
+	return config
+}
+
+func (m Model) takeControlPersistentShellNow() (tea.Model, tea.Cmd) {
+	return m.takeControlNow(m.persistentTakeControlConfig(), false)
+}
+
+func (m Model) takeControlExecutionNow() (tea.Model, tea.Cmd) {
+	return m.takeControlNow(m.executionTakeControlConfig(), true)
+}
+
+func (m Model) takeControlNow(config takeControlConfig, targetExecution bool) (tea.Model, tea.Cmd) {
+	if !config.enabled() {
 		return m, nil
 	}
+	m.invalidateActiveExecutionPolls()
 
 	logging.Trace(
 		"tui.take_control.start",
@@ -1879,7 +2061,7 @@ func (m Model) takeControlNow() (tea.Model, tea.Cmd) {
 		m.inFlightCancel()
 		m.inFlightCancel = nil
 	}
-	if m.activeExecution != nil && (m.takeControlTargetsActiveExecution() || m.activeExecutionUsesTrackedShell()) {
+	if m.activeExecution != nil && (targetExecution || m.activeExecutionUsesTrackedShell()) {
 		updated := *m.activeExecution
 		m.handoffPriorState = updated.State
 		updated.State = controller.CommandExecutionHandoffActive
@@ -1899,7 +2081,7 @@ func (m Model) takeControlNow() (tea.Model, tea.Cmd) {
 		m.liveShellTail = ""
 	}
 
-	return m, newTakeControlCmd(m.takeControl)
+	return m, newTakeControlCmd(config)
 }
 
 func (m Model) interruptInFlight() (tea.Model, tea.Cmd) {
@@ -1932,45 +2114,22 @@ func (m Model) interruptInFlight() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) openOnboarding() (tea.Model, tea.Cmd) {
-	if m.loadOnboarding == nil || m.switchProvider == nil {
-		m.entries = append(m.entries, Entry{
-			Title: "error",
-			Body:  "provider onboarding is not configured in this session",
-		})
-		m.selectedEntry = len(m.entries) - 1
-		m.clampSelection()
-		return m, nil
+	nextAny, cmd := m.openSettings()
+	next := nextAny.(Model)
+	if cmd != nil || !next.settingsOpen {
+		return next, cmd
 	}
-
-	choices, err := m.loadOnboarding()
-	if err != nil {
-		m.entries = append(m.entries, Entry{
-			Title: "error",
-			Body:  fmt.Sprintf("load provider onboarding candidates: %v", err),
-		})
-		m.selectedEntry = len(m.entries) - 1
-		m.clampSelection()
-		return m, nil
-	}
-	if len(choices) == 0 {
-		m.entries = append(m.entries, Entry{
-			Title: "system",
-			Body:  "No provider onboarding candidates detected. Set OPENAI_API_KEY, OPENROUTER_API_KEY, or SHUTTLE_BASE_URL and try again.",
-		})
-		m.selectedEntry = len(m.entries) - 1
-		m.clampSelection()
-		return m, nil
-	}
-
-	m.onboardingChoices = append([]provider.OnboardingCandidate(nil), choices...)
-	m.onboardingStep = onboardingStepProviders
-	m.onboardingIndex = m.currentProviderChoiceIndex()
-	m.onboardingSelected = nil
-	m.onboardingForm = nil
-	m.onboardingModels = nil
-	m.onboardingModelIdx = 0
-	m.onboardingOpen = true
-	return m, nil
+	next.settingsStep = settingsStepProviders
+	next.settingsProviderIdx = next.currentSettingsProviderIndex()
+	next.settingsConfig = nil
+	next.settingsModelCatalog = nil
+	next.settingsModels = nil
+	next.settingsModelIdx = 0
+	next.settingsModelFilter = ""
+	next.settingsModelInfo = false
+	next.settingsBanner = ""
+	next.settingsDetailReturnStep = settingsStepMenu
+	return next, nil
 }
 
 func (m Model) openSettings() (tea.Model, tea.Cmd) {
@@ -1999,7 +2158,7 @@ func (m Model) openSettings() (tea.Model, tea.Cmd) {
 	m.settingsStep = settingsStepMenu
 	m.settingsIndex = 0
 	m.settingsApprovalIdx = currentSettingsApprovalIndex(m.ctrl)
-	m.settingsProviders = buildSettingsProviderEntries(choices)
+	m.settingsProviders = buildSettingsProviderEntries(choices, m.activeProvider)
 	m.settingsProviderIdx = m.currentSettingsProviderIndex()
 	m.settingsConfig = nil
 	m.settingsModelCatalog = nil
@@ -2009,20 +2168,12 @@ func (m Model) openSettings() (tea.Model, tea.Cmd) {
 	m.settingsModelScope = ""
 	m.settingsModelInfo = false
 	m.settingsBanner = ""
+	m.settingsDetailReturnStep = settingsStepMenu
 	return m, nil
 }
 
 func (m Model) openActiveProviderSettings() (tea.Model, tea.Cmd) {
-	nextAny, cmd := m.openSettings()
-	next := nextAny.(Model)
-	if cmd != nil || !next.settingsOpen {
-		return next, cmd
-	}
-
-	next.settingsStep = settingsStepActiveProvider
-	next.settingsIndex = 2
-	next.settingsProviderIdx = next.currentSettingsProviderIndex()
-	return next, nil
+	return m.openOnboarding()
 }
 
 func (m Model) openActiveModelSettings() (tea.Model, tea.Cmd) {
@@ -2031,11 +2182,14 @@ func (m Model) openActiveModelSettings() (tea.Model, tea.Cmd) {
 	if cmd != nil || !next.settingsOpen {
 		return next, cmd
 	}
-
-	next.settingsStep = settingsStepActiveModels
-	next.settingsIndex = 3
-	next.settingsModelScope = next.activeProvider.Preset
-	return next.loadSettingsModels()
+	if len(next.settingsProviders) == 0 {
+		return next, nil
+	}
+	entry := next.settingsProviders[next.currentSettingsProviderIndex()]
+	if entry.candidate == nil || entry.disabled {
+		return next, nil
+	}
+	return next.openSettingsProviderDetail(*entry.candidate, settingsStepProviders, true)
 }
 
 func (m Model) runProposalCommand() (tea.Model, tea.Cmd) {
@@ -2100,12 +2254,16 @@ func (m Model) runProposalKeys() (tea.Model, tea.Cmd) {
 	if m.pendingProposal == nil || m.pendingProposal.Keys == "" || !m.canSendActiveKeys() {
 		return m, nil
 	}
+	if !m.consumeFreshActiveKeysLease() {
+		return m, m.activeKeysGuardCmd()
+	}
 
 	keys := normalizeFullscreenKeys(m.pendingProposal.Keys)
 	logging.Trace("tui.proposal.send_keys", "keys", previewFullscreenKeys(keys))
 	m.pendingProposal = nil
 	m.refiningProposal = nil
 	m.editingProposal = nil
+	m.suppressAutoFullscreenKeysForCurrentPrompt()
 	m.setInput("")
 	return m, sendFullscreenKeysCmd(m.takeControl, m.activeExecutionPaneID(), keys)
 }

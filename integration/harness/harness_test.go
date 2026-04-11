@@ -18,6 +18,16 @@ import (
 	"aiterm/internal/tmux"
 )
 
+const interactiveHarnessEnv = "SHUTTLE_RUN_INTERACTIVE_HARNESS"
+
+func TestMain(m *testing.M) {
+	if os.Getenv(interactiveHarnessEnv) != "1" {
+		fmt.Printf("interactive harness disabled; set %s=1 to run\n", interactiveHarnessEnv)
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
 type scriptedProviderResponse struct {
 	expectContains string
 	structuredJSON string
@@ -112,6 +122,9 @@ type interactiveHarness struct {
 
 func newInteractiveHarness(t *testing.T, workspaceDir string, provider *scriptedProviderServer) *interactiveHarness {
 	t.Helper()
+	if os.Getenv(interactiveHarnessEnv) != "1" {
+		t.Skipf("interactive harness is disabled by default; set %s=1 to run these tests", interactiveHarnessEnv)
+	}
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}

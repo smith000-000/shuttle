@@ -24,6 +24,28 @@ func TailSuggestsPromptReturn(tail string, current PromptContext) bool {
 	return promptLooksLikeCurrentShell(line, current)
 }
 
+func HandoffPromptReturnReason(observed ObservedShellState, tail string, fallbackPrompt *PromptContext) string {
+	if observed.HasPromptContext && observed.PromptContext.PromptLine() != "" {
+		return "prompt_context"
+	}
+	if TailSuggestsAwaitingInput(tail) {
+		return ""
+	}
+	if !paneCommandAllowsPromptInference(observed.CurrentPaneCommand) {
+		return ""
+	}
+	if observed.SemanticState.ExitCode != nil {
+		return "semantic_exit"
+	}
+	if strings.Contains(tail, "^C") {
+		return "interrupt_tail"
+	}
+	if fallbackPrompt != nil && fallbackPrompt.PromptLine() != "" && TailSuggestsPromptReturn(tail, *fallbackPrompt) {
+		return "fallback_prompt_tail"
+	}
+	return ""
+}
+
 func captureHasCurrentPromptContext(captured string, current PromptContext) bool {
 	if current.PromptLine() == "" {
 		return false

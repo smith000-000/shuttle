@@ -40,7 +40,7 @@ func TestOpenRouterAgentAppliesProviderPolicyForStructuredModel(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected reasoning config, got %#v", payload["reasoning"])
 		}
-		if reasoning["max_tokens"] != float64(64) || reasoning["exclude"] != true {
+		if reasoning["effort"] != "medium" || reasoning["exclude"] != true {
 			t.Fatalf("unexpected reasoning config %#v", reasoning)
 		}
 
@@ -203,5 +203,17 @@ func TestOpenRouterAgentAutoModelOmitsReasoningOverride(t *testing.T) {
 	}
 	if response.Message != "Auto path works." {
 		t.Fatalf("expected auto response, got %q", response.Message)
+	}
+}
+
+func TestOpenRouterAgentUsesConfiguredReasoningEffort(t *testing.T) {
+	policy := openRouterPolicyForProfile(Profile{
+		Preset:          PresetOpenRouter,
+		Thinking:        string(ThinkingOn),
+		ReasoningEffort: string(ReasoningEffortHigh),
+		SelectedModel:   &ModelOption{ID: "openai/gpt-5", SupportedParameters: []string{"reasoning", "structured_outputs", "max_tokens"}},
+	})
+	if policy.Reasoning == nil || policy.Reasoning.Effort != string(ReasoningEffortHigh) || !policy.Reasoning.Exclude {
+		t.Fatalf("expected reasoning effort override, got %#v", policy.Reasoning)
 	}
 }
