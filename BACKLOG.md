@@ -35,7 +35,20 @@ The old implementation plans were useful to get here, but most of them now descr
 - Folded-forward P0 follow-ons: provider onboarding detection/ranking cleanup and runtime lifecycle hardening now ship as part of the broader P1 epic.
 
 ### P2
-- Release and install polish: package-manager distribution, remaining platform packaging cleanup, and operator-facing install/runtime docs.
+- Finish the current epic cycle by making external agent runtimes fully functional behind `internal/agentruntime`, including runtime selection/recovery edge cases and operator-facing clarity around active runtime ownership.
+- Make the Shuttle control surface authoritative end-to-end (controller as source of truth for execution/session/task state, with TUI presentation and intent routing aligned to that authority boundary).
+- Close remaining shell/runtime handoff gaps needed to treat controller-reconciled state, not ad hoc pane interpretation, as canonical behavior.
+
+### P3
+- Release and packaging hardening: package-manager distribution, cross-platform install validation, and operator-facing install/runtime docs refinement.
+- Production-readiness hardening pass: reliability regressions, operational diagnostics polish, and release process tightening.
+
+### P4
+- Active mega-epic tracker: [inprocess/P4.md](inprocess/P4.md).
+- Persistent memory and retrieval UX for host-scoped operational recall (for example, asking where a prior SnapRAID issue was fixed) without leaking stale or cross-host assumptions.
+- Context pressure management: proactive auto-compaction and shell-output summarization before provider context limits are hit.
+- Memory configuration lifecycle: retention policy controls, pruning tooling, and operator-visible memory hygiene status.
+- Rules system: explicit always-on guidance/rules that the agent keeps in working context with clear precedence and auditability.
 - UX follow-up work: transcript and settings polish that directly supports the active backlog items above, rather than reopening broad UI exploration.
 
 ## Active Reference Docs
@@ -49,6 +62,7 @@ The old implementation plans were useful to get here, but most of them now descr
 - [Provider auth guide](inprocess/provider-auth-guide.md)
 - [Patch apply strategy](inprocess/patch-apply-strategy.md)
 - [P1 mega-epic tracker](inprocess/P1.md)
+- [P4 mega-epic tracker](inprocess/P4.md)
 
 ## Historical Plans
 These are retained for branch history and design context, but they are no longer the source of truth for current work:
