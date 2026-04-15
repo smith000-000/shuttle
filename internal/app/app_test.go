@@ -3,9 +3,13 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"aiterm/internal/agentruntime"
+	"aiterm/internal/provider"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -112,6 +116,90 @@ func TestCleanupStaleManagedSocketKeepsLiveOrNonAbsoluteTargets(t *testing.T) {
 	relativeSocket := filepath.Join("relative", "tmux.sock")
 	if err := cleanupStaleManagedSocket(context.Background(), relativeSocket, stubRuntimeSocketProbe{err: errors.New("tmux list-panes -a: exit status 1: no server running")}); err != nil {
 		t.Fatalf("cleanupStaleManagedSocket(relative) error = %v", err)
+	}
+}
+
+func writeFakeCodexRuntime(t *testing.T, version string) string {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "codex-runtime")
+	content := fmt.Sprintf(`#!/bin/sh
+set -eu
+if [ "${1-}" = "--version" ]; then
+  printf 'OpenAI Codex v%s
+'
+  exit 0
+fi
+printf 'unexpected args: %s
+' "$*" >&2
+exit 1
+`, version, "%s")
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	return script
+}
+
+func TestBuildConfiguredRuntimeRejectsOldCodexRuntime(t *testing.T) {
+	runtimeCommand := writeFakeCodexRuntime(t, "0.117.0")
+	_, err := buildConfiguredRuntime(config.Config{RuntimeType: "codex_sdk", RuntimeCommand: runtimeCommand}, provider.Profile{})
+	if err == nil || err.Error() == "" {
+		t.Fatalf("expected old codex runtime error, got %v", err)
+	}
+}
+
+func TestBuildConfiguredRuntimeAcceptsCompatibleCodexRuntime(t *testing.T) {
+	runtimeCommand := writeFakeCodexRuntime(t, "0.118.0")
+	runtime, err := buildConfiguredRuntime(config.Config{RuntimeType: "codex_sdk", RuntimeCommand: runtimeCommand}, provider.Profile{})
+	if err != nil {
+		t.Fatalf("buildConfiguredRuntime() error = %v", err)
+	}
+	if runtime == nil {
+		t.Fatal("expected runtime")
+	}
+}
+
+func TestBuildConfiguredRuntimeAcceptsCodexAppServer(t *testing.T) {
+	runtimeCommand := writeFakeCodexRuntime(t, "0.118.0")
+	runtime, err := buildConfiguredRuntime(config.Config{RuntimeType: "codex_app_server", RuntimeCommand: runtimeCommand}, provider.Profile{})
+	if err != nil {
+		t.Fatalf("buildConfiguredRuntime() error = %v", err)
+	}
+	if runtime == nil {
+		t.Fatal("expected runtime")
+	}
+}
+
+func TestBuildStartupRuntimeStateFallsBackToBuiltinInTUIWhenCodexMissing(t *testing.T) {
+	state, err := buildStartupRuntimeState(config.Config{
+		TUI:            true,
+		RuntimeType:    "codex_sdk",
+		RuntimeCommand: "/definitely/missing/codex",
+	}, provider.Profile{Preset: "openai", Model: "gpt-5"})
+	if err != nil {
+		t.Fatalf("buildStartupRuntimeState() error = %v", err)
+	}
+	if state.runtime == nil {
+		t.Fatal("expected fallback runtime")
+	}
+	if state.initialModelInfo == nil || state.initialModelInfo.EffectiveRuntime != agentruntime.RuntimeBuiltin {
+		t.Fatalf("expected builtin fallback model info, got %#v", state.initialModelInfo)
+	}
+	if state.activeRuntimeType != agentruntime.RuntimeCodexSDK {
+		t.Fatalf("expected requested runtime to remain visible, got %q", state.activeRuntimeType)
+	}
+	if len(state.initialTranscript) != 1 || state.initialTranscript[0].Title != "error" {
+		t.Fatalf("expected startup runtime error entry, got %#v", state.initialTranscript)
+	}
+}
+
+func TestBuildStartupRuntimeStateKeepsStartupFailureFatalOutsideTUI(t *testing.T) {
+	_, err := buildStartupRuntimeState(config.Config{
+		TUI:            false,
+		RuntimeType:    "codex_sdk",
+		RuntimeCommand: "/definitely/missing/codex",
+	}, provider.Profile{Preset: "openai", Model: "gpt-5"})
+	if err == nil {
+		t.Fatal("expected non-TUI startup failure to remain fatal")
 	}
 }
 

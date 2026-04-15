@@ -148,10 +148,8 @@ func New(agent Agent, runner ShellRunner, reader ShellContextReader, session Ses
 		runner:  runner,
 		reader:  reader,
 		session: session,
-		task: TaskContext{
-			TaskID: "task-1",
-		},
 	}
+	controller.task = TaskContext{TaskID: controller.nextTaskIDLocked()}
 	controller.runtimeHost = newBuiltinRuntimeHost(controller, agent)
 	controller.remoteCaps = newRemoteCapabilityStore(session.StateDir)
 	if session.LocalWorkspaceRoot != "" {

@@ -1,10 +1,10 @@
 # P1: Hardening and External Runtime Expansion
 
 ## Purpose
-Track the active P1 mega-epic as a long-lived worklist spanning security/privacy hardening, shell lifecycle coverage, provider/runtime cleanup, execution-pane UX, and concrete external coding-runtime integrations.
+Retain the completed P1 mega-epic worklist for historical context. This epic closed out the hardening/runtime-cleanup phase spanning security/privacy hardening, shell lifecycle coverage, provider/runtime cleanup, execution-pane UX, and the first external runtime seam.
 
 ## Current Decision Summary
-- `inprocess/P1.md` is the active mega-epic tracker.
+- This tracker is retired and archived under `completed/`.
 - `P#` files are mega-epic worklists, not “current top slice only” trackers.
 - P0 is retired and archived as `completed/p0-agent-runtime-seam.md`.
 - The lingering transcript selection rendering bug from P0 is tracked separately in GitHub and is not part of P1 acceptance.
@@ -13,9 +13,9 @@ Track the active P1 mega-epic as a long-lived worklist spanning security/privacy
   - explicit consent for sensitive trace
   - session-scoped runtime artifacts with stale-startup pruning
   - `shuttle.log` remains operational-only, while `trace.log` owns trace-detail behavior
-- External coding-runtime scope for P1 is concrete adapters behind `internal/agentruntime`, starting with `pi` and the next real runtimes, not a generalized runtime marketplace.
+- External coding-runtime scope for P1 was concrete adapters behind `internal/agentruntime`, not a generalized runtime marketplace.
 - Execution-pane UX scope for P1 is focused on controller-visible active execution state plus a clearer `F3` flow, not a general pane inspector.
-- Shell hardening stays noninteractive-first; the interactive harness remains opt-in.
+- Shell hardening stayed noninteractive-first; the interactive harness remains opt-in.
 
 ## Epic Checklist
 

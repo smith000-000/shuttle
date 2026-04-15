@@ -8,21 +8,24 @@ import (
 )
 
 const (
-	RuntimeBuiltin   = agentruntime.RuntimeBuiltin
-	RuntimePi        = agentruntime.RuntimePi
-	RuntimeCodexSDK  = agentruntime.RuntimeCodexSDK
-	RuntimeAuto      = agentruntime.RuntimeAuto
-	defaultPiCommand = "pi"
+	RuntimeBuiltin        = agentruntime.RuntimeBuiltin
+	RuntimePi             = agentruntime.RuntimePi
+	RuntimeCodexSDK       = agentruntime.RuntimeCodexSDK
+	RuntimeCodexAppServer = agentruntime.RuntimeCodexAppServer
+	RuntimeAuto           = agentruntime.RuntimeAuto
+	defaultPiCommand      = "pi"
 )
 
 var runtimeLookPath = exec.LookPath
 
 type RuntimeInstallCandidate struct {
-	Name      string
-	Command   string
-	Runtime   string
-	Installed bool
-	Supported bool
+	Name          string
+	Command       string
+	Runtime       string
+	Installed     bool
+	Supported     bool
+	ParityRank    int
+	FailureReason string
 }
 
 type ResolvedRuntime struct {
@@ -34,8 +37,9 @@ type ResolvedRuntime struct {
 
 func DetectRuntimeInstallCandidates() []RuntimeInstallCandidate {
 	candidates := []RuntimeInstallCandidate{
-		{Name: "pi", Command: defaultPiCommand, Runtime: RuntimePi, Supported: true},
-		{Name: "codex sdk", Command: defaultCodexCLICommand, Runtime: RuntimeCodexSDK, Supported: true},
+		{Name: "codex sdk", Command: defaultCodexCLICommand, Runtime: RuntimeCodexSDK, Supported: true, ParityRank: 100},
+		{Name: "codex app server", Command: defaultCodexCLICommand, Runtime: RuntimeCodexAppServer, Supported: true, ParityRank: 90},
+		{Name: "pi", Command: defaultPiCommand, Runtime: RuntimePi, Supported: false, ParityRank: 0},
 		{Name: "claude agent", Command: "claude", Supported: false},
 		{Name: "opencode", Command: "opencode", Supported: false},
 	}
@@ -47,6 +51,18 @@ func DetectRuntimeInstallCandidates() []RuntimeInstallCandidate {
 		}
 		if _, err := runtimeLookPath(command); err == nil {
 			candidates[index].Installed = true
+		} else {
+			if candidates[index].Supported {
+				candidates[index].Supported = false
+				candidates[index].FailureReason = err.Error()
+			}
+			continue
+		}
+		if candidates[index].Runtime == RuntimeCodexSDK || candidates[index].Runtime == RuntimeCodexAppServer {
+			if err := validateCodexRuntimeCommand(command); err != nil {
+				candidates[index].Supported = false
+				candidates[index].FailureReason = err.Error()
+			}
 		}
 	}
 
@@ -65,14 +81,21 @@ func ResolveRuntimeSelection(requestedType string, requestedCommand string) Reso
 	}
 
 	if requestedType == RuntimeAuto {
+		bestRank := -1
 		for _, candidate := range DetectRuntimeInstallCandidates() {
 			if !candidate.Supported || !candidate.Installed {
 				continue
 			}
+			if candidate.ParityRank < bestRank {
+				continue
+			}
+			bestRank = candidate.ParityRank
 			resolved.SelectedType = candidate.Runtime
 			if resolved.Command == "" {
 				resolved.Command = strings.TrimSpace(candidate.Command)
 			}
+		}
+		if resolved.SelectedType != RuntimeAuto && resolved.SelectedType != "" {
 			resolved.AutoSelected = true
 			return resolved
 		}
@@ -105,6 +128,8 @@ func normalizeRuntimeType(value string) string {
 		return RuntimePi
 	case "codex-sdk":
 		return RuntimeCodexSDK
+	case "codex-app-server", "codex-appserver":
+		return RuntimeCodexAppServer
 	default:
 		return strings.ToLower(strings.TrimSpace(value))
 	}

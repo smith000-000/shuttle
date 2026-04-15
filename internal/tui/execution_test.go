@@ -1648,6 +1648,81 @@ func TestSuccessfulKeysSendSuppressesImmediateAutoReopen(t *testing.T) {
 	}
 }
 
+func TestCommandResultClearsSendKeysModeAndPreservesComposerMode(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.mode = AgentMode
+	model.sendingFullscreenKeys = true
+	model.input = "dd"
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "nano foo.txt",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionInteractiveFullscreen,
+		StartedAt: time.Now(),
+	}
+
+	updated, _ := model.Update(controllerEventsMsg{
+		events: []controller.TranscriptEvent{
+			{
+				Kind: controller.EventCommandResult,
+				Payload: controller.CommandResultSummary{
+					ExecutionID: "cmd-1",
+					Command:     "nano foo.txt",
+					Origin:      controller.CommandOriginUserShell,
+					ExitCode:    0,
+					Summary:     "",
+				},
+			},
+		},
+	})
+	next := updated.(Model)
+
+	if next.sendingFullscreenKeys {
+		t.Fatal("expected KEYS> mode to close after command result")
+	}
+	if next.mode != AgentMode {
+		t.Fatalf("expected composer mode to return to agent mode, got %s", next.mode)
+	}
+	if next.input != "" {
+		t.Fatalf("expected KEYS> buffer to clear after command result, got %q", next.input)
+	}
+}
+
+func TestActiveExecutionTransitionToRunningClearsSendKeysMode(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.mode = ShellMode
+	model.sendingFullscreenKeys = true
+	model.input = "q"
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "nano foo.txt",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionInteractiveFullscreen,
+		StartedAt: time.Now(),
+	}
+
+	updated, _ := model.Update(activeExecutionMsg{
+		execution: &controller.CommandExecution{
+			ID:        "cmd-1",
+			Command:   "cat foo.txt",
+			Origin:    controller.CommandOriginUserShell,
+			State:     controller.CommandExecutionRunning,
+			StartedAt: time.Now(),
+		},
+	})
+	next := updated.(Model)
+
+	if next.sendingFullscreenKeys {
+		t.Fatal("expected KEYS> mode to close when active execution is no longer interactive")
+	}
+	if next.mode != ShellMode {
+		t.Fatalf("expected composer mode to remain shell mode, got %s", next.mode)
+	}
+	if next.input != "" {
+		t.Fatalf("expected KEYS> buffer to clear after leaving interactive execution, got %q", next.input)
+	}
+}
+
 func TestFullscreenKeysFooterShowsSendHints(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.sendingFullscreenKeys = true

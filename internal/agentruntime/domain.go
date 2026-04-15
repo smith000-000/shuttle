@@ -68,10 +68,15 @@ type AgentResponse struct {
 }
 
 type ModelInfo struct {
-	ProviderPreset  string
-	RequestedModel  string
-	ResponseModel   string
-	ResponseBaseURL string
+	ProviderPreset       string
+	RequestedModel       string
+	ResponseModel        string
+	ResponseBaseURL      string
+	SelectedRuntime      string
+	EffectiveRuntime     string
+	RuntimeCommand       string
+	RuntimeAuthority     string
+	RuntimeFailureReason string
 }
 
 type Plan struct {
@@ -317,8 +322,9 @@ type CommandResultSummary struct {
 }
 
 const (
-	RuntimeBuiltin  = "builtin"
-	RuntimePi       = "pi"
-	RuntimeCodexSDK = "codex_sdk"
-	RuntimeAuto     = "auto"
+	RuntimeBuiltin        = "builtin"
+	RuntimePi             = "pi"
+	RuntimeCodexSDK       = "codex_sdk"
+	RuntimeCodexAppServer = "codex_app_server"
+	RuntimeAuto           = "auto"
 )

@@ -37,7 +37,7 @@ func TestSlashProviderOpensConfigureProvidersSettings(t *testing.T) {
 			}, nil
 		},
 		func(provider.Profile) ([]provider.ModelOption, error) { return nil, nil },
-		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
 			return &fakeController{}, profile, nil
 		},
 		func(provider.Profile) error { return nil },
@@ -75,7 +75,7 @@ func TestSlashModelOpensCurrentProviderDetailAndLoadsModels(t *testing.T) {
 				return nil, nil
 			}
 		},
-		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
 			return &fakeController{}, profile, nil
 		},
 		func(provider.Profile) error { return nil },
@@ -276,7 +276,7 @@ func TestConfigureProvidersSelectionSwitchesController(t *testing.T) {
 		func(profile provider.Profile) ([]provider.ModelOption, error) {
 			return []provider.ModelOption{{ID: "openrouter/auto"}, {ID: "openai/gpt-5-mini"}}, nil
 		},
-		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
 			return switchedCtrl, profile, nil
 		},
 		func(provider.Profile) error { return nil },
@@ -339,7 +339,7 @@ func TestOpenOnboardingUsesCollapsedProviderSettingsList(t *testing.T) {
 			}, nil
 		},
 		nil,
-		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
 			return &fakeController{}, profile, nil
 		},
 		func(provider.Profile) error { return nil },
@@ -382,7 +382,7 @@ func TestManualProviderSettingsCollectConfigAndPersist(t *testing.T) {
 			return []provider.OnboardingCandidate{{Profile: provider.Profile{Preset: provider.PresetOpenRouter, Name: "OpenRouter Responses", Model: "openai/gpt-5", BaseURL: "https://openrouter.ai/api/v1"}, Reason: "Manual setup.", Manual: true}}, nil
 		},
 		nil,
-		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
 			return switchedCtrl, profile, nil
 		},
 		func(profile provider.Profile) error {
@@ -424,7 +424,7 @@ func TestManualProviderSettingsCollectConfigAndPersist(t *testing.T) {
 	}
 }
 
-func TestF10OpensSettingsMenuWithSessionAndConfigureProvidersEntries(t *testing.T) {
+func TestF10OpensSettingsMenuWithSessionRuntimeAndConfigureProvidersEntries(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
 		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
 		func() ([]provider.OnboardingCandidate, error) {
@@ -435,7 +435,7 @@ func TestF10OpensSettingsMenuWithSessionAndConfigureProvidersEntries(t *testing.
 			}, nil
 		},
 		nil,
-		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
 			return &fakeController{}, profile, nil
 		},
 		func(provider.Profile) error { return nil },
@@ -445,8 +445,10 @@ func TestF10OpensSettingsMenuWithSessionAndConfigureProvidersEntries(t *testing.
 	if !model.settingsOpen || model.settingsStep != settingsStepMenu || len(model.settingsProviders) < 3 {
 		t.Fatalf("unexpected settings state")
 	}
+	model.width = 140
+	model.height = 40
 	view := model.View()
-	for _, fragment := range []string{"Session Settings", "Configure Providers"} {
+	for _, fragment := range []string{"Session Settings", "Runtime", "Configure Providers"} {
 		if !strings.Contains(view, fragment) {
 			t.Fatalf("expected settings menu entry %q in view %q", fragment, view)
 		}
@@ -455,6 +457,163 @@ func TestF10OpensSettingsMenuWithSessionAndConfigureProvidersEntries(t *testing.
 		if strings.Contains(view, fragment) {
 			t.Fatalf("did not expect legacy settings menu entry %q in view %q", fragment, view)
 		}
+	}
+}
+
+func TestSettingsRuntimeSelectionSwitchesAndPersistsRuntime(t *testing.T) {
+	switchedCtrl := &fakeController{}
+	var savedType string
+	var savedCommand string
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
+		func() ([]provider.OnboardingCandidate, error) { return nil, nil },
+		nil,
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
+			return &fakeController{}, profile, nil
+		},
+		func(provider.Profile) error { return nil },
+	).WithRuntimeSettings(provider.RuntimeBuiltin, "/custom/codex", func(runtimeType string, runtimeCommand string, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, string, string, error) {
+		return switchedCtrl, runtimeType, runtimeCommand, nil
+	}, func(runtimeType string, runtimeCommand string) error {
+		savedType = runtimeType
+		savedCommand = runtimeCommand
+		return nil
+	})
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF10})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(Model)
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatal("expected runtime list to open synchronously")
+	}
+	if model.settingsStep != settingsStepRuntime {
+		t.Fatalf("expected runtime settings step, got %q", model.settingsStep)
+	}
+	model.settingsRuntimeIdx = 2
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected runtime switch command")
+	}
+	msg, ok := cmd().(runtimeSwitchedMsg)
+	if !ok {
+		t.Fatalf("expected runtimeSwitchedMsg, got %T", cmd())
+	}
+	updated, _ = model.Update(msg)
+	model = updated.(Model)
+	if model.ctrl != switchedCtrl {
+		t.Fatal("expected controller to switch with runtime")
+	}
+	if model.activeRuntimeType != provider.RuntimeCodexSDK {
+		t.Fatalf("expected codex runtime active, got %q", model.activeRuntimeType)
+	}
+	if savedType != provider.RuntimeCodexSDK || savedCommand != "/custom/codex" {
+		t.Fatalf("expected saved runtime values, got type=%q command=%q", savedType, savedCommand)
+	}
+	if !model.settingsOpen || model.settingsStep != settingsStepRuntime {
+		t.Fatalf("expected runtime settings to remain open, got open=%t step=%q", model.settingsOpen, model.settingsStep)
+	}
+	if !strings.Contains(model.settingsBanner, "Codex CLI Bridge") {
+		t.Fatalf("expected runtime banner, got %q", model.settingsBanner)
+	}
+}
+
+func TestSettingsRuntimeCommandFieldEditsAndApplies(t *testing.T) {
+	switchedCtrl := &fakeController{}
+	var savedType string
+	var savedCommand string
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5", BaseURL: "https://api.openai.com/v1"},
+		func() ([]provider.OnboardingCandidate, error) { return nil, nil },
+		nil,
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
+			return &fakeController{}, profile, nil
+		},
+		func(provider.Profile) error { return nil },
+	).WithRuntimeSettings(provider.RuntimeAuto, "", func(runtimeType string, runtimeCommand string, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, string, string, error) {
+		return switchedCtrl, runtimeType, runtimeCommand, nil
+	}, func(runtimeType string, runtimeCommand string) error {
+		savedType = runtimeType
+		savedCommand = runtimeCommand
+		return nil
+	})
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF10})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(Model)
+	if model.settingsStep != settingsStepRuntime {
+		t.Fatalf("expected runtime settings step, got %q", model.settingsStep)
+	}
+	model.settingsRuntimeIdx = 3
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyTab})
+	model = updated.(Model)
+	if !model.settingsRuntimeCommandFocus {
+		t.Fatal("expected runtime command field to be focused")
+	}
+	model.settingsRuntimeCommand = "/opt/codex"
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected runtime apply command")
+	}
+	msg := cmd().(runtimeSwitchedMsg)
+	updated, _ = model.Update(msg)
+	model = updated.(Model)
+	if model.ctrl != switchedCtrl {
+		t.Fatal("expected controller to switch")
+	}
+	if savedType != provider.RuntimeCodexAppServer || savedCommand != "/opt/codex" {
+		t.Fatalf("expected saved runtime command override, got type=%q command=%q", savedType, savedCommand)
+	}
+	view := model.View()
+	if !strings.Contains(view, "Command Path") || !strings.Contains(view, "Preview:") || !strings.Contains(view, "Health:") {
+		t.Fatalf("expected runtime command preview in view, got %q", view)
+	}
+}
+
+func TestSettingsRuntimeSelectionPassesCurrentTrackedShellTarget(t *testing.T) {
+	switchedCtrl := &fakeController{}
+	var gotTrackedShell controller.TrackedShellTarget
+	currentCtrl := &fakeController{sessionName: "shuttle-live", trackedPaneID: "%8"}
+	model := NewModel(fakeWorkspace(), currentCtrl).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5", BaseURL: "https://api.openai.com/v1"},
+		func() ([]provider.OnboardingCandidate, error) { return nil, nil },
+		nil,
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
+			return &fakeController{}, profile, nil
+		},
+		func(provider.Profile) error { return nil },
+	).WithRuntimeSettings(provider.RuntimeBuiltin, "", func(runtimeType string, runtimeCommand string, _ *shell.PromptContext, trackedShell controller.TrackedShellTarget) (controller.Controller, string, string, error) {
+		gotTrackedShell = trackedShell
+		return switchedCtrl, runtimeType, runtimeCommand, nil
+	}, func(string, string) error { return nil })
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF10})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(Model)
+	model.settingsRuntimeIdx = 2
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected runtime switch command")
+	}
+	msg := cmd().(runtimeSwitchedMsg)
+	if gotTrackedShell.SessionName != "shuttle-live" || gotTrackedShell.PaneID != "%8" {
+		t.Fatalf("expected live tracked shell target, got %#v", gotTrackedShell)
+	}
+	updated, _ = model.Update(msg)
+	model = updated.(Model)
+	if model.ctrl != switchedCtrl {
+		t.Fatal("expected controller to switch")
 	}
 }
 
@@ -516,12 +675,14 @@ func TestSettingsProviderListSwitchesProviderFromDetail(t *testing.T) {
 			}
 			return []provider.ModelOption{{ID: profile.Model}}, nil
 		},
-		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
 			return switchedCtrl, profile, nil
 		},
 		func(provider.Profile) error { return nil },
 	)
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF10})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
 	model = updated.(Model)
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
 	model = updated.(Model)
@@ -565,12 +726,14 @@ func TestSettingsProviderListEscReturnsToMenu(t *testing.T) {
 			}, nil
 		},
 		nil,
-		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
 			return &fakeController{}, profile, nil
 		},
 		func(provider.Profile) error { return nil },
 	)
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF10})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
 	model = updated.(Model)
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
 	model = updated.(Model)
@@ -595,7 +758,7 @@ func TestSettingsModelListRequiresF5ForKeyboardNavigation(t *testing.T) {
 		func(profile provider.Profile) ([]provider.ModelOption, error) {
 			return []provider.ModelOption{{ID: "openrouter/auto"}, {ID: "qwen/qwen3.5-9b"}}, nil
 		},
-		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
 			return &fakeController{}, profile, nil
 		},
 		func(provider.Profile) error { return nil },
@@ -638,7 +801,7 @@ func TestSettingsModelListRequiresRightArrowAndEscReturnsToFields(t *testing.T) 
 		func(profile provider.Profile) ([]provider.ModelOption, error) {
 			return []provider.ModelOption{{ID: "openrouter/auto"}, {ID: "qwen/qwen3.5-9b"}}, nil
 		},
-		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
 			return &fakeController{}, profile, nil
 		},
 		func(provider.Profile) error { return nil },
@@ -672,7 +835,7 @@ func TestSettingsModelListStaysFocusedAtCatalogEdges(t *testing.T) {
 		func(profile provider.Profile) ([]provider.ModelOption, error) {
 			return []provider.ModelOption{{ID: "openrouter/auto"}, {ID: "qwen/qwen3.5-9b"}}, nil
 		},
-		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
 			return &fakeController{}, profile, nil
 		},
 		func(provider.Profile) error { return nil },
@@ -747,7 +910,7 @@ func TestTypingInModelFieldLeavesModelListMode(t *testing.T) {
 		func(profile provider.Profile) ([]provider.ModelOption, error) {
 			return []provider.ModelOption{{ID: "openrouter/auto"}, {ID: "qwen/qwen3.5-9b"}}, nil
 		},
-		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
 			return &fakeController{}, profile, nil
 		},
 		func(provider.Profile) error { return nil },
@@ -781,7 +944,7 @@ func TestSettingsProviderDetailModelFilterNarrowsChoices(t *testing.T) {
 		func(profile provider.Profile) ([]provider.ModelOption, error) {
 			return []provider.ModelOption{{ID: "openrouter/auto"}, {ID: "qwen/qwen3.5-9b"}, {ID: "qwen/qwen3.5-32b"}}, nil
 		},
-		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
 			return &fakeController{}, profile, nil
 		},
 		func(provider.Profile) error { return nil },
@@ -812,7 +975,7 @@ func TestSaveSettingsProfileRejectsUnknownModelWhenCatalogIsAvailable(t *testing
 		func(profile provider.Profile) ([]provider.ModelOption, error) {
 			return []provider.ModelOption{{ID: "gpt-5-nano-2025-08-07"}, {ID: "gpt-5"}}, nil
 		},
-		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
 			return &fakeController{}, profile, nil
 		},
 		func(provider.Profile) error { return nil },
@@ -849,7 +1012,7 @@ func TestSettingsProviderDetailEscReturnsToMenu(t *testing.T) {
 		func(profile provider.Profile) ([]provider.ModelOption, error) {
 			return []provider.ModelOption{{ID: profile.Model}}, nil
 		},
-		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
 			return &fakeController{}, profile, nil
 		},
 		func(provider.Profile) error { return nil },
@@ -880,7 +1043,7 @@ func TestSettingsProviderDetailModelInfoToggleShowsSelectedDetailsOnly(t *testin
 				{ID: "qwen/qwen3.5-9b"},
 			}, nil
 		},
-		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
 			return &fakeController{}, profile, nil
 		},
 		func(provider.Profile) error { return nil },
@@ -921,7 +1084,7 @@ func TestSaveSettingsProfileRefreshesCurrentProviderEvenWhenPersistenceFails(t *
 		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
 		func() ([]provider.OnboardingCandidate, error) { return nil, nil },
 		nil,
-		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
 			return switchedCtrl, profile, nil
 		},
 		func(provider.Profile) error {
@@ -966,7 +1129,7 @@ func TestF8SavesAndActivatesProviderFromSettingsForm(t *testing.T) {
 		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5-nano-2025-08-07", BaseURL: "https://api.openai.com/v1"},
 		func() ([]provider.OnboardingCandidate, error) { return nil, nil },
 		nil,
-		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
 			return switchedCtrl, profile, nil
 		},
 		func(provider.Profile) error { return nil },
@@ -1101,6 +1264,23 @@ func TestSettingsSessionDangerousPromptsForConfirmation(t *testing.T) {
 	}
 	if model.settingsStep != settingsStepSession {
 		t.Fatalf("expected session settings to remain active, got %q", model.settingsStep)
+	}
+}
+
+func TestStatusLineShowsActiveRuntimeBeforeModelInfo(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenRouter, Model: "openai/gpt-5-nano-2025-08-07"},
+		nil,
+		nil,
+		nil,
+		nil,
+	).WithRuntimeSettings(provider.RuntimeCodexSDK, "/custom/codex", nil, nil)
+	model.width = 100
+	model.height = 20
+	model.shellContext = shell.PromptContext{User: "localuser", Host: "workstation", Directory: "~/workspace/project", PromptSymbol: "%"}
+
+	if !strings.Contains(model.View(), "Codex CLI Bridge") {
+		t.Fatalf("expected active runtime in status line, got %q", model.View())
 	}
 }
 

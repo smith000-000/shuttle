@@ -45,6 +45,14 @@ type Result struct {
 	Interactive     bool
 }
 
+type runtimeStartupState struct {
+	runtime            agentruntime.Runtime
+	activeRuntimeType  string
+	activeRuntimeCmd   string
+	initialModelInfo   *controller.AgentModelInfo
+	initialTranscript  []tui.Entry
+}
+
 func New(cfg config.Config, logger *slog.Logger) *App {
 	return &App{cfg: cfg, logger: logger}
 }
@@ -85,6 +93,10 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	runtimeCfg, err := provider.ApplyStoredProviderConfig(a.cfg)
 	if err != nil {
 		return Result{}, fmt.Errorf("load stored provider config: %w", err)
+	}
+	runtimeCfg, err = agentruntime.ApplyStoredRuntimeConfig(runtimeCfg)
+	if err != nil {
+		return Result{}, fmt.Errorf("load stored runtime config: %w", err)
 	}
 
 	client, err := tmux.NewClient(socketTarget)
@@ -171,7 +183,11 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			UserShellHistoryFile:  historyFile,
 			CurrentShell:          initialShellContextPtr(initialShellContext),
 		})
-		ctrl.SetRuntime(buildConfiguredRuntime(runtimeCfg, profile))
+		runtime, err := buildConfiguredRuntime(runtimeCfg, profile)
+		if err != nil {
+			return Result{}, fmt.Errorf("configure runtime: %w", err)
+		}
+		ctrl.SetRuntime(runtime)
 		agentCtx, cancel := context.WithTimeout(ctx, agentPromptTimeout)
 		defer cancel()
 
@@ -229,8 +245,12 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			UserShellHistoryFile:  historyFile,
 			CurrentShell:          initialShellContextPtr(initialShellContext),
 		})
-		ctrl.SetRuntime(buildConfiguredRuntime(runtimeCfg, profile))
-		switchProvider := func(profile provider.Profile, shellContext *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+		runtimeState, err := buildStartupRuntimeState(runtimeCfg, profile)
+		if err != nil {
+			return Result{}, fmt.Errorf("configure runtime: %w", err)
+		}
+		ctrl.SetRuntime(runtimeState.runtime)
+		switchProvider := func(profile provider.Profile, shellContext *shell.PromptContext, trackedShell controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
 			agent, err := provider.NewFromProfile(profile, provider.FactoryOptions{})
 			if err != nil {
 				return nil, provider.Profile{}, err
@@ -239,7 +259,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			ctrl := controller.New(agent, observer, observer, controller.SessionContext{
 				SessionName:           workspace.SessionName,
 				BottomPaneID:          workspace.BottomPane.ID,
-				TrackedShell:          controller.TrackedShellTarget{SessionName: workspace.SessionName, PaneID: workspace.TopPane.ID},
+				TrackedShell:          trackedShell,
 				WorkingDirectory:      runtimeCfg.StartDir,
 				LocalWorkingDirectory: runtimeCfg.StartDir,
 				LocalWorkspaceRoot:    runtimeCfg.StartDir,
@@ -247,8 +267,43 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 				UserShellHistoryFile:  historyFile,
 				CurrentShell:          shellContext,
 			})
-			ctrl.SetRuntime(buildConfiguredRuntime(runtimeCfg, profile))
+			runtime, err := buildConfiguredRuntime(runtimeCfg, profile)
+			if err != nil {
+				return nil, provider.Profile{}, fmt.Errorf("configure runtime: %w", err)
+			}
+			ctrl.SetRuntime(runtime)
 			return ctrl, profile, nil
+		}
+		switchRuntime := func(runtimeType string, runtimeCommand string, shellContext *shell.PromptContext, trackedShell controller.TrackedShellTarget) (controller.Controller, string, string, error) {
+			nextCfg := runtimeCfg
+			nextCfg.RuntimeType = strings.TrimSpace(runtimeType)
+			nextCfg.RuntimeCommand = strings.TrimSpace(runtimeCommand)
+
+			agent, err := provider.NewFromProfile(profile, provider.FactoryOptions{})
+			if err != nil {
+				return nil, "", "", err
+			}
+
+			ctrl := controller.New(agent, observer, observer, controller.SessionContext{
+				SessionName:           workspace.SessionName,
+				BottomPaneID:          workspace.BottomPane.ID,
+				TrackedShell:          trackedShell,
+				WorkingDirectory:      runtimeCfg.StartDir,
+				LocalWorkingDirectory: runtimeCfg.StartDir,
+				LocalWorkspaceRoot:    runtimeCfg.StartDir,
+				StateDir:              runtimeCfg.StateDir,
+				UserShellHistoryFile:  historyFile,
+				CurrentShell:          shellContext,
+			})
+			runtime, err := buildConfiguredRuntime(nextCfg, profile)
+			if err != nil {
+				return nil, "", "", fmt.Errorf("configure runtime: %w", err)
+			}
+			ctrl.SetRuntime(runtime)
+			resolved := provider.ResolveRuntimeSelection(nextCfg.RuntimeType, nextCfg.RuntimeCommand)
+			runtimeCfg.RuntimeType = resolved.RequestedType
+			runtimeCfg.RuntimeCommand = resolved.Command
+			return ctrl, runtimeCfg.RuntimeType, runtimeCfg.RuntimeCommand, nil
 		}
 		model := tui.NewModel(workspace, ctrl).
 			WithShellContext(initialShellContext).
@@ -265,7 +320,15 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			}).
 			WithProviderTester(func(profile provider.Profile) error {
 				return provider.CheckHealth(ctx, profile, provider.FactoryOptions{})
-			})
+			}).
+			WithRuntimeSettings(runtimeState.activeRuntimeType, runtimeState.activeRuntimeCmd, switchRuntime, func(runtimeType string, runtimeCommand string) error {
+				resolved := provider.ResolveRuntimeSelection(runtimeType, runtimeCommand)
+				runtimeCfg.RuntimeType = resolved.RequestedType
+				runtimeCfg.RuntimeCommand = resolved.Command
+				return agentruntime.SaveStoredRuntimeConfig(runtimeCfg.StateDir, runtimeCfg.RuntimeType, runtimeCfg.RuntimeCommand)
+			}).
+			WithInitialModelInfo(runtimeState.initialModelInfo).
+			WithInitialEntries(runtimeState.initialTranscript)
 		program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
 		finalModel, runErr := program.Run()
 		cleanupErr := cleanupTUISession(a.cfg, created, client, resolveCleanupSessionName(finalModel, workspace.SessionName))
@@ -351,14 +414,73 @@ func providerLogAuthSource(profile provider.Profile) string {
 	return string(profile.AuthMethod)
 }
 
-func buildConfiguredRuntime(cfg config.Config, profile provider.Profile) agentruntime.Runtime {
+func buildConfiguredRuntime(cfg config.Config, profile provider.Profile) (agentruntime.Runtime, error) {
 	resolved := provider.ResolveRuntimeSelection(cfg.RuntimeType, cfg.RuntimeCommand)
+	if resolved.SelectedType == agentruntime.RuntimePi {
+		return nil, fmt.Errorf("runtime %q is not yet supported as an authoritative Shuttle runtime", resolved.SelectedType)
+	}
+	if err := provider.ValidateResolvedRuntime(resolved); err != nil {
+		return nil, err
+	}
 	return agentruntime.NewSelectedRuntime(agentruntime.RuntimeMetadata{
 		Type:           resolved.SelectedType,
 		Command:        resolved.Command,
 		ProviderPreset: string(profile.Preset),
 		Model:          strings.TrimSpace(profile.Model),
+		StateDir:       strings.TrimSpace(cfg.StateDir),
+	}), nil
+}
+
+func buildStartupRuntimeState(cfg config.Config, profile provider.Profile) (runtimeStartupState, error) {
+	resolved := provider.ResolveRuntimeSelection(cfg.RuntimeType, cfg.RuntimeCommand)
+	runtime, err := buildConfiguredRuntime(cfg, profile)
+	if err == nil {
+		return runtimeStartupState{
+			runtime:           runtime,
+			activeRuntimeType: resolved.RequestedType,
+			activeRuntimeCmd:  resolved.Command,
+		}, nil
+	}
+	if !cfg.TUI || !shouldFallbackRuntimeAtStartup(resolved) {
+		return runtimeStartupState{}, err
+	}
+
+	builtinRuntime := agentruntime.NewSelectedRuntime(agentruntime.RuntimeMetadata{
+		Type:           agentruntime.RuntimeBuiltin,
+		Command:        "",
+		ProviderPreset: string(profile.Preset),
+		Model:          strings.TrimSpace(profile.Model),
+		StateDir:       strings.TrimSpace(cfg.StateDir),
 	})
+
+	note := fmt.Sprintf("Configured runtime %s is unavailable for this launch, so Shuttle started with builtin instead: %v", resolved.RequestedType, err)
+	return runtimeStartupState{
+		runtime:           builtinRuntime,
+		activeRuntimeType: resolved.RequestedType,
+		activeRuntimeCmd:  resolved.Command,
+		initialModelInfo: &controller.AgentModelInfo{
+			ProviderPreset:       string(profile.Preset),
+			RequestedModel:       strings.TrimSpace(profile.Model),
+			SelectedRuntime:      resolved.RequestedType,
+			EffectiveRuntime:     agentruntime.RuntimeBuiltin,
+			RuntimeCommand:       resolved.Command,
+			RuntimeAuthority:     agentruntime.RuntimeAuthorityBuiltin,
+			RuntimeFailureReason: note,
+		},
+		initialTranscript: []tui.Entry{{
+			Title: "error",
+			Body:  note,
+		}},
+	}, nil
+}
+
+func shouldFallbackRuntimeAtStartup(resolved provider.ResolvedRuntime) bool {
+	switch strings.TrimSpace(resolved.SelectedType) {
+	case agentruntime.RuntimeCodexSDK, agentruntime.RuntimeCodexAppServer:
+		return true
+	default:
+		return false
+	}
 }
 
 func initialPromptContext(ctx context.Context, observer *shell.Observer, paneID string, startDir string) shell.PromptContext {

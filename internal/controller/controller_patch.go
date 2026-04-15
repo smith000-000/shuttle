@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"aiterm/internal/agentruntime"
 	"aiterm/internal/logging"
 	"aiterm/internal/patchapply"
 )
@@ -31,7 +32,7 @@ func (c *LocalController) ContinueAfterPatchApply(ctx context.Context) ([]Transc
 	c.mu.Unlock()
 
 	logging.Trace("controller.continue_after_patch_apply")
-	return c.submitAgentTurn(ctx, "", prompt, nil, false)
+	return c.submitAgentTurn(ctx, agentruntime.RequestContinueAfterPatch, "", prompt, nil, nil, false)
 }
 
 func (c *LocalController) applyPatch(ctx context.Context, patch string, target PatchTarget) ([]TranscriptEvent, error) {

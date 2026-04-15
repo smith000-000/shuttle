@@ -230,7 +230,8 @@ func (c *Client) capturePane(ctx context.Context, target string, startLine int, 
 		return "", fmt.Errorf("invalid pane target %q", target)
 	}
 
-	args := []string{"capture-pane", "-p", "-t", target, "-S", strconv.Itoa(startLine)}
+	// Join soft-wrapped pane lines so prompt reflow does not look like new output.
+	args := []string{"capture-pane", "-p", "-J", "-t", target, "-S", strconv.Itoa(startLine)}
 	if escaped {
 		args = append(args, "-e")
 	}

@@ -8,9 +8,12 @@ Current implementation note:
 - Shuttle still owns execution, approvals, patch application, transcript mutation, and all session/task state changes
 - the built-in runtime currently handles request-kind orchestration, inspect-context recursion, patch-payload normalization, invalid-patch repair retry, and structured-edit synthesis through a controller-owned host
 - the controller no longer stores a direct provider/model agent dependency; provider-backed response generation now sits behind the runtime host adapter
-- Shuttle now resolves `builtin`, `auto`, `pi`, and `codex_sdk` selections consistently
-- current `pi` and `codex_sdk` selections are metadata-bearing runtime adapters around the same host contract, not alternate state authorities or alternate execution controllers
+- Shuttle now resolves `builtin`, `auto`, `pi`, `codex_sdk`, and `codex_app_server` selections consistently, and the active runtime can be changed from the TUI settings flow and persisted across launches
+- runtime selection is now session-authoritative for agent reasoning: the controller still constructs every turn, but it sends each agent decision turn back to the selected runtime
+- `codex_sdk` is the first non-builtin authoritative runtime path; the current phase uses the local `codex` CLI executable plus a codex-specific turn handler to validate Shuttle turn semantics and operator UX while still reusing Shuttle-owned orchestration helpers and host callbacks
+- `pi` remains detectable but is rejected for authoritative selection until it reaches full parity across the required request kinds
 - interchangeable fully delegated external runtimes remain follow-on work after this seam stabilizes
+- explicit dual-runtime delegation or builtin-driven escalation is not part of the current seam and is now tracked separately in [P5](P5.md)
 
 This document is the implementation-facing design note for Milestone 4 and Milestone 5:
 - Milestone 4: mock provider and controller-driven approval flow
@@ -72,22 +75,21 @@ This keeps the product boundary clean:
 
 Current shipped behavior:
 - `builtin` uses the built-in runtime directly
-- `auto` picks the first installed supported runtime in the current priority order, then falls back to `builtin` when none are available
-- explicit `pi` and `codex_sdk` selections carry runtime metadata and command selection through the runtime seam
-- controller ownership does not change when an external runtime is selected today; Shuttle still owns execution, approvals, patch validation/application, transcript updates, and session/task state
+- `F10 -> Runtime` now acts as the user-facing runtime selector and persists the selected runtime type plus current command path unless startup flags explicitly overrode them; the settings view also previews selected versus effective runtime resolution and current runtime-command health before applying the change
+- `auto` prefers the installed runtime with the best declared authoritative parity, then falls back to `builtin` when none are available
+- explicit `codex_sdk` selection enables the first authoritative secondary runtime path
+- explicit `codex_app_server` selection now uses a native Codex App Server client over stdio JSON-RPC. Shuttle keeps a long-lived app-server process alive for the runtime session, reuses in-memory native thread bindings per task across continuation turns, and routes compaction through the same native thread
+- explicit `pi` selection is rejected until `pi` can own the full required request-kind set
+- controller ownership does not change when an external runtime is selected; Shuttle still owns execution, approvals, patch validation/application, transcript updates, and session/task state
 
-This means the selection seam is live, but full external runtime delegation is still follow-on work.
+This means the selection seam is live and authoritative, but product ownership still stays inside Shuttle. The current `codex_sdk` implementation remains the primary CLI-backed bridge. `codex_app_server` now exists as a separate runtime that uses the real app-server transport for turn handling while Shuttle still owns state, approvals, shell execution, transcript mutation, patch validation, and patch apply. The next step is hardening stale-thread/process recovery and reconnect behavior around that long-lived app-server session. Hybrid builtin-to-secondary delegation is intentionally out of scope for this model and is tracked in [P5](P5.md).
 
 ## 2.1.2 Shipped Runtime Workflow
 
-Today the runtime seam is best understood as a strict workflow boundary, not a transfer of product ownership:
+Today the runtime seam is best understood as a strict workflow boundary with session-authoritative runtime selection, not a transfer of product ownership:
 
 1. The controller builds a product-owned `agentruntime.Request`.
-2. The selected runtime decides how to handle that request kind:
-   - one-shot response
-   - inspect-context loop
-   - patch-repair retry
-   - structured-edit synthesis
+2. The selected runtime remains the reasoning owner for every agent turn in that session/task.
 3. The runtime calls back into a controller-owned `agentruntime.Host` for every privileged action.
 4. The host is the only layer allowed to:
    - refresh tracked shell and local host context
@@ -98,7 +100,7 @@ Today the runtime seam is best understood as a strict workflow boundary, not a t
 5. The runtime returns a normalized `agentruntime.Outcome`.
 6. The controller translates that outcome into transcript events, approval state, auto-run/auto-apply behavior, and any subsequent shell or patch action.
 
-That means current external runtime selection changes turn policy and metadata, not product authority. Shuttle remains the sole owner of shell reality, approvals, execution, and persistence.
+Host callbacks are not fallback. A real runtime fallback would mean the selected runtime can no longer remain the reasoning owner at all. Shuttle does not silently hand ordinary continuation turns to builtin in that case; it stops and requires an explicit retry or runtime switch. Shuttle remains the sole owner of shell reality, approvals, execution, and persistence.
 
 ## 2.2 Design Rule
 

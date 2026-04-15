@@ -297,6 +297,72 @@ func TestRunTrackedCommandUsesLocalManagedTransport(t *testing.T) {
 	}
 }
 
+func TestRunTrackedCommandPreservesCaptureAfterDirectoryChange(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	socketName := fmt.Sprintf("shuttle-track-cd-%d", time.Now().UnixNano())
+	sessionName := fmt.Sprintf("shuttle-track-cd-%d", time.Now().UnixNano())
+
+	client, err := tmux.NewClient(socketName)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	t.Cleanup(func() {
+		_ = client.KillSession(context.Background(), sessionName)
+	})
+
+	repoRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatalf("filepath.Abs(..) error = %v", err)
+	}
+
+	workspace, _, err := tmux.BootstrapWorkspace(ctx, client, tmux.BootstrapOptions{
+		SessionName:       sessionName,
+		StartDir:          repoRoot,
+		BottomPanePercent: 30,
+		HistoryFile:       filepath.Join(t.TempDir(), "shell_history"),
+	})
+	if err != nil {
+		t.Fatalf("BootstrapWorkspace() error = %v", err)
+	}
+
+	stateDir := t.TempDir()
+	observer := shell.NewObserver(client).WithStateDir(stateDir).WithPromptHint(shell.GuessLocalContext(repoRoot))
+	waitForObservedPrompt(t, ctx, observer, workspace.TopPane.ID)
+
+	result, err := observer.RunTrackedCommand(ctx, workspace.TopPane.ID, "cd completed", 2*time.Second)
+	if err != nil {
+		t.Fatalf("RunTrackedCommand(cd completed) error = %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("expected cd completed exit code 0, got %d with capture %q", result.ExitCode, result.Captured)
+	}
+
+	result, err = observer.RunTrackedCommand(ctx, workspace.TopPane.ID, "pwd", 2*time.Second)
+	if err != nil {
+		t.Fatalf("RunTrackedCommand(pwd) error = %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("expected pwd exit code 0, got %d with capture %q", result.ExitCode, result.Captured)
+	}
+
+	want := filepath.Join(repoRoot, "completed")
+	if result.Captured != want {
+		t.Fatalf("expected pwd capture %q after cd, got %q", want, result.Captured)
+	}
+	for _, fragment := range []string{"status\"", "__SHUTTLE_", ". '/", " %"} {
+		if strings.Contains(result.Captured, fragment) {
+			t.Fatalf("expected pwd capture to exclude shuttle/prompt fragments %q, got %q", fragment, result.Captured)
+		}
+	}
+}
+
 func TestRunTrackedCommandHandlesFastHighVolumeOutput(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")

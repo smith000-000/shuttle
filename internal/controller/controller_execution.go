@@ -14,29 +14,52 @@ import (
 )
 
 func finalExecutionSummaryOutput(result shell.TrackedExecution, current *CommandExecution) string {
+	promptContext := finalExecutionPromptContext(result, current)
 	if strings.TrimSpace(result.Captured) != "" {
-		return result.Captured
+		return trimFinalExecutionOutput(result.Captured, promptContext)
 	}
 	if current != nil && strings.TrimSpace(current.LatestOutputTail) != "" {
-		return current.LatestOutputTail
+		return trimFinalExecutionOutput(current.LatestOutputTail, promptContext)
 	}
-	return result.Captured
+	return trimFinalExecutionOutput(result.Captured, promptContext)
 }
 
 func finalExecutionDisplayOutput(result shell.TrackedExecution, current *CommandExecution) string {
+	promptContext := finalExecutionPromptContext(result, current)
 	if strings.TrimSpace(result.DisplayCaptured) != "" {
-		return result.DisplayCaptured
+		return trimFinalExecutionOutput(result.DisplayCaptured, promptContext)
 	}
 	if current != nil && strings.TrimSpace(current.LatestDisplayTail) != "" {
-		return current.LatestDisplayTail
+		return trimFinalExecutionOutput(current.LatestDisplayTail, promptContext)
 	}
 	if current != nil && strings.TrimSpace(current.LatestOutputTail) != "" {
-		return current.LatestOutputTail
+		return trimFinalExecutionOutput(current.LatestOutputTail, promptContext)
 	}
 	if strings.TrimSpace(result.Captured) != "" {
-		return result.Captured
+		return trimFinalExecutionOutput(result.Captured, promptContext)
 	}
-	return result.DisplayCaptured
+	return trimFinalExecutionOutput(result.DisplayCaptured, promptContext)
+}
+
+func finalExecutionPromptContext(result shell.TrackedExecution, current *CommandExecution) shell.PromptContext {
+	if result.ShellContext.PromptLine() != "" {
+		return result.ShellContext
+	}
+	if current != nil && current.ShellContextAfter != nil && current.ShellContextAfter.PromptLine() != "" {
+		return *current.ShellContextAfter
+	}
+	return shell.PromptContext{}
+}
+
+func trimFinalExecutionOutput(body string, promptContext shell.PromptContext) string {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return ""
+	}
+	if promptContext.PromptLine() != "" {
+		body = shell.TrimTrailingPromptLine(body, promptContext)
+	}
+	return strings.TrimSpace(body)
 }
 
 func (c *LocalController) SubmitProposedShellCommand(ctx context.Context, command string) ([]TranscriptEvent, error) {
@@ -72,7 +95,7 @@ func (c *LocalController) handleInternalTmuxPaneProposal(ctx context.Context, co
 
 	logging.Trace("controller.internal_tmux_guard.blocked", "command", command, "pane_ids", strings.Join(paneIDs, ","))
 	if agentAvailable {
-		events, err := c.submitAgentTurn(ctx, "", buildInternalTmuxRepairPrompt(command), nil, false)
+		events, err := c.submitAgentTurn(ctx, agentruntime.RequestUserTurn, "", buildInternalTmuxRepairPrompt(command), nil, nil, false)
 		if err != nil {
 			return true, events, err
 		}
@@ -110,7 +133,7 @@ func (c *LocalController) handleRemotePatchableProposal(ctx context.Context, com
 
 	logging.Trace("controller.remote_edit_guard.blocked", "command", command, "prompt", currentShell.PromptLine())
 	if agentAvailable {
-		events, err := c.submitAgentTurn(ctx, "", buildRemotePatchRepairPrompt(command, currentShell), nil, false)
+		events, err := c.submitAgentTurn(ctx, agentruntime.RequestUserTurn, "", buildRemotePatchRepairPrompt(command, currentShell), nil, nil, false)
 		if err != nil {
 			return true, events, err
 		}
@@ -154,7 +177,7 @@ func (c *LocalController) handleRemoteLocalPathProposal(ctx context.Context, com
 
 	logging.Trace("controller.remote_local_path_guard.blocked", "command", command, "prompt", currentShell.PromptLine(), "local_paths", strings.Join(localPaths, ","))
 	if agentAvailable {
-		events, err := c.submitAgentTurn(ctx, "", buildRemoteCommandPathRepairPrompt(command, currentShell, localPaths), nil, false)
+		events, err := c.submitAgentTurn(ctx, agentruntime.RequestUserTurn, "", buildRemoteCommandPathRepairPrompt(command, currentShell, localPaths), nil, nil, false)
 		if err != nil {
 			return true, events, err
 		}

@@ -3,7 +3,6 @@ package tui
 import (
 	"strings"
 
-
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -27,6 +26,11 @@ func (m Model) handleSettingsMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	case settingsStepSession:
 		if index, ok := m.settingsApprovalIndexAtMouse(msg.Y); ok {
 			m.settingsApprovalIdx = index
+			return m.applySettingsSelection()
+		}
+	case settingsStepRuntime:
+		if index, ok := m.settingsRuntimeIndexAtMouse(msg.Y); ok {
+			m.settingsRuntimeIdx = index
 			return m.applySettingsSelection()
 		}
 	case settingsStepProviders:
@@ -83,6 +87,26 @@ func (m Model) settingsApprovalIndexAtMouse(y int) (int, bool) {
 	for index := range settingsApprovalEntries() {
 		start := line
 		line += 2
+		if y >= start && y < line {
+			return index, true
+		}
+	}
+	return 0, false
+}
+
+func (m Model) settingsRuntimeIndexAtMouse(y int) (int, bool) {
+	width := m.width
+	if width <= 0 {
+		width = 100
+	}
+	contentWidth := m.contentWidthFor(width, m.styles.detail)
+	line := m.settingsHeaderLineCount() + 2
+	for index, entry := range m.settingsRuntimes {
+		start := line
+		line++
+		if entry.detail != "" {
+			line += len(wrapParagraphs(entry.detail, max(10, contentWidth-2)))
+		}
 		if y >= start && y < line {
 			return index, true
 		}

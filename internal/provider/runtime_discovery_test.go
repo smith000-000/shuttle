@@ -6,7 +6,8 @@ import (
 )
 
 func TestDetectRuntimeInstallCandidates(t *testing.T) {
-	previous := runtimeLookPath
+	previousLookPath := runtimeLookPath
+	previousProbe := codexRuntimeVersionProbe
 	runtimeLookPath = func(file string) (string, error) {
 		switch file {
 		case defaultPiCommand, defaultCodexCLICommand:
@@ -15,45 +16,53 @@ func TestDetectRuntimeInstallCandidates(t *testing.T) {
 			return "", errors.New("missing")
 		}
 	}
+	codexRuntimeVersionProbe = func(string) (string, error) { return minimumCodexRuntimeVersion, nil }
 	t.Cleanup(func() {
-		runtimeLookPath = previous
+		runtimeLookPath = previousLookPath
+		codexRuntimeVersionProbe = previousProbe
 	})
 
 	candidates := DetectRuntimeInstallCandidates()
-	if len(candidates) != 4 {
-		t.Fatalf("expected 4 runtime candidates, got %d", len(candidates))
+	if len(candidates) != 5 {
+		t.Fatalf("expected 5 runtime candidates, got %d", len(candidates))
 	}
-	if !candidates[0].Installed || candidates[0].Runtime != RuntimePi {
-		t.Fatalf("expected pi installed candidate, got %#v", candidates[0])
+	if !candidates[0].Installed || candidates[0].Runtime != RuntimeCodexSDK || !candidates[0].Supported {
+		t.Fatalf("expected codex sdk installed authoritative candidate, got %#v", candidates[0])
 	}
-	if !candidates[1].Installed || candidates[1].Runtime != RuntimeCodexSDK {
-		t.Fatalf("expected codex sdk installed candidate, got %#v", candidates[1])
+	if !candidates[1].Installed || candidates[1].Runtime != RuntimeCodexAppServer || !candidates[1].Supported {
+		t.Fatalf("expected codex app server installed authoritative candidate, got %#v", candidates[1])
 	}
-	if candidates[2].Supported || candidates[3].Supported {
+	if !candidates[2].Installed || candidates[2].Runtime != RuntimePi || candidates[2].Supported {
+		t.Fatalf("expected pi installed but non-authoritative candidate, got %#v", candidates[2])
+	}
+	if candidates[3].Supported || candidates[4].Supported {
 		t.Fatalf("expected claude/opencode to be scaffolding-only for now")
 	}
 }
 
 func TestResolveRuntimeSelectionAutoPrefersInstalledSupportedRuntime(t *testing.T) {
-	previous := runtimeLookPath
+	previousLookPath := runtimeLookPath
+	previousProbe := codexRuntimeVersionProbe
 	runtimeLookPath = func(file string) (string, error) {
 		switch file {
-		case defaultPiCommand:
-			return "/usr/bin/pi", nil
+		case defaultPiCommand, defaultCodexCLICommand:
+			return "/usr/bin/" + file, nil
 		default:
 			return "", errors.New("missing")
 		}
 	}
+	codexRuntimeVersionProbe = func(string) (string, error) { return minimumCodexRuntimeVersion, nil }
 	t.Cleanup(func() {
-		runtimeLookPath = previous
+		runtimeLookPath = previousLookPath
+		codexRuntimeVersionProbe = previousProbe
 	})
 
 	resolved := ResolveRuntimeSelection(RuntimeAuto, "")
-	if resolved.SelectedType != RuntimePi {
-		t.Fatalf("expected auto runtime to choose pi, got %#v", resolved)
+	if resolved.SelectedType != RuntimeCodexSDK {
+		t.Fatalf("expected auto runtime to choose codex sdk, got %#v", resolved)
 	}
-	if resolved.Command != defaultPiCommand {
-		t.Fatalf("expected pi command %q, got %#v", defaultPiCommand, resolved)
+	if resolved.Command != defaultCodexCLICommand {
+		t.Fatalf("expected codex command %q, got %#v", defaultCodexCLICommand, resolved)
 	}
 	if !resolved.AutoSelected {
 		t.Fatalf("expected auto-selected runtime, got %#v", resolved)
@@ -61,12 +70,13 @@ func TestResolveRuntimeSelectionAutoPrefersInstalledSupportedRuntime(t *testing.
 }
 
 func TestResolveRuntimeSelectionAutoFallsBackToBuiltin(t *testing.T) {
-	previous := runtimeLookPath
-	runtimeLookPath = func(string) (string, error) {
-		return "", errors.New("missing")
-	}
+	previousLookPath := runtimeLookPath
+	previousProbe := codexRuntimeVersionProbe
+	runtimeLookPath = func(string) (string, error) { return "", errors.New("missing") }
+	codexRuntimeVersionProbe = func(string) (string, error) { return minimumCodexRuntimeVersion, nil }
 	t.Cleanup(func() {
-		runtimeLookPath = previous
+		runtimeLookPath = previousLookPath
+		codexRuntimeVersionProbe = previousProbe
 	})
 
 	resolved := ResolveRuntimeSelection(RuntimeAuto, "")
@@ -75,18 +85,52 @@ func TestResolveRuntimeSelectionAutoFallsBackToBuiltin(t *testing.T) {
 	}
 }
 
-func TestResolveRuntimeSelectionFillsDefaultCommandForExplicitRuntime(t *testing.T) {
-	previous := runtimeLookPath
-	runtimeLookPath = func(string) (string, error) {
-		return "", errors.New("missing")
+func TestResolveRuntimeSelectionAutoSkipsIncompatibleCodex(t *testing.T) {
+	previousLookPath := runtimeLookPath
+	previousProbe := codexRuntimeVersionProbe
+	runtimeLookPath = func(file string) (string, error) {
+		switch file {
+		case defaultPiCommand, defaultCodexCLICommand:
+			return "/usr/bin/" + file, nil
+		default:
+			return "", errors.New("missing")
+		}
 	}
+	codexRuntimeVersionProbe = func(string) (string, error) { return "0.117.0", nil }
 	t.Cleanup(func() {
-		runtimeLookPath = previous
+		runtimeLookPath = previousLookPath
+		codexRuntimeVersionProbe = previousProbe
+	})
+
+	resolved := ResolveRuntimeSelection(RuntimeAuto, "")
+	if resolved.SelectedType != RuntimeBuiltin || resolved.Command != "" {
+		t.Fatalf("expected builtin fallback when codex is incompatible, got %#v", resolved)
+	}
+}
+
+func TestResolveRuntimeSelectionFillsDefaultCommandForExplicitRuntime(t *testing.T) {
+	previousLookPath := runtimeLookPath
+	previousProbe := codexRuntimeVersionProbe
+	runtimeLookPath = func(string) (string, error) { return "", errors.New("missing") }
+	codexRuntimeVersionProbe = func(string) (string, error) { return minimumCodexRuntimeVersion, nil }
+	t.Cleanup(func() {
+		runtimeLookPath = previousLookPath
+		codexRuntimeVersionProbe = previousProbe
 	})
 
 	resolved := ResolveRuntimeSelection("codex-sdk", "")
 	if resolved.SelectedType != RuntimeCodexSDK {
 		t.Fatalf("expected normalized codex runtime, got %#v", resolved)
+	}
+	if resolved.Command != defaultCodexCLICommand {
+		t.Fatalf("expected default codex command %q, got %#v", defaultCodexCLICommand, resolved)
+	}
+}
+
+func TestResolveRuntimeSelectionNormalizesCodexAppServer(t *testing.T) {
+	resolved := ResolveRuntimeSelection("codex-app-server", "")
+	if resolved.SelectedType != RuntimeCodexAppServer {
+		t.Fatalf("expected normalized codex app server runtime, got %#v", resolved)
 	}
 	if resolved.Command != defaultCodexCLICommand {
 		t.Fatalf("expected default codex command %q, got %#v", defaultCodexCLICommand, resolved)

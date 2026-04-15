@@ -5,15 +5,23 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"aiterm/internal/agentruntime"
 )
 
 func TestLocalControllerStartNewTaskResetsTaskStateButPreservesSession(t *testing.T) {
+	stateDir := t.TempDir()
 	controller := New(nil, nil, nil, SessionContext{
 		SessionName:      "shuttle-test",
 		TrackedShell:     TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
 		WorkingDirectory: "/workspace",
 		ApprovalMode:     ApprovalModeAuto,
+		StateDir:         stateDir,
 	})
+	oldTaskID := controller.task.TaskID
+	if err := agentruntime.SaveStoredCodexAppServerThreadBinding(stateDir, "shuttle-test", oldTaskID, "thread-old"); err != nil {
+		t.Fatalf("SaveStoredCodexAppServerThreadBinding() error = %v", err)
+	}
 	controller.task.CompactedSummary = "old summary"
 	controller.task.PriorTranscript = []TranscriptEvent{{Kind: EventUserMessage, Payload: TextPayload{Text: "old task"}}}
 	controller.task.LastCommandResult = &CommandResultSummary{Command: "ls -lah"}
@@ -43,6 +51,13 @@ func TestLocalControllerStartNewTaskResetsTaskStateButPreservesSession(t *testin
 	}
 	if controller.session.LocalWorkingDirectory == "" {
 		t.Fatalf("expected local working directory probe to be populated, got %#v", controller.session)
+	}
+	threadID, ok, err := agentruntime.LoadStoredCodexAppServerThreadBinding(stateDir, "shuttle-test", oldTaskID)
+	if err != nil {
+		t.Fatalf("LoadStoredCodexAppServerThreadBinding() error = %v", err)
+	}
+	if ok || threadID != "" {
+		t.Fatalf("expected previous task binding to be cleared, got ok=%v thread=%q", ok, threadID)
 	}
 }
 

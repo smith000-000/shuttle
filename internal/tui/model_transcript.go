@@ -1618,6 +1618,22 @@ func formatModelInfoDetail(payload controller.AgentModelInfo) string {
 	if providerLabel := strings.TrimSpace(payload.ProviderPreset); providerLabel != "" {
 		lines = append(lines, "provider:", settingsProviderLabel(provider.ProviderPreset(providerLabel)), "")
 	}
+	if selectedRuntime := strings.TrimSpace(payload.SelectedRuntime); selectedRuntime != "" {
+		lines = append(lines, "selected runtime:", selectedRuntime)
+		if effectiveRuntime := strings.TrimSpace(payload.EffectiveRuntime); effectiveRuntime != "" && effectiveRuntime != selectedRuntime {
+			lines = append(lines, "", "effective runtime:", effectiveRuntime)
+		}
+		if authority := strings.TrimSpace(payload.RuntimeAuthority); authority != "" {
+			lines = append(lines, "", "runtime authority:", authority)
+		}
+		if command := strings.TrimSpace(payload.RuntimeCommand); command != "" {
+			lines = append(lines, "", "runtime command:", command)
+		}
+		if reason := strings.TrimSpace(payload.RuntimeFailureReason); reason != "" {
+			lines = append(lines, "", "runtime note:", reason)
+		}
+		lines = append(lines, "")
+	}
 
 	responseModel := strings.TrimSpace(payload.ResponseModel)
 	requestedModel := strings.TrimSpace(payload.RequestedModel)

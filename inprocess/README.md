@@ -32,6 +32,7 @@ What is working now:
 - inspect-context and provider turn context now include cwd source/confidence metadata so prompt-derived remote directories like `~` are treated as approximate while probe-confirmed directories are treated as authoritative
 - ordinary agent turns refresh tracked-shell identity and manual shell history without blindly reusing whatever old scrollback is still visible in the top pane as fresh command output
 - Shuttle now preserves ANSI-colored command output for display while still using sanitized plain-text captures for controller logic and prompt reconciliation
+- tracked command capture now keeps cwd/prompt reconciliation stable across directory changes by joining wrapped pane lines, bounding result extraction to Shuttle markers when available, and stripping leaked Shuttle shell-plumbing fragments from transcript output
 - native unified-diff patch proposals with explicit apply/reject/ask-agent flow
 - controller-synthesized patch proposals for common single-file text edits, so the model can express insert/replace intent without hand-authoring unified hunks
 - target-aware patch application for both the local workspace and the active tracked remote shell
@@ -39,9 +40,11 @@ What is working now:
 - remote tracked-shell file edits through the same patch UX, preferring native remote patches over ad hoc shell rewrites and using staged remote payloads with transport selection `git`, then `python3`, then verified shell fallback
 - foreground attach and handoff reconciliation for manually started shell commands
 - tracked `ssh` and similar transport transitions now surface password/confirmation waits as `awaiting_input`, distinguish the outer transport from the inner remote command, and reconcile `F2` return from observed shell state even when prompt text is incomplete
+- `KEYS>` mode now exits automatically when the active fullscreen or awaiting-input execution settles, so the composer returns to the underlying `AGENT` or `SHELL` mode instead of staying in raw-key input mode
 - real OpenAI Responses API path with API-key auth
 - provider onboarding and settings UI with:
-  - one shared provider settings flow behind `F10`, `/onboard`, `/provider`, and `/model`
+  - one shared settings flow behind `F10`, `/onboard`, `/provider`, and `/model`
+  - `F10` runtime selection with persisted `builtin`, `auto`, `codex_sdk`, and `codex_app_server` choices, inline command-path editing, and runtime health/resolution preview
   - `/onboard` and `/provider` jumping straight to `Configure Providers`
   - `/model` jumping to the current provider detail with the model field focused
   - provider detail editing with the discovered model list on the same screen
@@ -166,7 +169,7 @@ Important variables:
 - `SHUTTLE_ALLOW_PLAINTEXT_PROVIDER_SECRETS`: allow an explicit less-secure local file fallback if OS keyring storage is unavailable
 - `SHUTTLE_TRACE`: `off`, `safe`, or `sensitive`
 - `SHUTTLE_TRACE_CONSENT`: must be true or passed as `--trace-consent` when using sensitive trace; Shuttle rejects sensitive trace at config-parse time until consent is explicit
-- `SHUTTLE_RUNTIME`: coding runtime selection: `builtin`, `auto`, `pi`, or `codex_sdk`
+- `SHUTTLE_RUNTIME`: coding runtime selection: `builtin`, `auto`, `pi`, `codex_sdk`, or `codex_app_server`
 - `SHUTTLE_RUNTIME_COMMAND`: optional explicit runtime command path override
 
 `launch.sh` loads `./env.sh` if present, otherwise it falls back to `./env.sh.sample`.
@@ -253,18 +256,32 @@ go run ./cmd/shuttle \
 
 ## Runtime Selection
 
-Runtime selection controls how Shuttle labels and routes the coding runtime layer behind `internal/agentruntime`. Current choices:
+Runtime selection controls how Shuttle labels and routes the coding runtime layer behind `internal/agentruntime`. You can pick the runtime at startup with `--runtime` / `SHUTTLE_RUNTIME`, or change and persist it from `F10 -> Runtime`. Current choices:
 - `builtin`: use Shuttle's built-in runtime behavior
-- `auto`: prefer the first supported installed external runtime in the current priority order, then fall back to `builtin`
-- `pi`: select the `pi` runtime path explicitly
-- `codex_sdk`: select the `codex_sdk` runtime path explicitly
+- `auto`: prefer the installed authoritative runtime with the best declared parity, then fall back to `builtin`
+- `pi`: currently rejected for authoritative use until it supports the full required request-kind set
+- `codex_sdk`: select the CLI-backed authoritative Codex bridge explicitly
+- `codex_app_server`: native Codex App Server bridge over stdio JSON-RPC with a long-lived app-server process per Shuttle runtime session and in-memory per-task native thread reuse across turns
 
 Current implementation boundary:
 - runtime selection is real and deterministic, including default command filling for explicit external runtime selections
+- runtime selection is session-authoritative for agent reasoning; Shuttle still constructs every turn, but it sends each agent decision turn for that task/session back to the selected runtime
 - Shuttle still owns execution panes, approvals, patch validation/application, transcript mutation, and task/session state
-- today the non-builtin runtime selections are metadata-carrying adapters around the built-in controller-owned runtime path, not fully delegated external execution stacks yet
+- `codex_sdk` currently uses a codex-specific turn handler over the shared Shuttle orchestration helpers and a local `codex` CLI compatibility check rather than a fully independent external execution stack
+- Shuttle does not silently fall back to builtin for ordinary continuation turns once an authoritative external runtime is selected; if the runtime cannot continue, Shuttle stops and requires an explicit retry or runtime switch
 
-Use `SHUTTLE_RUNTIME_COMMAND` to override the executable path for an explicit runtime selection.
+Use `SHUTTLE_RUNTIME_COMMAND` to override the executable path for an explicit runtime selection. When you switch runtimes from `F10`, Shuttle persists both the selected runtime type and the current runtime command path, unless `--runtime` or `--runtime-command` was explicitly provided on startup. For `codex_sdk` and `codex_app_server`, the command must be installed and report a compatible Codex version (`0.118.0` or newer). `codex_sdk` remains the primary CLI-backed UX-validation bridge. `codex_app_server` now keeps one app-server process alive for the Shuttle runtime session and reuses in-memory native thread state for the active Shuttle task across ordinary continuation turns, including compaction. It still needs stronger restart/reconnect policy before `auto` should prefer it.
+
+Current confidence level:
+- cursory manual smoke testing now shows both `codex_sdk` and `codex_app_server` can at least accept ordinary prompts and return agent responses in the TUI
+- the deeper runtime acceptance pass in [runtime-manual-test.md](runtime-manual-test.md) is still required before promoting `codex_app_server` further
+
+Startup behavior note:
+- interactive TUI launch no longer hard-fails if the persisted explicit `codex_sdk` or `codex_app_server` command is missing from `PATH` or otherwise invalid
+- in that case Shuttle opens with an explicit startup error entry, keeps the selected runtime visible in runtime detail, and falls back to builtin for that launch only
+- noninteractive startup paths such as one-shot `--agent` execution still fail fast on invalid explicit runtime configuration
+
+Manual runtime validation steps live in [runtime-manual-test.md](runtime-manual-test.md).
 
 ## Trace Logging
 
@@ -327,6 +344,7 @@ Core controls:
 - in `KEYS>` mode, `Shift-Tab` dismisses `KEYS>` and suppresses auto-reopen for the current waiting prompt until Shuttle observes a material prompt-state change
 - `KEYS>` also accepts explicit tmux control-key tokens such as `<Ctrl+C>` or `<Esc>` for key events the TUI cannot capture directly
 - each `KEYS>` send requires a fresh observed read of the active terminal; after Shuttle sends keys it refreshes the active execution and shell tail before allowing another send, and it briefly suppresses `KEYS>` auto-reopen while the prompt state settles so successful auth/input transitions do not bounce the composer back into key-send mode
+- when the active interactive execution ends or becomes noninteractive again, Shuttle automatically exits `KEYS>` and restores the underlying composer mode
 - text selection while Bubble Tea mouse mode is active depends on the terminal emulator: iTerm2 uses `Option`-drag, while some other terminals use `Shift`-drag
 - `Ctrl+O`: inspect the selected transcript entry
 - while the `Ctrl+O` detail view is open, typing incrementally filters visible detail lines; `Backspace` edits the filter and `Esc` clears it before closing the view
@@ -346,7 +364,7 @@ Approval modes:
 - `/approvals` without an argument shows the current session mode; `/approvals confirm`, `/approvals auto`, and `/approvals dangerous` switch it
 
 Settings notes:
-- `F10` opens settings with `Session Settings` and `Configure Providers`; selecting a provider opens the shared provider detail screen that also contains model selection
+- `F10` opens settings with `Session Settings`, `Runtime`, and `Configure Providers`; the runtime screen switches the active runtime immediately, lets you edit the runtime command path, previews selected versus effective runtime resolution plus current health, and persists that selection for future launches, while selecting a provider opens the shared provider detail screen that also contains model selection
 - provider detail editing supports `F7` to test the provider config, automatic provider validation when loading that provider's model list, and `F8` to save and activate it immediately
 - supported providers expose a `Thinking` radio control; OpenAI and OpenRouter also expose `Reasoning Effort` when `Thinking` is on
 - the provider list and model list support direct mouse clicks; `Thinking` and `Reasoning Effort` stay keyboard toggles via `Space` or `Left`/`Right`

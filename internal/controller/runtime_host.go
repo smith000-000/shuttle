@@ -140,10 +140,15 @@ func runtimeOutcomeFromController(response AgentResponse) agentruntime.Outcome {
 	}
 	if response.ModelInfo != nil {
 		outcome.ModelInfo = &agentruntime.ModelInfo{
-			ProviderPreset:  response.ModelInfo.ProviderPreset,
-			RequestedModel:  response.ModelInfo.RequestedModel,
-			ResponseModel:   response.ModelInfo.ResponseModel,
-			ResponseBaseURL: response.ModelInfo.ResponseBaseURL,
+			ProviderPreset:       response.ModelInfo.ProviderPreset,
+			RequestedModel:       response.ModelInfo.RequestedModel,
+			ResponseModel:        response.ModelInfo.ResponseModel,
+			ResponseBaseURL:      response.ModelInfo.ResponseBaseURL,
+			SelectedRuntime:      response.ModelInfo.SelectedRuntime,
+			EffectiveRuntime:     response.ModelInfo.EffectiveRuntime,
+			RuntimeCommand:       response.ModelInfo.RuntimeCommand,
+			RuntimeAuthority:     response.ModelInfo.RuntimeAuthority,
+			RuntimeFailureReason: response.ModelInfo.RuntimeFailureReason,
 		}
 	}
 	return outcome
@@ -191,10 +196,15 @@ func controllerOutcomeToRuntimeInput(outcome agentruntime.Outcome) AgentResponse
 	}
 	if outcome.ModelInfo != nil {
 		response.ModelInfo = &AgentModelInfo{
-			ProviderPreset:  outcome.ModelInfo.ProviderPreset,
-			RequestedModel:  outcome.ModelInfo.RequestedModel,
-			ResponseModel:   outcome.ModelInfo.ResponseModel,
-			ResponseBaseURL: outcome.ModelInfo.ResponseBaseURL,
+			ProviderPreset:       outcome.ModelInfo.ProviderPreset,
+			RequestedModel:       outcome.ModelInfo.RequestedModel,
+			ResponseModel:        outcome.ModelInfo.ResponseModel,
+			ResponseBaseURL:      outcome.ModelInfo.ResponseBaseURL,
+			SelectedRuntime:      outcome.ModelInfo.SelectedRuntime,
+			EffectiveRuntime:     outcome.ModelInfo.EffectiveRuntime,
+			RuntimeCommand:       outcome.ModelInfo.RuntimeCommand,
+			RuntimeAuthority:     outcome.ModelInfo.RuntimeAuthority,
+			RuntimeFailureReason: outcome.ModelInfo.RuntimeFailureReason,
 		}
 	}
 	return response

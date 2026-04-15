@@ -309,6 +309,12 @@ func (c *LocalController) applyMonitorSnapshotLocked(executionID string, snapsho
 		return
 	}
 	syncIntoUserShell := shouldSyncExecutionIntoUserShellSession(execution, c.session)
+	recentOutput := strings.TrimSpace(snapshot.LatestOutputTail)
+	recentDisplayOutput := strings.TrimSpace(snapshot.LatestDisplayTail)
+	if snapshot.ShellContext.PromptLine() != "" {
+		recentOutput = shell.TrimTrailingPromptLine(recentOutput, snapshot.ShellContext)
+		recentDisplayOutput = shell.TrimTrailingPromptLine(recentDisplayOutput, snapshot.ShellContext)
+	}
 
 	switch snapshot.State {
 	case shell.MonitorStateQueued:
@@ -337,11 +343,11 @@ func (c *LocalController) applyMonitorSnapshotLocked(executionID string, snapsho
 		c.transitionExecutionStateLocked(execution, CommandExecutionCompleted, "monitor_snapshot")
 	}
 
-	if strings.TrimSpace(snapshot.LatestOutputTail) != "" {
-		execution.LatestOutputTail = snapshot.LatestOutputTail
+	if recentOutput != "" {
+		execution.LatestOutputTail = recentOutput
 	}
-	if strings.TrimSpace(snapshot.LatestDisplayTail) != "" {
-		execution.LatestDisplayTail = snapshot.LatestDisplayTail
+	if recentDisplayOutput != "" {
+		execution.LatestDisplayTail = recentDisplayOutput
 	}
 	if strings.TrimSpace(snapshot.ForegroundCommand) != "" {
 		execution.ForegroundCommand = snapshot.ForegroundCommand

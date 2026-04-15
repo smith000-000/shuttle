@@ -26,6 +26,8 @@ type Request struct {
 	Kind          RequestKind
 	Prompt        string
 	UserPrompt    string
+	SessionName   string
+	TaskID        string
 	InspectBudget int
 	Proposal      *Proposal
 	Approval      *ApprovalRequest
@@ -53,20 +55,34 @@ type Runtime interface {
 
 type BuiltinRuntime struct{}
 
+const (
+	RuntimeAuthorityAuthoritative = "authoritative"
+	RuntimeAuthorityBuiltin       = "builtin"
+)
+
 func NewBuiltin() Runtime {
 	return BuiltinRuntime{}
 }
 
 func (BuiltinRuntime) Handle(ctx context.Context, host Host, req Request) (Outcome, error) {
+	return handleRuntimeTurn(ctx, host, req, host.Respond)
+}
+
+type runtimeTurnResponder func(context.Context, Request) (Outcome, error)
+
+func handleRuntimeTurn(ctx context.Context, host Host, req Request, respond runtimeTurnResponder) (Outcome, error) {
 	if host == nil {
 		return Outcome{}, errors.New("runtime host is required")
+	}
+	if respond == nil {
+		return Outcome{}, errors.New("runtime responder is required")
 	}
 	if req.InspectBudget <= 0 {
 		req.InspectBudget = 2
 	}
 
 	for {
-		outcome, err := host.Respond(ctx, req)
+		outcome, err := respond(ctx, req)
 		if err != nil {
 			return Outcome{}, err
 		}
@@ -76,7 +92,7 @@ func (BuiltinRuntime) Handle(ctx context.Context, host Host, req Request) (Outco
 		if err != nil {
 			return Outcome{}, err
 		}
-		outcome, repaired, err := repairInvalidPatch(ctx, host, req, outcome)
+		outcome, repaired, err := repairInvalidPatch(ctx, host, req, outcome, respond)
 		if err != nil {
 			return Outcome{}, err
 		}
@@ -103,7 +119,7 @@ func (BuiltinRuntime) Handle(ctx context.Context, host Host, req Request) (Outco
 	}
 }
 
-func repairInvalidPatch(ctx context.Context, host Host, req Request, outcome Outcome) (Outcome, bool, error) {
+func repairInvalidPatch(ctx context.Context, host Host, req Request, outcome Outcome, respond runtimeTurnResponder) (Outcome, bool, error) {
 	kind, target, patch, err := invalidPatchInOutcome(ctx, host, outcome)
 	if err == nil {
 		return outcome, false, nil
@@ -111,7 +127,7 @@ func repairInvalidPatch(ctx context.Context, host Host, req Request, outcome Out
 
 	repairReq := req
 	repairReq.Prompt = buildInvalidPatchRepairPrompt(kind, target, patch, err)
-	repaired, repairErr := host.Respond(ctx, repairReq)
+	repaired, repairErr := respond(ctx, repairReq)
 	if repairErr != nil {
 		return Outcome{}, false, repairErr
 	}
@@ -332,19 +348,23 @@ type RuntimeMetadata struct {
 	Command        string
 	ProviderPreset string
 	Model          string
+	StateDir       string
 }
 
-type metadataRuntime struct {
-	delegate Runtime
-	meta     RuntimeMetadata
-}
-
-type piRuntime struct {
-	metadataRuntime
+type CodexSDKTurnHandler interface {
+	Respond(context.Context, Host, Request) (Outcome, error)
 }
 
 type codexSDKRuntime struct {
-	metadataRuntime
+	meta    RuntimeMetadata
+	handler CodexSDKTurnHandler
+}
+
+type hostBackedCodexSDKHandler struct{}
+
+type unsupportedRuntime struct {
+	meta   RuntimeMetadata
+	reason string
 }
 
 func NewSelectedRuntime(meta RuntimeMetadata) Runtime {
@@ -356,56 +376,222 @@ func NewSelectedRuntime(meta RuntimeMetadata) Runtime {
 	case RuntimeBuiltin:
 		return NewBuiltin()
 	case RuntimePi:
-		return piRuntime{metadataRuntime{delegate: NewBuiltin(), meta: meta}}
+		return unsupportedRuntime{
+			meta:   meta,
+			reason: "runtime \"pi\" is not yet supported as an authoritative Shuttle runtime",
+		}
+	case RuntimeCodexAppServer:
+		return NewCodexAppServerRuntime(meta, nil)
 	case RuntimeCodexSDK:
-		return codexSDKRuntime{metadataRuntime{delegate: NewBuiltin(), meta: meta}}
+		return NewCodexSDKRuntime(meta, nil)
 	default:
-		return metadataRuntime{delegate: NewBuiltin(), meta: meta}
+		return unsupportedRuntime{
+			meta:   meta,
+			reason: fmt.Sprintf("runtime %q is not supported", meta.Type),
+		}
 	}
 }
 
-func WrapRuntime(delegate Runtime, meta RuntimeMetadata) Runtime {
+func NewCodexSDKRuntime(meta RuntimeMetadata, handler CodexSDKTurnHandler) Runtime {
 	meta.Type = normalizeRuntimeSelection(meta.Type)
-	if meta.Type == "" || meta.Type == RuntimeBuiltin {
-		return delegate
+	if meta.Type == "" {
+		meta.Type = RuntimeCodexSDK
 	}
-	switch meta.Type {
-	case RuntimePi:
-		return piRuntime{metadataRuntime{delegate: delegate, meta: meta}}
-	case RuntimeCodexSDK:
-		return codexSDKRuntime{metadataRuntime{delegate: delegate, meta: meta}}
-	default:
-		return metadataRuntime{delegate: delegate, meta: meta}
-	}
+	return codexSDKRuntime{meta: meta, handler: handler}
 }
 
-func (m metadataRuntime) Handle(ctx context.Context, host Host, req Request) (Outcome, error) {
-	outcome, err := m.delegate.Handle(ctx, host, req)
+func (r codexSDKRuntime) Handle(ctx context.Context, host Host, req Request) (Outcome, error) {
+	handler := r.handler
+	if handler == nil {
+		handler = hostBackedCodexSDKHandler{}
+	}
+	outcome, err := handleRuntimeTurn(ctx, host, req, func(ctx context.Context, req Request) (Outcome, error) {
+		return handler.Respond(ctx, host, req)
+	})
 	if err != nil {
 		return Outcome{}, err
 	}
-	prefix := fmt.Sprintf("[runtime=%s", m.meta.Type)
-	if strings.TrimSpace(m.meta.Command) != "" {
-		prefix += fmt.Sprintf(" command=%q", m.meta.Command)
+	return annotateRuntimeMetadata(outcome, r.meta), nil
+}
+
+func (hostBackedCodexSDKHandler) Respond(ctx context.Context, host Host, req Request) (Outcome, error) {
+	if host == nil {
+		return Outcome{}, errors.New("runtime host is required")
 	}
-	if strings.TrimSpace(m.meta.ProviderPreset) != "" {
-		prefix += fmt.Sprintf(" provider=%s", m.meta.ProviderPreset)
+	req.Prompt = buildCodexSDKPrompt(req)
+	return host.Respond(ctx, req)
+}
+
+func buildCodexSDKPrompt(req Request) string {
+	sections := []string{
+		"Shuttle Codex runtime turn",
+		"Respond with the next Shuttle structured outcome for this turn only.",
+		"Do not describe runtime metadata or mention fallback behavior in the user-facing message.",
 	}
-	if strings.TrimSpace(m.meta.Model) != "" {
-		prefix += fmt.Sprintf(" model=%s", m.meta.Model)
+	if guidance := strings.TrimSpace(codexSDKKindGuidance(req.Kind)); guidance != "" {
+		sections = append(sections, "Turn guidance:\n"+guidance)
 	}
-	prefix += "] "
-	outcome.Message = strings.TrimSpace(prefix + outcome.Message)
+
+	contextLines := []string{"request_kind: " + string(normalizeCodexSDKRequestKind(req.Kind))}
+	if userPrompt := strings.TrimSpace(req.UserPrompt); userPrompt != "" {
+		contextLines = append(contextLines, "user_prompt: "+userPrompt)
+	}
+	if req.Proposal != nil {
+		contextLines = append(contextLines, formatCodexSDKProposalContext(*req.Proposal)...)
+	}
+	if req.Approval != nil {
+		contextLines = append(contextLines, formatCodexSDKApprovalContext(*req.Approval)...)
+	}
+	sections = append(sections, "Turn context:\n"+strings.Join(contextLines, "\n"))
+
+	if prompt := strings.TrimSpace(req.Prompt); prompt != "" {
+		sections = append(sections, "Controller instructions:\n"+prompt)
+	}
+	return strings.TrimSpace(strings.Join(sections, "\n\n"))
+}
+
+func normalizeCodexSDKRequestKind(kind RequestKind) RequestKind {
+	if strings.TrimSpace(string(kind)) == "" {
+		return RequestUserTurn
+	}
+	return kind
+}
+
+func codexSDKKindGuidance(kind RequestKind) string {
+	switch normalizeCodexSDKRequestKind(kind) {
+	case RequestUserTurn:
+		return "Handle the user turn directly. Use plans only when they materially help, and otherwise respond or propose the next action."
+	case RequestApprovalRefinement:
+		return "Revise the pending approval in light of the user note. Keep the same underlying intent unless the note explicitly changes it."
+	case RequestProposalRefinement:
+		return "Refine the pending proposal using the proposal context and user note. Preserve the original task unless the note clearly redirects it."
+	case RequestContinuePlan:
+		return "Continue the active plan from its current state. Prefer updating plan step statuses and the next concrete action over restating the whole plan."
+	case RequestContinueAfterCommand:
+		return "Interpret the latest command result and decide the next agent action. Avoid rerunning commands unless the result or context justifies it."
+	case RequestContinueAfterPatch:
+		return "Interpret the patch application result and continue the task from the updated workspace state."
+	case RequestCompactTask:
+		return "Produce a compact but sufficient task continuation summary for later recovery."
+	case RequestExecutionCheckIn:
+		return "Interpret the active execution check-in and decide whether to wait, report status, or intervene."
+	case RequestLostExecutionRecovery:
+		return "Recover from lost execution tracking using the latest execution snapshot and shell context."
+	case RequestResumeAfterTakeControl:
+		return "Resume the task after the operator took control. Reconcile the current shell state before choosing the next action."
+	default:
+		return "Respond with the best Shuttle structured outcome for the provided turn context."
+	}
+}
+
+func formatCodexSDKProposalContext(proposal Proposal) []string {
+	lines := []string{"proposal.kind: " + strings.TrimSpace(string(proposal.Kind))}
+	if command := strings.TrimSpace(proposal.Command); command != "" {
+		lines = append(lines, "proposal.command: "+command)
+	}
+	if keys := strings.TrimSpace(string(proposal.Keys)); keys != "" {
+		lines = append(lines, "proposal.keys: "+keys)
+	}
+	if target := strings.TrimSpace(string(proposal.PatchTarget)); target != "" {
+		lines = append(lines, "proposal.patch_target: "+target)
+	}
+	if patch := strings.TrimSpace(proposal.Patch); patch != "" {
+		lines = append(lines, "proposal.patch_present: true", "proposal.patch_preview: "+previewCodexSDKBlock(patch, 240))
+	}
+	if description := strings.TrimSpace(proposal.Description); description != "" {
+		lines = append(lines, "proposal.description: "+description)
+	}
+	if proposal.Edit != nil {
+		lines = append(lines, formatCodexSDKEditContext("proposal.edit", *proposal.Edit)...)
+	}
+	return lines
+}
+
+func formatCodexSDKApprovalContext(approval ApprovalRequest) []string {
+	lines := []string{"approval.kind: " + strings.TrimSpace(string(approval.Kind))}
+	if id := strings.TrimSpace(approval.ID); id != "" {
+		lines = append(lines, "approval.id: "+id)
+	}
+	if title := strings.TrimSpace(approval.Title); title != "" {
+		lines = append(lines, "approval.title: "+title)
+	}
+	if summary := strings.TrimSpace(approval.Summary); summary != "" {
+		lines = append(lines, "approval.summary: "+summary)
+	}
+	if command := strings.TrimSpace(approval.Command); command != "" {
+		lines = append(lines, "approval.command: "+command)
+	}
+	if target := strings.TrimSpace(string(approval.PatchTarget)); target != "" {
+		lines = append(lines, "approval.patch_target: "+target)
+	}
+	if patch := strings.TrimSpace(approval.Patch); patch != "" {
+		lines = append(lines, "approval.patch_present: true", "approval.patch_preview: "+previewCodexSDKBlock(patch, 240))
+	}
+	if risk := strings.TrimSpace(string(approval.Risk)); risk != "" {
+		lines = append(lines, "approval.risk: "+risk)
+	}
+	return lines
+}
+
+func formatCodexSDKEditContext(prefix string, edit EditIntent) []string {
+	lines := []string{}
+	if target := strings.TrimSpace(string(edit.Target)); target != "" {
+		lines = append(lines, prefix+".target: "+target)
+	}
+	if path := strings.TrimSpace(edit.Path); path != "" {
+		lines = append(lines, prefix+".path: "+path)
+	}
+	if operation := strings.TrimSpace(string(edit.Operation)); operation != "" {
+		lines = append(lines, prefix+".operation: "+operation)
+	}
+	if anchor := strings.TrimSpace(edit.AnchorText); anchor != "" {
+		lines = append(lines, prefix+".anchor_text: "+previewCodexSDKBlock(anchor, 120))
+	}
+	if oldText := strings.TrimSpace(edit.OldText); oldText != "" {
+		lines = append(lines, prefix+".old_text: "+previewCodexSDKBlock(oldText, 120))
+	}
+	if newText := strings.TrimSpace(edit.NewText); newText != "" {
+		lines = append(lines, prefix+".new_text: "+previewCodexSDKBlock(newText, 120))
+	}
+	if edit.StartLine > 0 {
+		lines = append(lines, fmt.Sprintf("%s.start_line: %d", prefix, edit.StartLine))
+	}
+	if edit.EndLine > 0 {
+		lines = append(lines, fmt.Sprintf("%s.end_line: %d", prefix, edit.EndLine))
+	}
+	return lines
+}
+
+func previewCodexSDKBlock(value string, limit int) string {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	if limit <= 3 {
+		return value[:limit]
+	}
+	return strings.TrimSpace(value[:limit-3]) + "..."
+}
+
+func annotateRuntimeMetadata(outcome Outcome, meta RuntimeMetadata) Outcome {
 	if outcome.ModelInfo == nil {
 		outcome.ModelInfo = &ModelInfo{}
 	}
 	if strings.TrimSpace(outcome.ModelInfo.ProviderPreset) == "" {
-		outcome.ModelInfo.ProviderPreset = strings.TrimSpace(m.meta.ProviderPreset)
+		outcome.ModelInfo.ProviderPreset = strings.TrimSpace(meta.ProviderPreset)
 	}
 	if strings.TrimSpace(outcome.ModelInfo.RequestedModel) == "" {
-		outcome.ModelInfo.RequestedModel = strings.TrimSpace(m.meta.Model)
+		outcome.ModelInfo.RequestedModel = strings.TrimSpace(meta.Model)
 	}
-	return outcome, nil
+	outcome.ModelInfo.SelectedRuntime = strings.TrimSpace(meta.Type)
+	outcome.ModelInfo.EffectiveRuntime = strings.TrimSpace(meta.Type)
+	outcome.ModelInfo.RuntimeCommand = strings.TrimSpace(meta.Command)
+	outcome.ModelInfo.RuntimeAuthority = RuntimeAuthorityAuthoritative
+	return outcome
+}
+
+func (r unsupportedRuntime) Handle(context.Context, Host, Request) (Outcome, error) {
+	return Outcome{}, errors.New(strings.TrimSpace(r.reason))
 }
 
 func normalizeRuntimeSelection(value string) string {
@@ -418,6 +604,8 @@ func normalizeRuntimeSelection(value string) string {
 		return RuntimePi
 	case "codex-sdk":
 		return RuntimeCodexSDK
+	case "codex-app-server", "codex-appserver":
+		return RuntimeCodexAppServer
 	default:
 		return strings.ToLower(strings.TrimSpace(value))
 	}

@@ -578,7 +578,7 @@ func TestSlashOnboardOpensConfigureProvidersSettings(t *testing.T) {
 		func(profile provider.Profile) ([]provider.ModelOption, error) {
 			return []provider.ModelOption{{ID: profile.Model}}, nil
 		},
-		func(profile provider.Profile, _ *shell.PromptContext) (controller.Controller, provider.Profile, error) {
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
 			return &fakeController{}, profile, nil
 		},
 		func(provider.Profile) error { return nil },

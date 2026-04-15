@@ -55,6 +55,80 @@ __SHUTTLE_CTX_USER__=localuser
 	}
 }
 
+func TestSanitizeCapturedBodyStripsTruncatedShuttleStatusLeak(t *testing.T) {
+	body := strings.Join([]string{
+		"ttle_status\"",
+		"total 212K",
+		"-rw-rw-r-- 1 jsmith jsmith 19K agent-runtime-design.md",
+	}, "\n")
+
+	got := sanitizeCapturedBody(body)
+	want := strings.Join([]string{
+		"total 212K",
+		"-rw-rw-r-- 1 jsmith jsmith 19K agent-runtime-design.md",
+	}, "\n")
+
+	if got != want {
+		t.Fatalf("sanitizeCapturedBody() = %q, want %q", got, want)
+	}
+}
+
+func TestSanitizeDisplayBodyStripsTruncatedShuttleStatusLeak(t *testing.T) {
+	body := strings.Join([]string{
+		"ttle_status\"",
+		"\x1b[31mtotal 212K\x1b[0m",
+		"-rw-rw-r-- 1 jsmith jsmith 19K agent-runtime-design.md",
+	}, "\n")
+
+	got := sanitizeDisplayBody(body)
+	want := strings.Join([]string{
+		"\x1b[31mtotal 212K\x1b[0m",
+		"-rw-rw-r-- 1 jsmith jsmith 19K agent-runtime-design.md",
+	}, "\n")
+
+	if got != want {
+		t.Fatalf("sanitizeDisplayBody() = %q, want %q", got, want)
+	}
+}
+
+func TestSanitizeCapturedBodyStripsWrappedSourcedCommandFragment(t *testing.T) {
+	body := strings.Join([]string{
+		"jsmith@linuxdesktop ~/source/repos/aiterm % . '/r",
+		"status\"",
+		"AGENTS.md",
+		"BACKLOG.md",
+	}, "\n")
+
+	got := sanitizeCapturedBody(body)
+	want := strings.Join([]string{
+		"AGENTS.md",
+		"BACKLOG.md",
+	}, "\n")
+
+	if got != want {
+		t.Fatalf("sanitizeCapturedBody() = %q, want %q", got, want)
+	}
+}
+
+func TestSanitizeDisplayBodyStripsWrappedSourcedCommandFragment(t *testing.T) {
+	body := strings.Join([]string{
+		"jsmith@linuxdesktop ~/source/repos/aiterm % . '/r",
+		"status\"",
+		"\x1b[32mAGENTS.md\x1b[0m",
+		"BACKLOG.md",
+	}, "\n")
+
+	got := sanitizeDisplayBody(body)
+	want := strings.Join([]string{
+		"\x1b[32mAGENTS.md\x1b[0m",
+		"BACKLOG.md",
+	}, "\n")
+
+	if got != want {
+		t.Fatalf("sanitizeDisplayBody() = %q, want %q", got, want)
+	}
+}
+
 func TestSanitizeCapturedBodyPreservesTrackedCommandScriptErrors(t *testing.T) {
 	body := ". '/run/user/1000/shuttle/commands/cmd-1.sh'\n__SHUTTLE_B__:cmd-1\n/run/user/1000/shuttle/commands/cmd-1.sh:2: command not found: apply_patch\nlocaluser@workstation ~/workspace/project %"
 
@@ -335,6 +409,158 @@ func TestStartTrackedCommandEnsuresLocalShellIntegrationBeforeLaunching(t *testi
 	}
 	if strings.Contains(client.sent[1], "SHUTTLE_SEMANTIC_SHELL_V1_PID") {
 		t.Fatalf("expected second send to be tracked command transport, got %#v", client.sent)
+	}
+}
+
+func TestStartTrackedCommandSkipsSemanticBootstrapWhenSemanticStateAlreadyPresent(t *testing.T) {
+	client := &fakeSemanticPaneClient{
+		pane:    tmux.Pane{ID: "%0", CurrentCommand: "bash", TTY: "/dev/pts/24"},
+		capture: shellTestProjectPrompt(t),
+	}
+	dir := t.TempDir()
+	statePath := semanticStatePath(dir, client.pane.TTY)
+	projectDir := shellTestProjectDir(t)
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(statePath, []byte("{\"version\":1,\"event\":\"prompt\",\"exit\":0,\"cwd\":\""+projectDir+"\",\"shell\":\"bash\"}\n"), 0o644); err != nil {
+		t.Fatalf("write state file: %v", err)
+	}
+
+	observer := (&Observer{client: client}).WithStateDir(dir)
+	ctx, cancel := context.WithCancel(context.Background())
+	monitor, err := observer.StartTrackedCommand(ctx, "%0", "printf 'hi\\n'", 250*time.Millisecond)
+	if err != nil {
+		t.Fatalf("StartTrackedCommand() error = %v", err)
+	}
+	cancel()
+	_, _ = monitor.Wait()
+
+	if len(client.sent) == 0 {
+		t.Fatal("expected tracked command send")
+	}
+	if strings.Contains(client.sent[0], "SHUTTLE_SEMANTIC_SHELL_V1_PID") {
+		t.Fatalf("expected tracked command transport without semantic bootstrap, got %#v", client.sent)
+	}
+}
+
+func TestRunTrackedMonitorTailUsesCurrentCommandDelta(t *testing.T) {
+	before := strings.Join([]string{
+		"jsmith@linuxdesktop ~/source/repos/aiterm git:(p2-runtime-integration) % ls",
+		"AGENTS.md",
+		"BACKLOG.md",
+		"jsmith@linuxdesktop ~/source/repos/aiterm git:(p2-runtime-integration) %",
+	}, "\n")
+	after := strings.Join([]string{
+		before,
+		"jsmith@linuxdesktop ~/source/repos/aiterm git:(p2-runtime-integration) % . '/run/user/1000/shuttle/commands/cmd-1.sh'",
+		"__SHUTTLE_B__:cmd-1",
+		"/home/jsmith/source/repos/aiterm/completed",
+		"__SHUTTLE_E__:cmd-1:0",
+		"jsmith@linuxdesktop ~/source/repos/aiterm/completed git:(p2-runtime-integration) %",
+	}, "\n")
+	client := &fakeSemanticPaneClient{
+		pane:     tmux.Pane{ID: "%0", CurrentCommand: "zsh", TTY: "/dev/pts/25"},
+		captures: []string{after},
+	}
+	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
+	monitor := newTrackedCommandMonitor("cmd-1", "pwd")
+	markers := protocol.Markers{
+		CommandID: "cmd-1",
+		BeginLine: "__SHUTTLE_B__:cmd-1",
+		EndPrefix: "__SHUTTLE_E__:cmd-1:",
+	}
+
+	observer.runTrackedMonitor(context.Background(), monitor, "%0", "pwd", ". '/run/user/1000/shuttle/commands/cmd-1.sh'", 250*time.Millisecond, before, before, markers, func() {})
+
+	result, err := monitor.Wait()
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if result.Captured != "/home/jsmith/source/repos/aiterm/completed" {
+		t.Fatalf("expected pwd result body only, got %q", result.Captured)
+	}
+
+	sawScopedTail := false
+	for snapshot := range monitor.Updates() {
+		if strings.TrimSpace(snapshot.LatestOutputTail) == "" {
+			continue
+		}
+		if strings.Contains(snapshot.LatestOutputTail, "AGENTS.md") || strings.Contains(snapshot.LatestOutputTail, "BACKLOG.md") {
+			t.Fatalf("expected live tail to exclude prior pane history, got %q", snapshot.LatestOutputTail)
+		}
+		if strings.Contains(snapshot.LatestOutputTail, "/home/jsmith/source/repos/aiterm/completed") {
+			sawScopedTail = true
+		}
+	}
+	if !sawScopedTail {
+		t.Fatal("expected a live tail update scoped to the current command output")
+	}
+}
+
+func TestRunTrackedMonitorDisplayTailPreservesANSIAndStripsTransportNoise(t *testing.T) {
+	before := strings.Join([]string{
+		"jsmith@linuxdesktop ~/source/repos/aiterm git:(p2-runtime-integration) % ls",
+		"AGENTS.md",
+		"BACKLOG.md",
+		"jsmith@linuxdesktop ~/source/repos/aiterm git:(p2-runtime-integration) %",
+	}, "\n")
+	after := strings.Join([]string{
+		before,
+		"jsmith@linuxdesktop ~/source/repos/aiterm git:(p2-runtime-integration) % . '/run/user/1000/shuttle/commands/b69vq.sh'",
+		"__SHUTTLE_B__:fb0ps",
+		"README.md",
+		"__SHUTTLE_E__:fb0ps:0",
+		"jsmith@linuxdesktop ~/source/repos/aiterm/completed git:(p2-runtime-integration) %",
+	}, "\n")
+	afterEscaped := strings.Join([]string{
+		before,
+		"45ile.sh'",
+		"__SHUTTLE_B__:fb0ps",
+		"\x1b[32mREADME.md\x1b[0m",
+		"__SHUTTLE_E__:fb0ps:0",
+		"jsmith@linuxdesktop ~/source/repos/aiterm/completed git:(p2-runtime-integration) %",
+	}, "\n")
+	client := &fakeSemanticPaneClient{
+		pane:            tmux.Pane{ID: "%0", CurrentCommand: "zsh", TTY: "/dev/pts/26"},
+		captures:        []string{after},
+		escapedCaptures: []string{afterEscaped, afterEscaped},
+	}
+	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
+	monitor := newTrackedCommandMonitor("fb0ps", "ls")
+	markers := protocol.Markers{
+		CommandID: "fb0ps",
+		BeginLine: "__SHUTTLE_B__:fb0ps",
+		EndPrefix: "__SHUTTLE_E__:fb0ps:",
+	}
+
+	observer.runTrackedMonitor(context.Background(), monitor, "%0", "ls", ". '/run/user/1000/shuttle/commands/b69vq.sh'", 250*time.Millisecond, before, before, markers, func() {})
+
+	result, err := monitor.Wait()
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if !strings.Contains(result.DisplayCaptured, "\x1b[32mREADME.md\x1b[0m") {
+		t.Fatalf("expected ANSI-preserving display capture, got %q", result.DisplayCaptured)
+	}
+	if strings.Contains(result.DisplayCaptured, "45ile.sh'") || strings.Contains(result.DisplayCaptured, "b69vq.sh") || strings.Contains(result.DisplayCaptured, "fb0ps") {
+		t.Fatalf("expected display capture to exclude transport chatter, got %q", result.DisplayCaptured)
+	}
+
+	sawANSITail := false
+	for snapshot := range monitor.Updates() {
+		if strings.TrimSpace(snapshot.LatestDisplayTail) == "" {
+			continue
+		}
+		if strings.Contains(snapshot.LatestDisplayTail, "b69vq.sh") || strings.Contains(snapshot.LatestDisplayTail, "fb0ps") {
+			t.Fatalf("expected live display tail to exclude transport chatter, got %q", snapshot.LatestDisplayTail)
+		}
+		if strings.Contains(snapshot.LatestDisplayTail, "\x1b[32mREADME.md\x1b[0m") {
+			sawANSITail = true
+		}
+	}
+	if !sawANSITail {
+		t.Fatal("expected a live ANSI display tail update")
 	}
 }
 
@@ -1020,8 +1246,37 @@ func TestInferTrackedCommandResultFromEndMarker(t *testing.T) {
 	if result.ExitCode != 0 {
 		t.Fatalf("expected exit code 0, got %d", result.ExitCode)
 	}
-	if result.Body != "alpha\nbeta\nlocaluser@devbox %" {
+	if result.Body != "alpha\nbeta" {
 		t.Fatalf("unexpected inferred body %q", result.Body)
+	}
+}
+
+func TestInferTrackedCommandResultFromEndMarkerStripsReturnedPromptAfterDirectoryChange(t *testing.T) {
+	markers := protocol.Markers{
+		CommandID: "cmd-1",
+		BeginLine: "__SHUTTLE_B__:cmd-1",
+		EndPrefix: "__SHUTTLE_E__:cmd-1:",
+	}
+
+	before := "localuser@devbox ~/workspace %"
+	after := strings.Join([]string{
+		"localuser@devbox ~/workspace % . '/run/user/1000/shuttle/commands/cmd-1.sh'",
+		"__SHUTTLE_E__:cmd-1:0",
+		"localuser@devbox ~/workspace/other-project %",
+	}, "\n")
+
+	result, complete, err := inferTrackedCommandResultFromEndMarker(after, before, ". '/run/user/1000/shuttle/commands/cmd-1.sh'", markers)
+	if err != nil {
+		t.Fatalf("inferTrackedCommandResultFromEndMarker() error = %v", err)
+	}
+	if !complete {
+		t.Fatal("expected inferred result to complete")
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d", result.ExitCode)
+	}
+	if result.Body != "" {
+		t.Fatalf("expected empty body for prompt-only directory change result, got %q", result.Body)
 	}
 }
 

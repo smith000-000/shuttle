@@ -58,6 +58,7 @@ type Config struct {
 	RuntimeCommand                string
 	AllowPlaintextProviderSecrets bool
 	ProviderFlagsSet              bool
+	RuntimeFlagsSet               bool
 }
 
 func Parse(args []string) (Config, error) {
@@ -124,7 +125,7 @@ func Parse(args []string) (Config, error) {
 	fs.StringVar(&cfg.ProviderThinking, "thinking", providerThinking, "thinking mode for supported providers: on or off")
 	fs.StringVar(&cfg.ProviderReasoningEffort, "reasoning-effort", providerReasoningEffort, "reasoning effort for supported providers: low, medium, high, or xhigh")
 	fs.StringVar(&cfg.ProviderCLICommand, "cli-command", providerCLICommand, "CLI command path for CLI-backed providers")
-	fs.StringVar(&cfg.RuntimeType, "runtime", runtimeType, "coding runtime to use: builtin, pi, codex_sdk, or auto")
+	fs.StringVar(&cfg.RuntimeType, "runtime", runtimeType, "coding runtime to use: builtin, pi, codex_sdk, codex_app_server, or auto")
 	fs.StringVar(&cfg.RuntimeCommand, "runtime-command", runtimeCommand, "command path for selected coding runtime")
 	fs.BoolVar(&cfg.AllowPlaintextProviderSecrets, "allow-plaintext-provider-secrets", allowPlaintextProviderSecrets, "allow less-secure local plaintext fallback for provider secrets when OS keyring is unavailable")
 
@@ -133,8 +134,10 @@ func Parse(args []string) (Config, error) {
 	}
 	fs.Visit(func(flag *flag.Flag) {
 		switch flag.Name {
-		case "provider", "auth", "model", "base-url", "thinking", "reasoning-effort", "cli-command", "runtime", "runtime-command":
+		case "provider", "auth", "model", "base-url", "thinking", "reasoning-effort", "cli-command":
 			cfg.ProviderFlagsSet = true
+		case "runtime", "runtime-command":
+			cfg.RuntimeFlagsSet = true
 		}
 	})
 
@@ -348,6 +351,8 @@ func normalizeRuntimeType(value string) string {
 		return "auto"
 	case "codex-sdk":
 		return "codex_sdk"
+	case "codex-app-server", "codex-appserver":
+		return "codex_app_server"
 	case "pi-runtime":
 		return "pi"
 	default:

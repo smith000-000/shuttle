@@ -112,6 +112,30 @@ func TestEnsureLocalShellIntegrationSendsSourceCommand(t *testing.T) {
 	}
 }
 
+func TestEnsureLocalShellIntegrationSkipsBootstrapWhenSemanticStateAlreadyPresent(t *testing.T) {
+	client := &fakeSemanticPaneClient{
+		pane:    tmux.Pane{ID: "%0", CurrentCommand: "bash", TTY: "/dev/pts/17"},
+		capture: shellTestProjectPrompt(t),
+	}
+	dir := t.TempDir()
+	statePath := semanticStatePath(dir, client.pane.TTY)
+	projectDir := shellTestProjectDir(t)
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(statePath, []byte("{\"version\":1,\"event\":\"prompt\",\"exit\":0,\"cwd\":\""+projectDir+"\",\"shell\":\"bash\"}\n"), 0o644); err != nil {
+		t.Fatalf("write state file: %v", err)
+	}
+
+	observer := (&Observer{client: client}).WithStateDir(dir)
+	if err := observer.EnsureLocalShellIntegration(context.Background(), "%0"); err != nil {
+		t.Fatalf("EnsureLocalShellIntegration() error = %v", err)
+	}
+	if len(client.sent) != 0 {
+		t.Fatalf("expected no bootstrap command when semantic state already exists, got %#v", client.sent)
+	}
+}
+
 func TestSemanticShellScriptsUseSTTerminators(t *testing.T) {
 	bashScript := bashSemanticShellIntegrationScript("/tmp/bash.state")
 	zshScript := zshSemanticShellIntegrationScript("/tmp/zsh.state")
@@ -225,6 +249,7 @@ type fakeSemanticPaneClient struct {
 	capturesByTarget   map[string]string
 	captureErrByTarget map[string]error
 	escaped            string
+	escapedCaptures    []string
 	stream             string
 	dir                string
 	sent               []string
@@ -232,6 +257,7 @@ type fakeSemanticPaneClient struct {
 	pipeTargets        []string
 	pipeErrByTarget    map[string]error
 	captureReads       int
+	escapedReads       int
 	paneReads          int
 }
 
@@ -316,14 +342,27 @@ func (f *fakeSemanticPaneClient) ListPanes(ctx context.Context, target string) (
 }
 
 func (f *fakeSemanticPaneClient) CapturePaneEscaped(ctx context.Context, target string, startLine int) (string, error) {
+	f.mu.Lock()
+	escapedCaptures := append([]string(nil), f.escapedCaptures...)
+	escaped := f.escaped
+	readIndex := f.escapedReads
+	if len(escapedCaptures) > 0 {
+		index := readIndex
+		if index >= len(escapedCaptures) {
+			index = len(escapedCaptures) - 1
+		}
+		f.escapedReads++
+		value := escapedCaptures[index]
+		f.mu.Unlock()
+		return value, nil
+	}
+	f.mu.Unlock()
+
 	base, err := f.CapturePane(ctx, target, startLine)
 	if err != nil {
 		return "", err
 	}
 
-	f.mu.Lock()
-	escaped := f.escaped
-	f.mu.Unlock()
 	if strings.TrimSpace(escaped) == "" {
 		return base, nil
 	}

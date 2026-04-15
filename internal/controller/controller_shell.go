@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"aiterm/internal/agentruntime"
 	"aiterm/internal/logging"
 	"aiterm/internal/shell"
 )
@@ -19,7 +20,7 @@ func (c *LocalController) ResumeAfterTakeControl(ctx context.Context) ([]Transcr
 	if reconciled {
 		if reconciledAgentOwned {
 			notice := c.appendSystemNotice("Returned from shell handoff and reconciled command state.")
-			events, err := c.submitAgentTurn(ctx, "", resumeAfterTakeControlPrompt, nil, false)
+			events, err := c.submitAgentTurn(ctx, agentruntime.RequestResumeAfterTakeControl, "", resumeAfterTakeControlPrompt, nil, nil, false)
 			if err != nil {
 				return append(append([]TranscriptEvent{notice}, pendingEvents...), events...), err
 			}

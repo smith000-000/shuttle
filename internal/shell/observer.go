@@ -307,8 +307,21 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 		}
 		paneInfo := tmux.Pane{CurrentCommand: currentPaneCommand, TTY: paneTTY, AlternateOn: alternateOn}
 		observed := o.observeShellState(ctx, paneID, command, rawCaptured, &paneInfo, monitor.Snapshot().ShellContext)
-		tail := observed.Tail
-		monitor.updateTail(tail, tail)
+		deltaTail := monitorTail(capturePaneDelta(beforeCapture, rawCaptured), transportCommand)
+		if observed.HasPromptContext {
+			deltaTail = stripTrailingPromptLine(deltaTail, observed.PromptContext)
+		}
+		displayDeltaTail := deltaTail
+		if displayCaptured, displayErr := o.capturePaneDisplay(ctx, paneID, -trackedCaptureLines); displayErr == nil {
+			displayDeltaTail = monitorDisplayTail(capturePaneDelta(beforeDisplayCapture, displayCaptured), transportCommand)
+			if observed.HasPromptContext {
+				displayDeltaTail = stripTrailingPromptLine(displayDeltaTail, observed.PromptContext)
+			}
+			if strings.TrimSpace(displayDeltaTail) == "" {
+				displayDeltaTail = deltaTail
+			}
+		}
+		monitor.updateTail(deltaTail, displayDeltaTail)
 		if observed.HasPromptContext {
 			monitor.updateShellContext(observed.PromptContext)
 		}
@@ -372,8 +385,8 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 				Command:         command,
 				Cause:           CompletionCauseUnknown,
 				Confidence:      ConfidenceLow,
-				Captured:        tail,
-				DisplayCaptured: tail,
+				Captured:        deltaTail,
+				DisplayCaptured: displayDeltaTail,
 			}, fmt.Errorf("parse tracked command result: %w", err), MonitorStateLost)
 			return
 		}
@@ -397,8 +410,8 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 					Command:         command,
 					Cause:           CompletionCauseUnknown,
 					Confidence:      ConfidenceLow,
-					Captured:        tail,
-					DisplayCaptured: tail,
+					Captured:        deltaTail,
+					DisplayCaptured: displayDeltaTail,
 				}, fmt.Errorf("parse tracked command result from end marker: %w", err), MonitorStateLost)
 				return
 			}
@@ -408,7 +421,7 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 			cleanBody := sanitizeCapturedBody(result.Body)
 			cleanBody = stripEchoedCommand(cleanBody, transportCommand)
 			shellContext, _ := ParsePromptContextFromCapture(rawCaptured)
-			displayBody := o.captureCommandDisplayDelta(ctx, paneID, beforeDisplayCapture, transportCommand, shellContext)
+			displayBody := o.captureCommandDisplayResult(ctx, paneID, beforeDisplayCapture, transportCommand, markers, shellContext)
 			if displayBody == "" {
 				displayBody = cleanBody
 			}
@@ -532,7 +545,7 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 					"command_id", markers.CommandID,
 					"state", inferredState,
 					"pane_command", currentPaneCommand,
-					"tail_preview", logging.Preview(tail, 1000),
+					"tail_preview", logging.Preview(deltaTail, 1000),
 				)
 				continue
 			}
@@ -549,7 +562,7 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 				Command:    command,
 				Cause:      CompletionCauseUnknown,
 				Confidence: ConfidenceLow,
-				Captured:   tail,
+				Captured:   deltaTail,
 			}, err, MonitorStateLost)
 			return
 		}
@@ -684,10 +697,14 @@ func inferTrackedCommandResultFromEndMarker(captured string, beforeCapture strin
 	}
 
 	delta := capturePaneDelta(beforeCapture, captured)
+	body := stripEchoedCommand(sanitizeCapturedBody(delta), command)
+	if promptContext, ok := ParsePromptContextFromCapture(captured); ok {
+		body = stripTrailingPromptLine(body, promptContext)
+	}
 	return protocol.CommandResult{
 		CommandID: markers.CommandID,
 		ExitCode:  exitCode,
-		Body:      stripEchoedCommand(sanitizeCapturedBody(delta), command),
+		Body:      body,
 	}, true, nil
 }
 
@@ -1505,10 +1522,16 @@ func isShuttlePlumbingLine(line string) bool {
 	if looksLikeShuttleCommandError(line) {
 		return false
 	}
+	lower := strings.ToLower(line)
 	return strings.Contains(line, "__SHUTTLE_") ||
 		strings.Contains(line, "__shuttle_status") ||
+		strings.Contains(lower, "shuttle_status") ||
+		strings.Contains(lower, "ttle_status") ||
+		lineLooksLikeSourcedDotPrompt(line) ||
+		strings.HasPrefix(strings.TrimSpace(line), ". '/") ||
 		strings.Contains(line, "eval \"$(printf") ||
 		strings.Contains(line, "SHUTTLE_SEMANTIC_SHELL_V1") ||
+		strings.Contains(lower, "shuttle_semantic_shell_v1") ||
 		strings.Contains(line, "/shell-integration/") ||
 		strings.Contains(line, "/commands/")
 }
@@ -1528,11 +1551,21 @@ func isShuttleContinuationLine(line string) bool {
 	if isRemotePayloadMarker(line) {
 		return false
 	}
+	if looksLikeShuttleCommandError(line) {
+		return false
+	}
+	lower := strings.ToLower(line)
 	return strings.Contains(line, "__SHUTTLE_") ||
 		strings.Contains(line, "__shuttle_status") ||
+		strings.Contains(lower, "shuttle_status") ||
+		strings.Contains(lower, "ttle_status") ||
+		strings.HasPrefix(strings.TrimSpace(line), "'/r") ||
+		strings.HasPrefix(strings.TrimSpace(line), "/r") ||
+		strings.HasSuffix(strings.TrimSpace(lower), `status"`) ||
 		strings.Contains(line, "eval \"$(printf") ||
 		strings.HasPrefix(line, "|| ") ||
 		strings.HasPrefix(line, "| . ") ||
+		strings.Contains(lower, "shuttle_semantic_shell_v1") ||
 		strings.Contains(line, "$(whoami") ||
 		strings.Contains(line, "$(hostname") ||
 		strings.Contains(line, "$(uname") ||
@@ -1556,7 +1589,11 @@ func lineLooksLikeSourcedDotPrompt(line string) bool {
 	return strings.HasSuffix(line, "% .") ||
 		strings.HasSuffix(line, "$ .") ||
 		strings.HasSuffix(line, "# .") ||
-		strings.HasSuffix(line, "> .")
+		strings.HasSuffix(line, "> .") ||
+		strings.Contains(line, "% . '/") ||
+		strings.Contains(line, "$ . '/") ||
+		strings.Contains(line, "# . '/") ||
+		strings.Contains(line, "> . '/")
 }
 
 func stripEchoedCommand(body string, command string) string {
@@ -1767,6 +1804,18 @@ func (o *Observer) captureCommandDisplayDelta(ctx context.Context, paneID string
 	body = stripEchoedCommand(body, command)
 	body = stripTrailingPromptLine(body, promptContext)
 	return strings.TrimSpace(body)
+}
+
+func (o *Observer) captureCommandDisplayResult(ctx context.Context, paneID string, beforeDisplay string, command string, markers protocol.Markers, promptContext PromptContext) string {
+	captured, err := o.capturePaneDisplay(ctx, paneID, -trackedCaptureLines)
+	if err == nil {
+		if result, complete, parseErr := protocol.ParseCommandResult(captured, markers); parseErr == nil && complete {
+			body := sanitizeDisplayBody(result.Body)
+			body = stripTrailingPromptLine(body, promptContext)
+			return strings.TrimSpace(body)
+		}
+	}
+	return o.captureCommandDisplayDelta(ctx, paneID, beforeDisplay, command, promptContext)
 }
 
 func parseShellContextProbeOutput(body string, baseline PromptContext) (string, PromptContext, int) {

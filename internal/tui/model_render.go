@@ -703,7 +703,35 @@ func (m Model) renderModelStatus() string {
 	if providerLabel != "" {
 		modelText = providerLabel + " / " + label
 	}
+	if runtimeLabel := m.statusRuntimeLabel(); runtimeLabel != "" {
+		modelText = runtimeLabel + " | " + modelText
+	}
 	return m.styles.statusRemote.Render(modelText)
+}
+
+func (m Model) statusRuntimeLabel() string {
+	selected := strings.TrimSpace(m.activeRuntimeType)
+	effective := ""
+	if selected != "" {
+		resolved := provider.ResolveRuntimeSelection(selected, m.activeRuntimeCommand)
+		selected = strings.TrimSpace(resolved.RequestedType)
+		effective = strings.TrimSpace(resolved.SelectedType)
+	}
+	if m.lastModelInfo != nil {
+		if lastSelected := strings.TrimSpace(m.lastModelInfo.SelectedRuntime); lastSelected != "" {
+			selected = lastSelected
+		}
+		if lastEffective := strings.TrimSpace(m.lastModelInfo.EffectiveRuntime); lastEffective != "" {
+			effective = lastEffective
+		}
+	}
+	if selected == "" {
+		selected = effective
+	}
+	if selected == "" || selected == controller.RuntimeBuiltin {
+		return ""
+	}
+	return runtimeStatusLabel(selected, effective)
 }
 
 func (m Model) renderApprovalModeLabel(includeDefault bool) string {
@@ -1262,6 +1290,10 @@ func (m Model) renderSettingsView() string {
 		lines = append(lines, m.styles.detailBody.Render("Session Settings"))
 		lines = append(lines, m.styles.detailMeta.Render("Adjust session-local behavior such as approval level."))
 		lines = append(lines, m.renderSettingsApprovalModes(contentWidth)...)
+	case settingsStepRuntime:
+		lines = append(lines, m.styles.detailBody.Render("Runtime"))
+		lines = append(lines, m.styles.detailMeta.Render("Select the session-authoritative coding runtime, review how it resolves, and persist it for future sessions."))
+		lines = append(lines, m.renderSettingsRuntimes(contentWidth)...)
 	case settingsStepProviders:
 		lines = append(lines, m.styles.detailBody.Render("Configure Providers"))
 		lines = append(lines, m.styles.detailMeta.Render("Edit provider settings and save them for future sessions."))
@@ -1387,6 +1419,7 @@ func (m Model) renderSettingsMenu(contentWidth int) []string {
 		lines = append(lines, m.renderSettingsRow(entry.label, index == m.settingsIndex, false, false))
 	}
 	if contentWidth > 0 {
+		lines = append(lines, m.styles.detailMeta.Render("Current runtime: "+currentRuntimeSummaryLine(m.activeRuntimeType, m.activeRuntimeCommand)))
 		lines = append(lines, m.styles.detailMeta.Render("Current model: "+currentProviderModelLabel(m.activeProvider)))
 	}
 	return lines
@@ -1405,6 +1438,35 @@ func (m Model) renderSettingsApprovalModes(contentWidth int) []string {
 		lines = append(lines, m.renderSettingsMetaLine(controller.ApprovalModeStatusBody(entry.mode), index == m.settingsApprovalIdx, current, false))
 	}
 	_ = contentWidth
+	return lines
+}
+
+func (m Model) renderSettingsRuntimes(contentWidth int) []string {
+	lines := make([]string, 0, len(m.settingsRuntimes)*5)
+	for index, entry := range m.settingsRuntimes {
+		current := strings.TrimSpace(entry.runtimeType) == strings.TrimSpace(m.activeRuntimeType)
+		label := entry.label
+		if current {
+			label += " (current)"
+		}
+		lines = append(lines, m.renderSettingsRow(label, index == m.settingsRuntimeIdx && !m.settingsRuntimeCommandFocus, current, entry.disabled))
+		for _, line := range wrapParagraphs(entry.detail, max(10, contentWidth-2)) {
+			lines = append(lines, m.renderSettingsMetaLine(line, index == m.settingsRuntimeIdx && !m.settingsRuntimeCommandFocus, current, entry.disabled))
+		}
+	}
+	lines = append(lines, "", m.styles.detailMeta.Render("Command Path"))
+	command := strings.TrimSpace(m.settingsRuntimeCommand)
+	if command == "" {
+		command = "(default command for selected runtime)"
+	}
+	prefix := "  "
+	if m.settingsRuntimeCommandFocus {
+		prefix = "> "
+	}
+	lines = append(lines, m.renderSettingsRow(prefix+command, m.settingsRuntimeCommandFocus, false, false))
+	for _, line := range runtimeSettingsPreviewLines(m.activeRuntimeType, m.activeRuntimeCommand, selectedSettingsRuntimeType(m), m.settingsRuntimeCommand) {
+		lines = append(lines, m.styles.detailMeta.Render(line))
+	}
 	return lines
 }
 
@@ -1878,6 +1940,7 @@ func currentProviderModelLabel(profile provider.Profile) string {
 func settingsMenuEntries() []settingsMenuEntry {
 	return []settingsMenuEntry{
 		{label: "Session Settings"},
+		{label: "Runtime"},
 		{label: "Configure Providers"},
 	}
 }
@@ -1887,6 +1950,123 @@ func settingsApprovalEntries() []settingsApprovalEntry {
 		{label: "Confirm", mode: controller.ApprovalModeConfirm},
 		{label: "Auto", mode: controller.ApprovalModeAuto},
 		{label: "Dangerous", mode: controller.ApprovalModeDanger},
+	}
+}
+
+func settingsRuntimeEntries() []settingsRuntimeEntry {
+	entries := []settingsRuntimeEntry{
+		{label: runtimeLabel(provider.RuntimeAuto), runtimeType: provider.RuntimeAuto, detail: "Prefer the best installed authoritative runtime, then fall back to builtin when none are available."},
+		{label: runtimeLabel(provider.RuntimeBuiltin), runtimeType: provider.RuntimeBuiltin, detail: "Use Shuttle's built-in runtime path for every reasoning turn."},
+	}
+	for _, candidate := range provider.DetectRuntimeInstallCandidates() {
+		if strings.TrimSpace(candidate.Runtime) == "" || strings.TrimSpace(candidate.Runtime) == provider.RuntimePi {
+			continue
+		}
+		detail := strings.TrimSpace(candidate.Name)
+		if detail == "" {
+			detail = runtimeLabel(candidate.Runtime)
+		}
+		detail = strings.ToUpper(detail[:1]) + detail[1:]
+		switch {
+		case candidate.Installed && candidate.Supported:
+			detail += ". Installed and ready."
+		case candidate.Installed && !candidate.Supported:
+			detail += ". Installed but not currently usable: " + strings.TrimSpace(candidate.FailureReason)
+		default:
+			detail += ". Not currently found on PATH."
+		}
+		entries = append(entries, settingsRuntimeEntry{
+			label:       runtimeLabel(candidate.Runtime),
+			detail:      detail,
+			runtimeType: candidate.Runtime,
+		})
+	}
+	return entries
+}
+
+func currentRuntimeSummaryLine(runtimeType string, runtimeCommand string) string {
+	resolved := provider.ResolveRuntimeSelection(runtimeType, runtimeCommand)
+	label := runtimeLabel(resolved.RequestedType)
+	if strings.TrimSpace(resolved.RequestedType) != strings.TrimSpace(resolved.SelectedType) && strings.TrimSpace(resolved.SelectedType) != "" {
+		label += " -> " + runtimeLabel(resolved.SelectedType)
+	}
+	if command := strings.TrimSpace(resolved.Command); command != "" {
+		return label + " / " + command
+	}
+	return label
+}
+
+func runtimeStatusLabel(selected string, effective string) string {
+	selected = strings.TrimSpace(selected)
+	effective = strings.TrimSpace(effective)
+	if selected == "" {
+		selected = effective
+	}
+	if selected == "" {
+		return ""
+	}
+	if effective != "" && effective != selected {
+		return runtimeLabel(selected) + "->" + runtimeLabel(effective)
+	}
+	return runtimeLabel(selected)
+}
+
+func runtimeSwitchBanner(runtimeType string, runtimeCommand string) string {
+	resolved := provider.ResolveRuntimeSelection(runtimeType, runtimeCommand)
+	return "Active runtime switched to " + currentRuntimeSummaryLine(resolved.RequestedType, resolved.Command) + "."
+}
+
+func runtimeSwitchNotice(runtimeType string, runtimeCommand string) string {
+	resolved := provider.ResolveRuntimeSelection(runtimeType, runtimeCommand)
+	label := "Runtime switched to " + currentRuntimeSummaryLine(resolved.RequestedType, resolved.Command) + "."
+	if err := provider.ValidateResolvedRuntime(resolved); err != nil {
+		return label + " Validation note: " + err.Error()
+	}
+	return label
+}
+
+func selectedSettingsRuntimeType(m Model) string {
+	if len(m.settingsRuntimes) == 0 || m.settingsRuntimeIdx < 0 || m.settingsRuntimeIdx >= len(m.settingsRuntimes) {
+		return m.activeRuntimeType
+	}
+	return m.settingsRuntimes[m.settingsRuntimeIdx].runtimeType
+}
+
+func runtimeSettingsPreviewLines(activeRuntimeType string, activeRuntimeCommand string, selectedRuntimeType string, selectedRuntimeCommand string) []string {
+	lines := []string{}
+	activeResolved := provider.ResolveRuntimeSelection(activeRuntimeType, activeRuntimeCommand)
+	selectedResolved := provider.ResolveRuntimeSelection(selectedRuntimeType, selectedRuntimeCommand)
+	lines = append(lines, "Current: "+currentRuntimeSummaryLine(activeResolved.RequestedType, activeResolved.Command))
+	lines = append(lines, "Preview: "+currentRuntimeSummaryLine(selectedResolved.RequestedType, selectedResolved.Command))
+	if selectedResolved.AutoSelected && strings.TrimSpace(selectedResolved.SelectedType) != "" {
+		lines = append(lines, "Auto currently resolves to: "+runtimeLabel(selectedResolved.SelectedType))
+	}
+	if err := provider.ValidateResolvedRuntime(selectedResolved); err != nil {
+		lines = append(lines, "Health: unavailable - "+err.Error())
+	} else {
+		lines = append(lines, "Health: ready")
+	}
+	if command := strings.TrimSpace(selectedResolved.Command); command != "" {
+		lines = append(lines, "Effective command: "+command)
+	}
+	lines = append(lines, "Tab or Right Arrow focuses the command path. Enter applies the highlighted runtime with the current command path.")
+	return lines
+}
+
+func runtimeLabel(runtimeType string) string {
+	switch strings.TrimSpace(runtimeType) {
+	case provider.RuntimeAuto:
+		return "Auto"
+	case provider.RuntimeBuiltin, "":
+		return "Builtin"
+	case provider.RuntimeCodexSDK:
+		return "Codex CLI Bridge"
+	case provider.RuntimeCodexAppServer:
+		return "Codex App Server"
+	case provider.RuntimePi:
+		return "PI"
+	default:
+		return strings.TrimSpace(runtimeType)
 	}
 }
 
@@ -2184,6 +2364,8 @@ func settingsFooter(width int, step settingsStep, m Model) string {
 		switch step {
 		case settingsStepSession:
 			return "Enter set mode  Esc back  Up/Down move  F2 shell  F10 close"
+		case settingsStepRuntime:
+			return "Enter apply  Tab focus cmd  Esc back  Up/Down move  F2 shell  F10 close"
 		case settingsStepProviders:
 			return "Enter edit  Esc back  Up/Down move  F2 shell  F10 close"
 		case settingsStepProviderForm:
@@ -2196,6 +2378,8 @@ func settingsFooter(width int, step settingsStep, m Model) string {
 	switch step {
 	case settingsStepSession:
 		return "Enter set session approval mode  Esc back  Up/Down move  F2 shell  F10 close"
+	case settingsStepRuntime:
+		return "Enter switch active runtime and persist it  Tab or Right Arrow focus command path  Left Arrow return to runtime list  Esc back  F2 shell  F10 close"
 	case settingsStepProviders:
 		return "Enter edit provider settings  Esc back  Up/Down move  F2 shell  F10 close"
 	case settingsStepProviderForm:

@@ -207,6 +207,15 @@ type providerSwitchedMsg struct {
 	settingsStep settingsStep
 }
 
+type runtimeSwitchedMsg struct {
+	ctrl           controller.Controller
+	runtimeType    string
+	runtimeCommand string
+	err            error
+	persistErr     error
+	settingsStep   settingsStep
+}
+
 type providerModelsLoadedMsg struct {
 	candidate provider.OnboardingCandidate
 	models    []provider.ModelOption
@@ -245,6 +254,7 @@ type settingsStep string
 const (
 	settingsStepMenu         settingsStep = "menu"
 	settingsStepSession      settingsStep = "session"
+	settingsStepRuntime      settingsStep = "runtime"
 	settingsStepProviders    settingsStep = "providers"
 	settingsStepProviderForm settingsStep = "provider_form"
 )
@@ -256,6 +266,13 @@ type settingsMenuEntry struct {
 type settingsApprovalEntry struct {
 	label string
 	mode  controller.ApprovalMode
+}
+
+type settingsRuntimeEntry struct {
+	label       string
+	detail      string
+	runtimeType string
+	disabled    bool
 }
 
 type settingsProviderEntry struct {
@@ -373,6 +390,8 @@ type Model struct {
 	lastCommandResult            *controller.CommandResultSummary
 	lastInterruptNoticeID        string
 	activeProvider               provider.Profile
+	activeRuntimeType            string
+	activeRuntimeCommand         string
 	overwriteMode                bool
 	onboardingOpen               bool
 	onboardingStep               onboardingStep
@@ -384,13 +403,19 @@ type Model struct {
 	onboardingModelIdx           int
 	loadOnboarding               func() ([]provider.OnboardingCandidate, error)
 	loadModels                   func(provider.Profile) ([]provider.ModelOption, error)
-	switchProvider               func(provider.Profile, *shell.PromptContext) (controller.Controller, provider.Profile, error)
+	switchProvider               func(provider.Profile, *shell.PromptContext, controller.TrackedShellTarget) (controller.Controller, provider.Profile, error)
 	saveProvider                 func(provider.Profile) error
 	testProvider                 func(provider.Profile) error
+	switchRuntime                func(string, string, *shell.PromptContext, controller.TrackedShellTarget) (controller.Controller, string, string, error)
+	saveRuntime                  func(string, string) error
 	settingsOpen                 bool
 	settingsStep                 settingsStep
 	settingsIndex                int
 	settingsApprovalIdx          int
+	settingsRuntimes             []settingsRuntimeEntry
+	settingsRuntimeIdx           int
+	settingsRuntimeCommand       string
+	settingsRuntimeCommandFocus  bool
 	settingsProviders            []settingsProviderEntry
 	settingsProviderIdx          int
 	settingsConfig               *onboardingFormState
@@ -480,7 +505,7 @@ func (m Model) WithProviderOnboarding(
 	active provider.Profile,
 	load func() ([]provider.OnboardingCandidate, error),
 	loadModels func(provider.Profile) ([]provider.ModelOption, error),
-	switcher func(provider.Profile, *shell.PromptContext) (controller.Controller, provider.Profile, error),
+	switcher func(provider.Profile, *shell.PromptContext, controller.TrackedShellTarget) (controller.Controller, provider.Profile, error),
 	saver func(provider.Profile) error,
 ) Model {
 	m.activeProvider = active
@@ -494,6 +519,37 @@ func (m Model) WithProviderOnboarding(
 
 func (m Model) WithProviderTester(tester func(provider.Profile) error) Model {
 	m.testProvider = tester
+	return m
+}
+
+func (m Model) WithRuntimeSettings(
+	activeRuntimeType string,
+	activeRuntimeCommand string,
+	switcher func(string, string, *shell.PromptContext, controller.TrackedShellTarget) (controller.Controller, string, string, error),
+	saver func(string, string) error,
+) Model {
+	m.activeRuntimeType = strings.TrimSpace(activeRuntimeType)
+	m.activeRuntimeCommand = strings.TrimSpace(activeRuntimeCommand)
+	m.switchRuntime = switcher
+	m.saveRuntime = saver
+	return m
+}
+
+func (m Model) WithInitialEntries(entries []Entry) Model {
+	if len(entries) == 0 {
+		return m
+	}
+	m.entries = append(m.entries, entries...)
+	m.selectedEntry = len(m.entries) - 1
+	return m
+}
+
+func (m Model) WithInitialModelInfo(info *controller.AgentModelInfo) Model {
+	if info == nil {
+		return m
+	}
+	infoCopy := *info
+	m.lastModelInfo = &infoCopy
 	return m
 }
 
@@ -853,6 +909,71 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.selectedEntry = len(m.entries) - 1
 		m.clampSelection()
 		return m, tea.Batch(m.pollActiveExecutionCmd(), m.pollShellTailCmd())
+	case runtimeSwitchedMsg:
+		m.busy = false
+		m.busyStartedAt = time.Time{}
+		m.inFlightCancel = nil
+		if msg.err != nil {
+			m.entries = append(m.entries, Entry{
+				Title: "error",
+				Body:  fmt.Sprintf("switch runtime to %s: %v", msg.runtimeType, msg.err),
+			})
+			m.selectedEntry = len(m.entries) - 1
+			m.clampSelection()
+			return m, nil
+		}
+
+		currentApprovalMode := controller.ApprovalModeConfirm
+		if m.ctrl != nil {
+			currentApprovalMode = m.ctrl.ApprovalMode()
+		}
+		m.ctrl = msg.ctrl
+		if m.ctrl != nil && currentApprovalMode != controller.ApprovalModeConfirm {
+			if _, err := m.ctrl.SetApprovalMode(context.Background(), currentApprovalMode); err == nil {
+				m.settingsApprovalIdx = currentSettingsApprovalIndex(m.ctrl)
+			}
+		}
+		m.activeRuntimeType = msg.runtimeType
+		m.activeRuntimeCommand = msg.runtimeCommand
+		if msg.settingsStep != "" {
+			m.settingsOpen = true
+			m.settingsStep = msg.settingsStep
+			m.settingsRuntimes = settingsRuntimeEntries()
+			m.settingsRuntimeIdx = m.currentSettingsRuntimeIndex()
+			m.settingsRuntimeCommand = msg.runtimeCommand
+			m.settingsRuntimeCommandFocus = false
+			m.settingsBanner = runtimeSwitchBanner(msg.runtimeType, msg.runtimeCommand)
+		} else {
+			m.settingsOpen = false
+			m.settingsStep = settingsStepMenu
+			m.settingsIndex = 0
+			m.settingsRuntimes = nil
+			m.settingsRuntimeIdx = 0
+			m.settingsRuntimeCommand = ""
+			m.settingsRuntimeCommandFocus = false
+			m.settingsBanner = ""
+		}
+		m.pendingApproval = nil
+		m.pendingProposal = nil
+		m.refiningApproval = nil
+		m.activePlan = nil
+		m.lastModelInfo = nil
+		m.approvalInFlight = false
+		m.proposalRunPending = false
+		m.directShellPending = false
+		m.entries = append(m.entries, Entry{
+			Title: "system",
+			Body:  runtimeSwitchNotice(msg.runtimeType, msg.runtimeCommand),
+		})
+		if msg.persistErr != nil {
+			m.entries = append(m.entries, Entry{
+				Title: "error",
+				Body:  fmt.Sprintf("runtime selection is active for this session, but could not be persisted: %v", msg.persistErr),
+			})
+		}
+		m.selectedEntry = len(m.entries) - 1
+		m.clampSelection()
+		return m, nil
 	case providerSwitchedMsg:
 		m.busy = false
 		m.busyStartedAt = time.Time{}
@@ -2105,6 +2226,10 @@ func (m Model) openOnboarding() (tea.Model, tea.Cmd) {
 		return next, cmd
 	}
 	next.settingsStep = settingsStepProviders
+	next.settingsRuntimes = settingsRuntimeEntries()
+	next.settingsRuntimeIdx = next.currentSettingsRuntimeIndex()
+	next.settingsRuntimeCommand = next.activeRuntimeCommand
+	next.settingsRuntimeCommandFocus = false
 	next.settingsProviderIdx = next.currentSettingsProviderIndex()
 	next.settingsConfig = nil
 	next.settingsModelCatalog = nil
@@ -2143,6 +2268,10 @@ func (m Model) openSettings() (tea.Model, tea.Cmd) {
 	m.settingsStep = settingsStepMenu
 	m.settingsIndex = 0
 	m.settingsApprovalIdx = currentSettingsApprovalIndex(m.ctrl)
+	m.settingsRuntimes = settingsRuntimeEntries()
+	m.settingsRuntimeIdx = m.currentSettingsRuntimeIndex()
+	m.settingsRuntimeCommand = m.activeRuntimeCommand
+	m.settingsRuntimeCommandFocus = false
 	m.settingsProviders = buildSettingsProviderEntries(choices, m.activeProvider)
 	m.settingsProviderIdx = m.currentSettingsProviderIndex()
 	m.settingsConfig = nil

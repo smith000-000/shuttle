@@ -186,6 +186,29 @@ func TestParseRuntimeFlags(t *testing.T) {
 	}
 }
 
+func TestParseTracksExplicitRuntimeFlags(t *testing.T) {
+	cfg, err := Parse([]string{"--runtime", "codex_sdk", "--runtime-command", "/usr/local/bin/codex"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if !cfg.RuntimeFlagsSet {
+		t.Fatal("expected runtime flags to be marked as explicit")
+	}
+	if cfg.ProviderFlagsSet {
+		t.Fatal("did not expect runtime flags to mark provider flags explicit")
+	}
+}
+
+func TestParseNormalizesCodexAppServerRuntime(t *testing.T) {
+	cfg, err := Parse([]string{"--runtime", "codex-app-server"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if cfg.RuntimeType != "codex_app_server" {
+		t.Fatalf("expected codex_app_server runtime, got %q", cfg.RuntimeType)
+	}
+}
+
 func TestParseOllamaDoesNotResolveAPIKey(t *testing.T) {
 	t.Setenv("SHUTTLE_API_KEY", "shuttle-key")
 

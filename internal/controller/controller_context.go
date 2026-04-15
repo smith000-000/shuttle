@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"aiterm/internal/agentruntime"
@@ -26,6 +27,12 @@ func (c *LocalController) StartNewTask(ctx context.Context) ([]TranscriptEvent, 
 	if blocked := c.contextActionBlockedLocked("start a new task"); blocked != nil {
 		c.appendEvents(*blocked)
 		return []TranscriptEvent{*blocked}, nil
+	}
+
+	if err := agentruntime.DeleteStoredCodexAppServerThreadBinding(c.session.StateDir, c.session.SessionName, c.task.TaskID); err != nil {
+		errEvent := c.newEvent(EventError, TextPayload{Text: "clear codex app server task binding: " + err.Error()})
+		c.appendEvents(errEvent)
+		return []TranscriptEvent{errEvent}, nil
 	}
 
 	c.task = TaskContext{TaskID: c.nextTaskIDLocked()}
@@ -55,8 +62,10 @@ func (c *LocalController) CompactTask(ctx context.Context) ([]TranscriptEvent, e
 	c.mu.Unlock()
 
 	outcome, err := c.runtime.Handle(ctx, c.runtimeHost, agentruntime.Request{
-		Kind:   agentruntime.RequestCompactTask,
-		Prompt: compactTaskPrompt,
+		Kind:        agentruntime.RequestCompactTask,
+		Prompt:      compactTaskPrompt,
+		SessionName: c.session.SessionName,
+		TaskID:      c.task.TaskID,
 	})
 	if err != nil {
 		if err == context.Canceled {
@@ -123,7 +132,7 @@ func (c *LocalController) contextActionBlockedLocked(action string) *TranscriptE
 func (c *LocalController) nextTaskIDLocked() string {
 	current := strings.TrimSpace(c.task.TaskID)
 	for {
-		candidate := fmt.Sprintf("task-%d", c.counter.Add(1))
+		candidate := fmt.Sprintf("task-%d-%d", time.Now().UTC().UnixNano(), c.counter.Add(1))
 		if candidate != "" && candidate != current {
 			return candidate
 		}

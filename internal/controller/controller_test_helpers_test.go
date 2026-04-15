@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"aiterm/internal/agentruntime"
 	"aiterm/internal/patchapply"
 	"aiterm/internal/shell"
 )
@@ -20,6 +21,23 @@ type stubAgent struct {
 func (s *stubAgent) Respond(_ context.Context, input AgentInput) (AgentResponse, error) {
 	s.lastInput = input
 	return s.response, s.err
+}
+
+type captureRuntime struct {
+	requests []agentruntime.Request
+	outcome  agentruntime.Outcome
+	err      error
+}
+
+func (r *captureRuntime) Handle(_ context.Context, _ agentruntime.Host, req agentruntime.Request) (agentruntime.Outcome, error) {
+	r.requests = append(r.requests, req)
+	if r.err != nil {
+		return agentruntime.Outcome{}, r.err
+	}
+	if strings.TrimSpace(r.outcome.Message) == "" && r.outcome.Plan == nil && r.outcome.Proposal == nil && r.outcome.Approval == nil && r.outcome.ModelInfo == nil && len(r.outcome.PlanStatuses) == 0 {
+		return agentruntime.Outcome{Message: "captured"}, nil
+	}
+	return r.outcome, nil
 }
 
 func setPrimaryExecutionForTest(controller *LocalController, execution CommandExecution) {

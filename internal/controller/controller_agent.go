@@ -17,7 +17,7 @@ func (c *LocalController) SubmitAgentPrompt(ctx context.Context, prompt string) 
 	}
 	c.mu.Unlock()
 	logging.Trace("controller.submit_agent_prompt", "prompt", prompt)
-	return c.submitAgentTurn(ctx, prompt, buildInitialAgentPrompt(prompt), nil, true)
+	return c.submitAgentTurn(ctx, agentruntime.RequestUserTurn, prompt, buildInitialAgentPrompt(prompt), nil, nil, true)
 }
 
 func (c *LocalController) SubmitRefinement(ctx context.Context, approval ApprovalRequest, note string) ([]TranscriptEvent, error) {
@@ -27,7 +27,7 @@ func (c *LocalController) SubmitRefinement(ctx context.Context, approval Approva
 	}
 	c.mu.Unlock()
 	logging.Trace("controller.submit_refinement", "approval_id", approval.ID, "note", note)
-	return c.submitAgentTurn(ctx, note, note, &approval, true)
+	return c.submitAgentTurn(ctx, agentruntime.RequestApprovalRefinement, note, note, &approval, nil, true)
 }
 
 func (c *LocalController) SubmitProposalRefinement(ctx context.Context, proposal ProposalPayload, note string) ([]TranscriptEvent, error) {
@@ -42,7 +42,7 @@ func (c *LocalController) SubmitProposalRefinement(ctx context.Context, proposal
 		"proposal_command", proposal.Command,
 		"note", note,
 	)
-	return c.submitAgentTurn(ctx, note, buildProposalRefinementPrompt(proposal, note), nil, true)
+	return c.submitAgentTurn(ctx, agentruntime.RequestProposalRefinement, note, buildProposalRefinementPrompt(proposal, note), nil, &proposal, true)
 }
 
 func (c *LocalController) ContinueActivePlan(ctx context.Context) ([]TranscriptEvent, error) {
@@ -57,7 +57,7 @@ func (c *LocalController) ContinueActivePlan(ctx context.Context) ([]TranscriptE
 	c.mu.Unlock()
 
 	logging.Trace("controller.continue_active_plan")
-	return c.submitAgentTurn(ctx, "", continuePlanPrompt, nil, false)
+	return c.submitAgentTurn(ctx, agentruntime.RequestContinuePlan, "", continuePlanPrompt, nil, nil, false)
 }
 
 func (c *LocalController) ContinueAfterCommand(ctx context.Context) ([]TranscriptEvent, error) {
@@ -73,14 +73,14 @@ func (c *LocalController) ContinueAfterCommand(ctx context.Context) ([]Transcrip
 
 	prompt := buildAutoContinuePrompt(c.task)
 	logging.Trace("controller.continue_after_command")
-	return c.submitAgentTurn(ctx, "", prompt, nil, false)
+	return c.submitAgentTurn(ctx, agentruntime.RequestContinueAfterCommand, "", prompt, nil, nil, false)
 }
 
-func (c *LocalController) submitAgentTurn(ctx context.Context, userPrompt string, agentPrompt string, refinement *ApprovalRequest, emitUserMessage bool) ([]TranscriptEvent, error) {
-	return c.submitAgentTurnWithInspectBudget(ctx, userPrompt, agentPrompt, refinement, emitUserMessage, 2)
+func (c *LocalController) submitAgentTurn(ctx context.Context, kind agentruntime.RequestKind, userPrompt string, agentPrompt string, refinement *ApprovalRequest, proposal *ProposalPayload, emitUserMessage bool) ([]TranscriptEvent, error) {
+	return c.submitAgentTurnWithInspectBudget(ctx, kind, userPrompt, agentPrompt, refinement, proposal, emitUserMessage, 2)
 }
 
-func (c *LocalController) submitAgentTurnWithInspectBudget(ctx context.Context, userPrompt string, agentPrompt string, refinement *ApprovalRequest, emitUserMessage bool, inspectBudget int) ([]TranscriptEvent, error) {
+func (c *LocalController) submitAgentTurnWithInspectBudget(ctx context.Context, kind agentruntime.RequestKind, userPrompt string, agentPrompt string, refinement *ApprovalRequest, proposal *ProposalPayload, emitUserMessage bool, inspectBudget int) ([]TranscriptEvent, error) {
 	if _, err := c.RefreshShellContext(ctx); err == nil {
 		c.refreshLocalHostContext()
 		c.refreshUserShellContext(ctx, false)
@@ -98,13 +98,17 @@ func (c *LocalController) submitAgentTurnWithInspectBudget(ctx context.Context, 
 		"has_refinement", refinement != nil,
 	)
 	req := agentruntime.Request{
-		Kind:          agentruntime.RequestUserTurn,
+		Kind:          kind,
 		Prompt:        agentPrompt,
 		UserPrompt:    userPrompt,
+		SessionName:   session.SessionName,
+		TaskID:        task.TaskID,
 		InspectBudget: inspectBudget,
 	}
+	if req.Kind == "" {
+		req.Kind = agentruntime.RequestUserTurn
+	}
 	if refinement != nil {
-		req.Kind = agentruntime.RequestApprovalRefinement
 		req.Approval = &agentruntime.ApprovalRequest{
 			ID:          refinement.ID,
 			Kind:        refinement.Kind,
@@ -114,6 +118,16 @@ func (c *LocalController) submitAgentTurnWithInspectBudget(ctx context.Context, 
 			Patch:       refinement.Patch,
 			PatchTarget: refinement.PatchTarget,
 			Risk:        refinement.Risk,
+		}
+	}
+	if proposal != nil {
+		req.Proposal = &agentruntime.Proposal{
+			Kind:        proposal.Kind,
+			Command:     proposal.Command,
+			Keys:        proposal.Keys,
+			Patch:       proposal.Patch,
+			PatchTarget: proposal.PatchTarget,
+			Description: proposal.Description,
 		}
 	}
 	newEvents, err := c.handleRuntimeRequest(ctx, req, emitUserMessage)

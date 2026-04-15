@@ -109,6 +109,12 @@ const (
 	CommandOwnershipExclusive      = agentruntime.CommandOwnershipExclusive
 	CommandOwnershipSharedObserver = agentruntime.CommandOwnershipSharedObserver
 	CommandOwnershipHandoff        = agentruntime.CommandOwnershipHandoff
+
+	RuntimeBuiltin        = agentruntime.RuntimeBuiltin
+	RuntimePi             = agentruntime.RuntimePi
+	RuntimeCodexSDK       = agentruntime.RuntimeCodexSDK
+	RuntimeCodexAppServer = agentruntime.RuntimeCodexAppServer
+	RuntimeAuto           = agentruntime.RuntimeAuto
 )
 
 type ApprovalDecision string

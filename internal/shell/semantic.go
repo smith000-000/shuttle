@@ -181,6 +181,9 @@ func (o *Observer) ensureLocalShellIntegration(ctx context.Context, paneID strin
 	if !observed.HasPromptContext || promptContext.PromptLine() == "" || observed.Location.Kind == ShellLocationRemote {
 		return false, nil
 	}
+	if observed.HasSemanticState && observed.SemanticState.Shell == shellName {
+		return false, nil
+	}
 
 	scriptPath, err := writeSemanticShellIntegrationScript(o.stateDir, pane, shellName)
 	if err != nil {

@@ -529,6 +529,7 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 		m.handoffReturnGraceUntil = time.Time{}
 		m.activeExecutionMissingSince = time.Time{}
 		m.activeExecution = nil
+		m.exitFullscreenKeysMode()
 		m.clearActiveKeysLease()
 		m.activeKeysLease.lastNoticeID = ""
 		m.dismissedAutoKeysFingerprint = ""
@@ -590,6 +591,7 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 	}
 	if execution.State != controller.CommandExecutionInteractiveFullscreen &&
 		execution.State != controller.CommandExecutionAwaitingInput {
+		m.exitFullscreenKeysMode()
 		m.clearActiveKeysLease()
 		m.activeKeysLease.lastNoticeID = ""
 		m.dismissedAutoKeysFingerprint = ""
@@ -600,6 +602,15 @@ func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 		m.interactiveCheckInCount = 0
 		m.interactiveCheckInPaused = false
 	}
+}
+
+func (m *Model) exitFullscreenKeysMode() {
+	if !m.sendingFullscreenKeys {
+		return
+	}
+	m.sendingFullscreenKeys = false
+	m.autoOpenedFullscreenKeys = false
+	m.setInput("")
 }
 
 func (m *Model) updatePendingContinueAfterCommand(events []controller.TranscriptEvent, autoContinue bool) {
@@ -1454,6 +1465,19 @@ func currentSettingsApprovalIndex(ctrl controller.Controller) int {
 	}
 	for index, entry := range settingsApprovalEntries() {
 		if entry.mode == mode {
+			return index
+		}
+	}
+	return 0
+}
+
+func (m Model) currentSettingsRuntimeIndex() int {
+	current := strings.TrimSpace(m.activeRuntimeType)
+	if current == "" {
+		current = provider.RuntimeBuiltin
+	}
+	for index, entry := range m.settingsRuntimes {
+		if strings.TrimSpace(entry.runtimeType) == current {
 			return index
 		}
 	}
