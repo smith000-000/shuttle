@@ -176,27 +176,40 @@ func (o *Observer) runAttachedForegroundMonitor(ctx context.Context, monitor *tr
 			return
 		}
 
-		if observed.HasSemanticState && observed.SemanticState.Event == semanticEventPrompt {
-			promptContext := promptReturnContext(promptReturnInputs{
+		if observed.HasSemanticState && observed.SemanticState.Event == semanticEventCommandDone {
+			evaluation, complete := evaluateSemanticCommandDone(promptReturnInputs{
+				Command:    command,
 				Observed:   observed,
 				Snapshot:   monitor.Snapshot(),
 				PromptHint: o.promptHint,
+				RawBody:    observed.Tail,
+				BodyCleaner: func(body string, _ PromptContext) string {
+					return stripEchoedForegroundCommand(strings.TrimSpace(body), currentPaneCommand)
+				},
+				FallbackBody: func(snapshot MonitorSnapshot) string {
+					return stripEchoedForegroundCommand(strings.TrimSpace(snapshot.LatestOutputTail), promptReturnFallbackStripCommand(currentPaneCommand, command))
+				},
+				SemanticSource: observed.SemanticSource,
 			})
-			if !captureHasCurrentPromptContext(captured, promptContext) {
-				select {
-				case <-ctx.Done():
-					monitor.finish(TrackedExecution{
-						Command:         command,
-						Cause:           CompletionCauseUnknown,
-						Confidence:      ConfidenceLow,
-						Captured:        monitorTail(lastCapture, ""),
-						DisplayCaptured: monitorTail(lastCapture, ""),
-					}, ctx.Err(), monitorStateFromError(ctx.Err()))
-					return
-				case <-time.After(50 * time.Millisecond):
-				}
+			if !complete {
 				continue
 			}
+			logging.Trace(
+				"shell.attach_foreground.complete_semantic_done",
+				"pane", paneID,
+				"command", command,
+				"state", evaluation.State,
+				"exit_code", evaluation.Result.ExitCode,
+				"pane_command", currentPaneCommand,
+			)
+			if strings.TrimSpace(evaluation.Result.DisplayCaptured) == "" {
+				evaluation.Result.DisplayCaptured = evaluation.Result.Captured
+			}
+			monitor.finish(evaluation.Result, nil, evaluation.State)
+			return
+		}
+
+		if observed.HasSemanticState && observed.SemanticState.Event == semanticEventPrompt {
 			evaluation, complete := evaluateSemanticPromptReturn(promptReturnInputs{
 				Command:    command,
 				Observed:   observed,

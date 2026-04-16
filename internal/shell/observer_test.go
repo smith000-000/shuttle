@@ -564,6 +564,166 @@ func TestRunTrackedMonitorDisplayTailPreservesANSIAndStripsTransportNoise(t *tes
 	}
 }
 
+func TestRunTrackedMonitorDisplayTailFallsBackToAlignedANSIWhenEscapedCaptureMissesMarkers(t *testing.T) {
+	before := strings.Join([]string{
+		"jsmith@linuxdesktop ~/source/repos/aiterm git:(p2-runtime-integration) % ls",
+		"AGENTS.md",
+		"BACKLOG.md",
+		"jsmith@linuxdesktop ~/source/repos/aiterm git:(p2-runtime-integration) %",
+	}, "\n")
+	after := strings.Join([]string{
+		before,
+		"jsmith@linuxdesktop ~/source/repos/aiterm git:(p2-runtime-integration) % . '/run/user/1000/shuttle/commands/b69vq.sh'",
+		"__SHUTTLE_B__:fb0ps",
+		"README.md",
+		"__SHUTTLE_E__:fb0ps:0",
+		"jsmith@linuxdesktop ~/source/repos/aiterm/completed git:(p2-runtime-integration) %",
+	}, "\n")
+	afterEscaped := strings.Join([]string{
+		before,
+		"45ile.sh'",
+		"\x1b[32mREADME.md\x1b[0m",
+		"jsmith@linuxdesktop ~/source/repos/aiterm/completed git:(p2-runtime-integration) %",
+	}, "\n")
+	client := &fakeSemanticPaneClient{
+		pane:            tmux.Pane{ID: "%0", CurrentCommand: "zsh", TTY: "/dev/pts/26"},
+		captures:        []string{after},
+		escapedCaptures: []string{afterEscaped, afterEscaped},
+	}
+	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
+	monitor := newTrackedCommandMonitor("fb0ps", "ls")
+	markers := protocol.Markers{
+		CommandID: "fb0ps",
+		BeginLine: "__SHUTTLE_B__:fb0ps",
+		EndPrefix: "__SHUTTLE_E__:fb0ps:",
+	}
+
+	observer.runTrackedMonitor(context.Background(), monitor, "%0", "ls", ". '/run/user/1000/shuttle/commands/b69vq.sh'", 250*time.Millisecond, before, before, markers, func() {})
+
+	result, err := monitor.Wait()
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if result.DisplayCaptured != "\x1b[32mREADME.md\x1b[0m" {
+		t.Fatalf("expected aligned ANSI display capture, got %q", result.DisplayCaptured)
+	}
+	if strings.Contains(result.DisplayCaptured, "45ile.sh'") || strings.Contains(result.DisplayCaptured, "b69vq.sh") || strings.Contains(result.DisplayCaptured, "git:(p2-runtime-integration) %") {
+		t.Fatalf("expected display capture to exclude escaped fallback noise, got %q", result.DisplayCaptured)
+	}
+
+	sawANSITail := false
+	for snapshot := range monitor.Updates() {
+		if strings.TrimSpace(snapshot.LatestDisplayTail) == "" {
+			continue
+		}
+		if strings.Contains(snapshot.LatestDisplayTail, "45ile.sh'") || strings.Contains(snapshot.LatestDisplayTail, "b69vq.sh") || strings.Contains(snapshot.LatestDisplayTail, "git:(p2-runtime-integration) %") {
+			t.Fatalf("expected live display tail to exclude escaped fallback noise, got %q", snapshot.LatestDisplayTail)
+		}
+		if snapshot.LatestDisplayTail == "\x1b[32mREADME.md\x1b[0m" {
+			sawANSITail = true
+		}
+	}
+	if !sawANSITail {
+		t.Fatal("expected live display tail to preserve aligned ANSI output")
+	}
+}
+
+func TestRunTrackedMonitorDisplayTailDropsPromptOnlyEscapedFallbackNoise(t *testing.T) {
+	before := "jsmith@linuxdesktop ~/source/repos %"
+	after := strings.Join([]string{
+		before,
+		"jsmith@linuxdesktop ~/source/repos % . '/run/user/1000/shuttle/commands/k4m1h.sh'",
+		"__SHUTTLE_B__:cmd-1",
+		"__SHUTTLE_E__:cmd-1:0",
+		"jsmith@linuxdesktop ~/source/repos/foo %",
+	}, "\n")
+	afterEscaped := strings.Join([]string{
+		before,
+		"k4m1h.sh'",
+		"jsmith@linuxdesktop ~/source/repos/foo %",
+	}, "\n")
+	client := &fakeSemanticPaneClient{
+		pane:            tmux.Pane{ID: "%0", CurrentCommand: "zsh", TTY: "/dev/pts/27"},
+		captures:        []string{after},
+		escapedCaptures: []string{afterEscaped, afterEscaped},
+	}
+	observer := (&Observer{client: client}).WithStateDir(t.TempDir())
+	monitor := newTrackedCommandMonitor("cmd-1", "cd foo")
+	markers := protocol.Markers{
+		CommandID: "cmd-1",
+		BeginLine: "__SHUTTLE_B__:cmd-1",
+		EndPrefix: "__SHUTTLE_E__:cmd-1:",
+	}
+
+	observer.runTrackedMonitor(context.Background(), monitor, "%0", "cd foo", ". '/run/user/1000/shuttle/commands/k4m1h.sh'", 250*time.Millisecond, before, before, markers, func() {})
+
+	result, err := monitor.Wait()
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if result.Captured != "" {
+		t.Fatalf("expected empty plain capture for prompt-only command, got %q", result.Captured)
+	}
+	if result.DisplayCaptured != "" {
+		t.Fatalf("expected empty display capture for prompt-only command, got %q", result.DisplayCaptured)
+	}
+
+	for snapshot := range monitor.Updates() {
+		if strings.TrimSpace(snapshot.LatestDisplayTail) == "" {
+			continue
+		}
+		t.Fatalf("expected prompt-only escaped fallback noise to be dropped, got %q", snapshot.LatestDisplayTail)
+	}
+}
+
+func TestRunTrackedMonitorCompletesOnSemanticCommandDoneWithoutPrompt(t *testing.T) {
+	before := "jsmith@linuxdesktop ~/source/repos/aiterm %"
+	after := strings.Join([]string{
+		before,
+		"jsmith@linuxdesktop ~/source/repos/aiterm % . '/run/user/1000/shuttle/commands/cmd-1.sh'",
+		"__SHUTTLE_B__:cmd-1",
+		"README.md",
+	}, "\n")
+	afterEscaped := strings.Join([]string{
+		before,
+		"\x1b]133;B\x1b\\",
+		"\x1b]133;C\x1b\\",
+		"\x1b[32mREADME.md\x1b[0m",
+		"\x1b]133;D;0\x1b\\",
+	}, "\n")
+	client := &fakeSemanticPaneClient{
+		pane:            tmux.Pane{ID: "%0", CurrentCommand: "zsh", TTY: "/dev/pts/28"},
+		captures:        []string{after},
+		escapedCaptures: []string{afterEscaped, afterEscaped},
+	}
+	observer := &Observer{client: client}
+	monitor := newTrackedCommandMonitor("cmd-1", "ls")
+	markers := protocol.Markers{
+		CommandID: "cmd-1",
+		BeginLine: "__SHUTTLE_B__:cmd-1",
+		EndPrefix: "__SHUTTLE_E__:cmd-1:",
+	}
+
+	observer.runTrackedMonitor(context.Background(), monitor, "%0", "ls", ". '/run/user/1000/shuttle/commands/cmd-1.sh'", 250*time.Millisecond, before, before, markers, func() {})
+
+	result, err := monitor.Wait()
+	if err != nil {
+		t.Fatalf("Wait() error = %v", err)
+	}
+	if result.Cause != CompletionCauseSemanticLifecycle {
+		t.Fatalf("expected semantic lifecycle cause, got %q", result.Cause)
+	}
+	if result.ExitCode != 0 || result.State != MonitorStateCompleted {
+		t.Fatalf("expected semantic completion with exit code 0, got %#v", result)
+	}
+	if result.Captured != "README.md" {
+		t.Fatalf("expected semantic completion to preserve command output, got %q", result.Captured)
+	}
+	if result.DisplayCaptured != "\x1b[32mREADME.md\x1b[0m" {
+		t.Fatalf("expected aligned ANSI display output, got %q", result.DisplayCaptured)
+	}
+}
+
 func TestAttachForegroundCommandAttachesToManualForegroundProcess(t *testing.T) {
 	client := &fakeSemanticPaneClient{
 		pane: tmux.Pane{ID: "%0", CurrentCommand: "sleep", TTY: "/dev/pts/23"},

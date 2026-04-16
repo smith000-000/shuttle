@@ -2,6 +2,46 @@ package shell
 
 import "testing"
 
+func TestEvaluateSemanticCommandDoneUsesExitCodeAndNoPromptContextRequirement(t *testing.T) {
+	exitCode := 17
+	evaluation, complete := evaluateSemanticCommandDone(promptReturnInputs{
+		Command: "sleep 1",
+		Observed: ObservedShellState{
+			HasSemanticState: true,
+			SemanticState: semanticShellState{
+				Event:    semanticEventCommandDone,
+				ExitCode: &exitCode,
+			},
+			SemanticSource: "osc_stream",
+		},
+		Snapshot: MonitorSnapshot{
+			LatestOutputTail: "alpha\nbeta",
+		},
+		RawBody:        "alpha\nbeta",
+		BodyCleaner:    func(body string, _ PromptContext) string { return body },
+		FallbackBody:   func(snapshot MonitorSnapshot) string { return snapshot.LatestOutputTail },
+		SemanticSource: "osc_stream",
+	})
+	if !complete {
+		t.Fatal("expected semantic command-done to complete")
+	}
+	if evaluation.State != MonitorStateFailed {
+		t.Fatalf("expected failed state from exit code 17, got %q", evaluation.State)
+	}
+	if evaluation.Result.Cause != CompletionCauseSemanticLifecycle {
+		t.Fatalf("expected semantic lifecycle cause, got %q", evaluation.Result.Cause)
+	}
+	if evaluation.Result.ExitCode != 17 {
+		t.Fatalf("expected exit code 17, got %d", evaluation.Result.ExitCode)
+	}
+	if evaluation.Result.Captured != "alpha\nbeta" {
+		t.Fatalf("expected captured output to be preserved, got %q", evaluation.Result.Captured)
+	}
+	if evaluation.Result.ShellContext.PromptLine() != "" {
+		t.Fatalf("expected no synthesized prompt context, got %#v", evaluation.Result.ShellContext)
+	}
+}
+
 func TestEvaluateSemanticPromptReturnUsesFallbackTail(t *testing.T) {
 	exitCode := 0
 	evaluation, complete := evaluateSemanticPromptReturn(promptReturnInputs{

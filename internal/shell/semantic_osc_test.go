@@ -26,6 +26,23 @@ func TestParseSemanticShellStateFromOSCCapture(t *testing.T) {
 	}
 }
 
+func TestParseSemanticShellStateFromOSCCaptureTracksCommandDoneBeforePrompt(t *testing.T) {
+	raw := "\x1b]133;B\x07run\n\x1b]7;file://workstation/workspace/project\x07\x1b]133;D;17\x07"
+	state, ok := parseSemanticShellStateFromOSCCapture(raw)
+	if !ok {
+		t.Fatal("expected osc semantic state to parse")
+	}
+	if state.Event != semanticEventCommandDone {
+		t.Fatalf("expected command-done event, got %#v", state)
+	}
+	if state.ExitCode == nil || *state.ExitCode != 17 {
+		t.Fatalf("expected exit code 17, got %#v", state.ExitCode)
+	}
+	if state.Directory != "/workspace/project" {
+		t.Fatalf("unexpected directory %#v", state)
+	}
+}
+
 func TestSemanticOSCStreamReducerHandlesIncrementalChunks(t *testing.T) {
 	var reducer semanticOSCStreamReducer
 
@@ -51,14 +68,14 @@ func TestSemanticOSCStreamReducerHandlesIncrementalChunks(t *testing.T) {
 	if !ok {
 		t.Fatal("expected state after cwd update")
 	}
-	if state.Event != semanticEventCommand {
-		t.Fatalf("expected command event before prompt marker, got %#v", state)
+	if state.Event != semanticEventCommandDone {
+		t.Fatalf("expected command-done event before prompt marker, got %#v", state)
 	}
 	if state.Directory != "/tmp/stream-demo" {
 		t.Fatalf("expected updated directory, got %#v", state)
 	}
-	if state.ExitCode != nil {
-		t.Fatalf("expected exit code to remain pending until prompt marker, got %#v", state.ExitCode)
+	if state.ExitCode == nil || *state.ExitCode != 17 {
+		t.Fatalf("expected exit code 17 on command-done state, got %#v", state.ExitCode)
 	}
 
 	reducer.Feed([]byte("\x1b]133;A\x1b\\"), testTime(4))

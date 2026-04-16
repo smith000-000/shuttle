@@ -225,10 +225,9 @@ func pipePaneGenerationID(streamPath string) string {
 }
 
 type semanticOSCStreamReducer struct {
-	parser      oscPayloadStreamParser
-	state       semanticShellState
-	pendingExit *int
-	hasState    bool
+	parser   oscPayloadStreamParser
+	state    semanticShellState
+	hasState bool
 }
 
 func (r *semanticOSCStreamReducer) Feed(chunk []byte, observedAt time.Time) {
@@ -266,32 +265,11 @@ func (r *semanticOSCStreamReducer) applyPayload(payload string, observedAt time.
 }
 
 func (r *semanticOSCStreamReducer) applyOSC133(payload string, observedAt time.Time) {
-	switch {
-	case payload == "A":
-		r.state.Event = semanticEventPrompt
-		if r.pendingExit != nil {
-			exitCode := *r.pendingExit
-			r.state.ExitCode = &exitCode
-			r.pendingExit = nil
-		}
-		r.state.UpdatedAt = observedAt
-		r.hasState = true
-	case payload == "B" || payload == "C":
-		r.state.Event = semanticEventCommand
-		r.state.ExitCode = nil
-		r.pendingExit = nil
-		r.state.UpdatedAt = observedAt
-		r.hasState = true
-	case payload == "D":
-		r.pendingExit = nil
-	case strings.HasPrefix(payload, "D;"):
-		exitCode, ok := parseOSCExit(strings.TrimPrefix(payload, "D;"))
-		if !ok {
-			r.pendingExit = nil
-			return
-		}
-		r.pendingExit = &exitCode
+	if !applyOSC133SemanticState(&r.state, payload) {
+		return
 	}
+	r.state.UpdatedAt = observedAt
+	r.hasState = true
 }
 
 type oscPayloadParserState uint8

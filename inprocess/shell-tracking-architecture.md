@@ -84,7 +84,7 @@ Current transition rule:
 
 Current implementation note:
 - monitor loops now build an `ObservedShellState` snapshot that bundles prompt parse, pane metadata, semantic state, remembered transition kind, and inferred shell location
-- tracked-command and attached-foreground monitors now share the same prompt-return evaluator for semantic completion, inferred prompt-return completion, and tail normalization; the launch-mode-specific code only owns start detection, attach gating, and capture windowing
+- tracked-command and attached-foreground monitors now share the same semantic/prompt completion helpers for semantic command-finish settlement, semantic prompt settlement, inferred prompt-return completion, and tail normalization; the launch-mode-specific code only owns start detection, attach gating, and capture windowing
 - display-oriented transcript/output surfaces now use ANSI-preserving capture while command parsing, prompt reconciliation, and execution-state inference continue to use sanitized plain-text capture
 - `ShellLocation` now also carries cwd source/confidence metadata so the controller can distinguish prompt-derived directories, probe-confirmed directories, and low-confidence carried-forward cwd
 - context-transition polling now routes through a dedicated transition tracker state machine with states such as `submitted`, `candidate_prompt_seen`, `awaiting_interactive_input`, and `probe_verifying`
@@ -119,6 +119,7 @@ State-file fallback remains last priority and is now intentionally stricter than
 Important detail:
 - `pipe-pane -O` produces a cumulative stream
 - Shuttle reduces that stream incrementally instead of rescanning the full output buffer snapshot-style
+- `OSC 133;C` is treated as command start and `OSC 133;D` / `OSC 133;D;<exit>` are treated as command finish; `OSC 133;A` / `OSC 133;B` remain prompt-boundary markers instead of being overloaded as the only completion signal
 
 The stream collector is generation-scoped:
 - each observer instance gets its own runtime file

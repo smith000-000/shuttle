@@ -20,6 +20,41 @@ type promptReturnInputs struct {
 	SemanticSource string
 }
 
+func evaluateSemanticCommandDone(input promptReturnInputs) (promptReturnEvaluation, bool) {
+	if !input.Observed.HasSemanticState || input.Observed.SemanticState.Event != semanticEventCommandDone {
+		return promptReturnEvaluation{}, false
+	}
+
+	cleanBody := cleanPromptReturnBody(input.RawBody, PromptContext{}, input.BodyCleaner)
+	if cleanBody == "" && input.FallbackBody != nil {
+		cleanBody = strings.TrimSpace(input.FallbackBody(input.Snapshot))
+	}
+
+	exitCode := 0
+	if input.Observed.SemanticState.ExitCode != nil {
+		exitCode = *input.Observed.SemanticState.ExitCode
+	}
+
+	result := TrackedExecution{
+		CommandID:      input.CommandID,
+		Command:        input.Command,
+		Cause:          CompletionCauseSemanticLifecycle,
+		Confidence:     ConfidenceStrong,
+		SemanticShell:  true,
+		SemanticSource: input.SemanticSource,
+		ExitCode:       exitCode,
+		Captured:       cleanBody,
+	}
+	if input.Observed.HasPromptContext {
+		result.ShellContext = input.Observed.PromptContext
+	}
+
+	return promptReturnEvaluation{
+		Result: result,
+		State:  monitorStateFromExitCode(exitCode),
+	}, true
+}
+
 func evaluateSemanticPromptReturn(input promptReturnInputs) (promptReturnEvaluation, bool) {
 	if !input.Observed.HasSemanticState || input.Observed.SemanticState.Event != semanticEventPrompt {
 		return promptReturnEvaluation{}, false

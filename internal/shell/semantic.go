@@ -20,6 +20,7 @@ const (
 	semanticEventUnknown      semanticShellEvent = ""
 	semanticEventPrompt       semanticShellEvent = "prompt"
 	semanticEventCommand      semanticShellEvent = "command"
+	semanticEventCommandDone  semanticShellEvent = "command_done"
 	semanticShellStateVersion                    = 1
 )
 
@@ -123,6 +124,7 @@ func parseSemanticShellState(raw string) (semanticShellState, bool) {
 		if state.ExitCode != nil {
 			return semanticShellState{}, false
 		}
+	case semanticEventCommandDone:
 	default:
 		return semanticShellState{}, false
 	}

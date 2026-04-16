@@ -101,6 +101,7 @@ What is still not done:
 - transcript and UI polish still need cleanup now that the shell/runtime model has changed substantially
 - the agent still needs tighter guardrails around when it should propose raw keys versus when it should simply tell the user to take control
 - semantic shell integration is only partially implemented; local shells now have a first-pass semantic shim, but Shuttle still needs broader raw-marker consumption and subshell/bootstrap support
+- for ordinary local-shell commands, semantic `OSC 133` finish markers now settle completion before prompt/tail heuristics; transport/context transitions still require the explicit probe path because they change the shell identity rather than just ending one command
 - `internal/controller/controller.go` and `internal/tui/model.go` are now large enough that further point fixes should come with a decomposition backlog:
   - controller: execution lifecycle/state machine, agent-turn normalization, plan management, and tracked-shell ownership helpers
   - TUI: composer/input routing, transcript rendering, proposal/approval state, and handoff/fullscreen control
@@ -145,6 +146,7 @@ Shuttle should not jump straight to a proprietary bootstrap model before impleme
 
 Current semantic-shell learning:
 - local `bash` / `zsh` shims now emit `OSC 133` / `OSC 7`
+- `OSC 133;C` is the authoritative semantic start marker and `OSC 133;D` is the authoritative semantic finish marker when those bytes survive through tmux capture
 - tmux `capture-pane -e` is still useful, but only as an opportunistic snapshot source
 - a live tmux spike proved `pipe-pane -O` preserves raw `OSC 133` / `OSC 7` bytes well enough to support a real semantic stream source
 - the remaining blocker is not transport preservation; it is stream reduction

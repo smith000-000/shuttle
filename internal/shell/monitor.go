@@ -14,6 +14,7 @@ const (
 	CompletionCauseUnknown           CompletionCause = "unknown"
 	CompletionCauseEndMarker         CompletionCause = "end_marker"
 	CompletionCauseEndMarkerInferred CompletionCause = "end_marker_inferred"
+	CompletionCauseSemanticLifecycle CompletionCause = "semantic_lifecycle"
 	CompletionCausePromptReturn      CompletionCause = "prompt_return"
 	CompletionCauseContextTransition CompletionCause = "context_transition"
 )

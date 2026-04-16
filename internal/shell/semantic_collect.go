@@ -36,6 +36,7 @@ func (c oscCaptureSemanticCollector) Collect(ctx context.Context, paneID string,
 	if !ok {
 		return semanticObservation{}, false
 	}
+	state.UpdatedAt = semanticStateNow()
 	return semanticObservation{State: state, Source: semanticSourceOSCCapture}, true
 }
 
@@ -52,7 +53,7 @@ func (c stateFileSemanticCollector) Collect(_ context.Context, _ string, paneTTY
 	if currentShell != "" && state.Shell != "" && currentShell != state.Shell {
 		return semanticObservation{}, false
 	}
-	if state.Event == semanticEventCommand && semanticStateNow().Sub(state.UpdatedAt) > semanticStateCommandStaleWindow {
+	if (state.Event == semanticEventCommand || state.Event == semanticEventCommandDone) && semanticStateNow().Sub(state.UpdatedAt) > semanticStateCommandStaleWindow {
 		return semanticObservation{}, false
 	}
 	return semanticObservation{State: state, Source: semanticSourceState}, true

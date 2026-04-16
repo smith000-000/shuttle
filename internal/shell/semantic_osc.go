@@ -2,8 +2,7 @@ package shell
 
 import "strings"
 
-const (
-)
+const ()
 
 func parseSemanticShellStateFromOSCCapture(raw string) (semanticShellState, bool) {
 	if strings.TrimSpace(raw) == "" {
@@ -15,13 +14,8 @@ func parseSemanticShellStateFromOSCCapture(raw string) (semanticShellState, bool
 	for _, payload := range extractOSCPayloads(raw) {
 		switch {
 		case strings.HasPrefix(payload, "133;"):
-			event, exitCode, ok := parseOSC133Event(strings.TrimPrefix(payload, "133;"))
-			if !ok {
+			if !applyOSC133SemanticState(&state, strings.TrimPrefix(payload, "133;")) {
 				continue
-			}
-			state.Event = event
-			if exitCode != nil {
-				state.ExitCode = exitCode
 			}
 			found = true
 		case strings.HasPrefix(payload, "7;file://"):
@@ -37,6 +31,35 @@ func parseSemanticShellStateFromOSCCapture(raw string) (semanticShellState, bool
 		return semanticShellState{}, false
 	}
 	return state, true
+}
+
+func applyOSC133SemanticState(state *semanticShellState, payload string) bool {
+	switch {
+	case payload == "A":
+		exitCode := cloneExitCode(state.ExitCode)
+		state.Event = semanticEventPrompt
+		state.ExitCode = exitCode
+		return true
+	case payload == "B" || payload == "C":
+		state.Event = semanticEventCommand
+		state.ExitCode = nil
+		return true
+	case payload == "D":
+		state.Event = semanticEventCommandDone
+		state.ExitCode = nil
+		return true
+	case strings.HasPrefix(payload, "D;"):
+		exitCode, ok := parseOSCExit(strings.TrimPrefix(payload, "D;"))
+		state.Event = semanticEventCommandDone
+		if !ok {
+			state.ExitCode = nil
+			return true
+		}
+		state.ExitCode = &exitCode
+		return true
+	default:
+		return false
+	}
 }
 
 func extractOSCPayloads(raw string) []string {
@@ -63,22 +86,11 @@ func extractOSCPayloads(raw string) []string {
 }
 
 func parseOSC133Event(payload string) (semanticShellEvent, *int, bool) {
-	switch {
-	case payload == "A":
-		return semanticEventPrompt, nil, true
-	case payload == "B" || payload == "C":
-		return semanticEventCommand, nil, true
-	case payload == "D":
-		return semanticEventPrompt, nil, true
-	case strings.HasPrefix(payload, "D;"):
-		parsed, ok := parseOSCExit(strings.TrimPrefix(payload, "D;"))
-		if !ok {
-			return semanticEventPrompt, nil, true
-		}
-		return semanticEventPrompt, &parsed, true
-	default:
+	var state semanticShellState
+	if !applyOSC133SemanticState(&state, payload) {
 		return semanticEventUnknown, nil, false
 	}
+	return state.Event, cloneExitCode(state.ExitCode), true
 }
 
 func parseOSCExit(value string) (int, bool) {
@@ -111,4 +123,12 @@ func parseOSC7Directory(payload string) string {
 		return ""
 	}
 	return value[slash:]
+}
+
+func cloneExitCode(exitCode *int) *int {
+	if exitCode == nil {
+		return nil
+	}
+	value := *exitCode
+	return &value
 }

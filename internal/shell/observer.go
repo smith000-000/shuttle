@@ -313,11 +313,13 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 		}
 		displayDeltaTail := deltaTail
 		if displayCaptured, displayErr := o.capturePaneDisplay(ctx, paneID, -trackedCaptureLines); displayErr == nil {
-			displayDeltaTail = monitorDisplayTail(capturePaneDelta(beforeDisplayCapture, displayCaptured), transportCommand)
+			displayCandidate := monitorDisplayTail(capturePaneDelta(beforeDisplayCapture, displayCaptured), transportCommand)
 			if observed.HasPromptContext {
-				displayDeltaTail = stripTrailingPromptLine(displayDeltaTail, observed.PromptContext)
+				displayCandidate = stripTrailingPromptLine(displayCandidate, observed.PromptContext)
 			}
-			if strings.TrimSpace(displayDeltaTail) == "" {
+			if aligned, ok := alignDisplayBodyToPlain(displayCandidate, deltaTail); ok {
+				displayDeltaTail = aligned
+			} else if strings.TrimSpace(deltaTail) != "" {
 				displayDeltaTail = deltaTail
 			}
 		}
@@ -390,6 +392,74 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 			}, fmt.Errorf("parse tracked command result: %w", err), MonitorStateLost)
 			return
 		}
+		if complete {
+			cleanBody := sanitizeCapturedBody(result.Body)
+			cleanBody = stripEchoedCommand(cleanBody, transportCommand)
+			shellContext, _ := ParsePromptContextFromCapture(rawCaptured)
+			displayBody := o.captureCommandDisplayResult(ctx, paneID, beforeDisplayCapture, transportCommand, markers, shellContext)
+			if aligned, ok := alignDisplayBodyToPlain(displayBody, cleanBody); ok {
+				displayBody = aligned
+			} else {
+				displayBody = cleanBody
+			}
+			logging.Trace(
+				"shell.tracked.complete",
+				"pane", paneID,
+				"command", command,
+				"command_id", result.CommandID,
+				"exit_code", result.ExitCode,
+				"captured_preview", logging.Preview(cleanBody, 2000),
+				"captured_len", len(cleanBody),
+				"prompt", shellContext.PromptLine(),
+			)
+			monitor.finish(TrackedExecution{
+				CommandID:       result.CommandID,
+				Command:         command,
+				Cause:           cause,
+				Confidence:      confidence,
+				ExitCode:        result.ExitCode,
+				Captured:        cleanBody,
+				DisplayCaptured: displayBody,
+				ShellContext:    shellContext,
+			}, nil, MonitorStateCompleted)
+			return
+		}
+
+		if started && observed.HasSemanticState && observed.SemanticState.Event == semanticEventCommandDone && !observed.SemanticState.UpdatedAt.Before(commandSentAt) {
+			evaluation, complete := evaluateSemanticCommandDone(promptReturnInputs{
+				CommandID:  markers.CommandID,
+				Command:    command,
+				Observed:   observed,
+				Snapshot:   monitor.Snapshot(),
+				PromptHint: o.promptHint,
+				RawBody:    capturePaneDelta(beforeCapture, rawCaptured),
+				BodyCleaner: func(body string, _ PromptContext) string {
+					return stripEchoedCommand(sanitizeCapturedBody(body), transportCommand)
+				},
+				FallbackBody: func(snapshot MonitorSnapshot) string {
+					return snapshot.LatestOutputTail
+				},
+				SemanticSource: observed.SemanticSource,
+			})
+			if complete {
+				if aligned, ok := alignDisplayBodyToPlain(displayDeltaTail, evaluation.Result.Captured); ok {
+					evaluation.Result.DisplayCaptured = aligned
+				} else {
+					evaluation.Result.DisplayCaptured = evaluation.Result.Captured
+				}
+				logging.Trace(
+					"shell.tracked.semantic_command_done",
+					"pane", paneID,
+					"command", command,
+					"command_id", markers.CommandID,
+					"exit_code", evaluation.Result.ExitCode,
+					"capture_preview", logging.Preview(evaluation.Result.Captured, 1200),
+				)
+				monitor.finish(evaluation.Result, nil, evaluation.State)
+				return
+			}
+		}
+
 		if !complete {
 			result, complete, err = inferTrackedCommandResultFromEndMarker(rawCaptured, beforeCapture, transportCommand, markers)
 			if complete {
@@ -422,7 +492,9 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 			cleanBody = stripEchoedCommand(cleanBody, transportCommand)
 			shellContext, _ := ParsePromptContextFromCapture(rawCaptured)
 			displayBody := o.captureCommandDisplayResult(ctx, paneID, beforeDisplayCapture, transportCommand, markers, shellContext)
-			if displayBody == "" {
+			if aligned, ok := alignDisplayBodyToPlain(displayBody, cleanBody); ok {
+				displayBody = aligned
+			} else {
 				displayBody = cleanBody
 			}
 			logging.Trace(
@@ -1767,6 +1839,73 @@ func stripTrailingPromptLine(body string, promptContext PromptContext) string {
 
 func TrimTrailingPromptLine(body string, promptContext PromptContext) string {
 	return stripTrailingPromptLine(body, promptContext)
+}
+
+func alignDisplayBodyToPlain(displayBody string, plainBody string) (string, bool) {
+	plainLines := nonEmptyPlainLines(plainBody)
+	if len(plainLines) == 0 {
+		return "", true
+	}
+
+	displayLines, strippedDisplayLines := nonEmptyDisplayLines(displayBody)
+	if len(displayLines) == 0 || len(displayLines) != len(strippedDisplayLines) {
+		return "", false
+	}
+
+	if displayWindowMatchesPlain(strippedDisplayLines, 0, plainLines) && len(displayLines) == len(plainLines) {
+		return strings.TrimSpace(strings.Join(displayLines, "\n")), true
+	}
+
+	for start := len(displayLines) - len(plainLines); start >= 0; start-- {
+		if displayWindowMatchesPlain(strippedDisplayLines, start, plainLines) {
+			return strings.TrimSpace(strings.Join(displayLines[start:start+len(plainLines)], "\n")), true
+		}
+	}
+
+	return "", false
+}
+
+func nonEmptyPlainLines(body string) []string {
+	rawLines := splitLines(body)
+	lines := make([]string, 0, len(rawLines))
+	for _, rawLine := range rawLines {
+		if strings.TrimSpace(rawLine) == "" {
+			continue
+		}
+		lines = append(lines, normalizeDisplayAlignmentLine(rawLine))
+	}
+	return lines
+}
+
+func nonEmptyDisplayLines(body string) ([]string, []string) {
+	rawLines := splitLines(body)
+	displayLines := make([]string, 0, len(rawLines))
+	strippedLines := make([]string, 0, len(rawLines))
+	for _, rawLine := range rawLines {
+		plainLine := xansi.Strip(rawLine)
+		if strings.TrimSpace(plainLine) == "" {
+			continue
+		}
+		displayLines = append(displayLines, rawLine)
+		strippedLines = append(strippedLines, normalizeDisplayAlignmentLine(plainLine))
+	}
+	return displayLines, strippedLines
+}
+
+func displayWindowMatchesPlain(displayLines []string, start int, plainLines []string) bool {
+	if start < 0 || start+len(plainLines) > len(displayLines) {
+		return false
+	}
+	for index, plainLine := range plainLines {
+		if displayLines[start+index] != plainLine {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeDisplayAlignmentLine(line string) string {
+	return strings.TrimRight(strings.ReplaceAll(line, "\r", ""), " \t")
 }
 
 func (o *Observer) captureCommandDisplayDelta(ctx context.Context, paneID string, beforeDisplay string, command string, promptContext PromptContext) string {
