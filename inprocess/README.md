@@ -31,7 +31,8 @@ What is working now:
 - first-class shell-context inspection support so the model can refresh authoritative user@host/cwd state instead of guessing from stale prompt text
 - inspect-context and provider turn context now include cwd source/confidence metadata so prompt-derived remote directories like `~` are treated as approximate while probe-confirmed directories are treated as authoritative
 - ordinary agent turns refresh tracked-shell identity and manual shell history without blindly reusing whatever old scrollback is still visible in the top pane as fresh command output
-- Shuttle now preserves ANSI-colored command output for display while still using sanitized plain-text captures for controller logic and prompt reconciliation
+- Shuttle now preserves ANSI-colored command output for display in most tracked command paths while still using sanitized plain-text captures for controller logic and prompt reconciliation
+- Known tracking limitation: directory-changing command output (for example `cd`) can still lose ANSI styling in some transitions and falls back toward plain output after the command settles
 - tracked command capture now keeps cwd/prompt reconciliation stable across directory changes by joining wrapped pane lines, bounding result extraction to Shuttle markers when available, and stripping leaked Shuttle shell-plumbing fragments from transcript output
 - native unified-diff patch proposals with explicit apply/reject/ask-agent flow
 - controller-synthesized patch proposals for common single-file text edits, so the model can express insert/replace intent without hand-authoring unified hunks
@@ -77,6 +78,11 @@ What is still in progress:
 - stronger bounded-command guidance for event-stream listeners such as `xinput test`, `tail -f`, and similar monitors
 - multi-card or parallel execution UI
 - package-manager distribution and other post-archive release UX
+
+Tracking notes for current work-in-progress:
+- display capture was reworked to remove ANSI/plain alignment coupling from command completion; display tails now use dedicated ANSI-preserving capture + residual transport-noise filtering
+- the remaining `cd`/directory-change color loss appears most commonly when terminal output lands on the same capture boundary as a wrapped transport command echo
+- this behavior is intentionally tracked in GitHub while we continue to tighten start/end marker-driven completion and prompt-return fallback paths
 
 ## Requirements
 

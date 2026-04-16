@@ -86,6 +86,8 @@ Current implementation note:
 - monitor loops now build an `ObservedShellState` snapshot that bundles prompt parse, pane metadata, semantic state, remembered transition kind, and inferred shell location
 - tracked-command and attached-foreground monitors now share the same semantic/prompt completion helpers for semantic command-finish settlement, semantic prompt settlement, inferred prompt-return completion, and tail normalization; the launch-mode-specific code only owns start detection, attach gating, and capture windowing
 - display-oriented transcript/output surfaces now use ANSI-preserving capture while command parsing, prompt reconciliation, and execution-state inference continue to use sanitized plain-text capture
+- the current implementation no longer uses ANSI/plain alignment as a completion decision path; display tails are now segmented independently from control tails, and transport-noise filtering is applied in the display path after `monitorDisplayTail`
+- this change was introduced in `4fbe9ca` and is currently validated by unit tests for prompt-only/noise and ANSI-preserving tails
 - `ShellLocation` now also carries cwd source/confidence metadata so the controller can distinguish prompt-derived directories, probe-confirmed directories, and low-confidence carried-forward cwd
 - context-transition polling now routes through a dedicated transition tracker state machine with states such as `submitted`, `candidate_prompt_seen`, `awaiting_interactive_input`, and `probe_verifying`
 - this is intended as an internal cleanup seam so later remote-shell reliability work can replace scattered boolean checks without redesigning the shell product model again
@@ -94,6 +96,7 @@ Current implementation note:
   - the tracked pane respawned and the resolved pane is back in a shell
   - or the tail clearly shows a disconnect/unwind sequence such as `logout` or `Connection to ... closed.`
 - that fallback exists because tmux respawn and remote transport teardown can return Shuttle to a healthy shell without always leaving a fresh parseable trailing prompt in the capture window
+- current gap: directory-changing commands (for example `cd`) can still collapse ANSI display tails to plain output after completion on some terminals, so GitHub tracking remains open for this residual behavior
 
 ## 2.3 Semantic Collectors
 
