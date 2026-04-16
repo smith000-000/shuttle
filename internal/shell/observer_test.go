@@ -676,6 +676,19 @@ func TestRunTrackedMonitorDisplayTailDropsPromptOnlyEscapedFallbackNoise(t *test
 	}
 }
 
+func TestDisplayTailStripsShuttleEchoResidual(t *testing.T) {
+	body := strings.Join([]string{
+		"45ile.sh'",
+		"\x1b[32mREADME.md\x1b[0m",
+	}, "\n")
+	command := ". '/run/user/1000/shuttle/commands/b69vq.sh'"
+
+	got := monitorDisplayTail(body, command)
+	if strings.TrimSpace(got) != "\x1b[32mREADME.md\x1b[0m" {
+		t.Fatalf("expected residual line to be dropped, got %q", got)
+	}
+}
+
 func TestRunTrackedMonitorCompletesOnSemanticCommandDoneWithoutPrompt(t *testing.T) {
 	before := "jsmith@linuxdesktop ~/source/repos/aiterm %"
 	after := strings.Join([]string{

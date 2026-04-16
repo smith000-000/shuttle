@@ -224,6 +224,7 @@ func monitorTail(body string, command string) string {
 func monitorDisplayTail(body string, command string) string {
 	displayBody := sanitizeDisplayBody(body)
 	displayBody = stripEchoedCommand(displayBody, command)
+	displayBody = stripDisplayCommandEchoResidualLines(displayBody, command)
 	if displayBody == "" {
 		return ""
 	}

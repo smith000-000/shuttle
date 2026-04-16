@@ -311,18 +311,7 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 		if observed.HasPromptContext {
 			deltaTail = stripTrailingPromptLine(deltaTail, observed.PromptContext)
 		}
-		displayDeltaTail := deltaTail
-		if displayCaptured, displayErr := o.capturePaneDisplay(ctx, paneID, -trackedCaptureLines); displayErr == nil {
-			displayCandidate := monitorDisplayTail(capturePaneDelta(beforeDisplayCapture, displayCaptured), transportCommand)
-			if observed.HasPromptContext {
-				displayCandidate = stripTrailingPromptLine(displayCandidate, observed.PromptContext)
-			}
-			if aligned, ok := alignDisplayBodyToPlain(displayCandidate, deltaTail); ok {
-				displayDeltaTail = aligned
-			} else if strings.TrimSpace(deltaTail) != "" {
-				displayDeltaTail = deltaTail
-			}
-		}
+		displayDeltaTail := o.captureCommandDisplayDeltaFromMonitor(beforeDisplayCapture, transportCommand, observed.PromptContext, paneID, ctx)
 		monitor.updateTail(deltaTail, displayDeltaTail)
 		if observed.HasPromptContext {
 			monitor.updateShellContext(observed.PromptContext)
@@ -397,9 +386,7 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 			cleanBody = stripEchoedCommand(cleanBody, transportCommand)
 			shellContext, _ := ParsePromptContextFromCapture(rawCaptured)
 			displayBody := o.captureCommandDisplayResult(ctx, paneID, beforeDisplayCapture, transportCommand, markers, shellContext)
-			if aligned, ok := alignDisplayBodyToPlain(displayBody, cleanBody); ok {
-				displayBody = aligned
-			} else {
+			if strings.TrimSpace(displayBody) == "" {
 				displayBody = cleanBody
 			}
 			logging.Trace(
@@ -442,10 +429,13 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 				SemanticSource: observed.SemanticSource,
 			})
 			if complete {
-				if aligned, ok := alignDisplayBodyToPlain(displayDeltaTail, evaluation.Result.Captured); ok {
-					evaluation.Result.DisplayCaptured = aligned
-				} else {
-					evaluation.Result.DisplayCaptured = evaluation.Result.Captured
+				evaluation.Result.DisplayCaptured = displayDeltaTail
+				promptContext := observed.PromptContext
+				if promptContext.PromptLine() == "" {
+					promptContext = monitor.Snapshot().ShellContext
+				}
+				if displayBody := o.captureCommandDisplayResult(ctx, paneID, beforeDisplayCapture, transportCommand, markers, promptContext); strings.TrimSpace(displayBody) != "" {
+					evaluation.Result.DisplayCaptured = displayBody
 				}
 				logging.Trace(
 					"shell.tracked.semantic_command_done",
@@ -492,9 +482,7 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 			cleanBody = stripEchoedCommand(cleanBody, transportCommand)
 			shellContext, _ := ParsePromptContextFromCapture(rawCaptured)
 			displayBody := o.captureCommandDisplayResult(ctx, paneID, beforeDisplayCapture, transportCommand, markers, shellContext)
-			if aligned, ok := alignDisplayBodyToPlain(displayBody, cleanBody); ok {
-				displayBody = aligned
-			} else {
+			if strings.TrimSpace(displayBody) == "" {
 				displayBody = cleanBody
 			}
 			logging.Trace(
@@ -1694,6 +1682,69 @@ func stripEchoedCommandLines(bodyLines []string, commandLines []string) (string,
 	return strings.TrimSpace(strings.Join(bodyLines[len(commandLines):], "\n")), true
 }
 
+func stripDisplayCommandEchoResidualLines(body string, command string) string {
+	command = strings.TrimSpace(command)
+	if body == "" || command == "" {
+		return strings.TrimSpace(body)
+	}
+
+	commandFields := strings.Fields(command)
+	if len(commandFields) == 0 {
+		return strings.TrimSpace(body)
+	}
+	commandTail := strings.TrimSpace(commandFields[len(commandFields)-1])
+	if commandTail == "" || !strings.Contains(commandTail, "/shuttle/commands/") {
+		return strings.TrimSpace(body)
+	}
+
+	lines := strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n")
+	filtered := make([]string, 0, len(lines))
+	for _, rawLine := range lines {
+		plainLine := strings.TrimSpace(xansi.Strip(rawLine))
+		if plainLine == "" {
+			continue
+		}
+		if isShuttleEchoResidualLine(plainLine, commandTail) {
+			continue
+		}
+		filtered = append(filtered, rawLine)
+	}
+
+	return strings.TrimSpace(strings.Join(filtered, "\n"))
+}
+
+func isShuttleEchoResidualLine(line string, commandTail string) bool {
+	if line == "" || strings.Contains(line, " ") {
+		return false
+	}
+	if len(line) > 24 {
+		return false
+	}
+	if !strings.Contains(commandTail, "/shuttle/commands/") {
+		return false
+	}
+	lineLower := strings.ToLower(line)
+	if !strings.HasSuffix(lineLower, ".sh'") && !strings.HasSuffix(lineLower, ".sh") {
+		return false
+	}
+
+	for _, r := range line {
+		if (r >= '0' && r <= '9') ||
+			(r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			r == '_' ||
+			r == '-' ||
+			r == '.' ||
+			r == '\'' ||
+			r == '/' {
+			continue
+		}
+		return false
+	}
+
+	return true
+}
+
 func stripWrappedEchoedSingleLine(bodyLines []string, command string) (string, bool) {
 	if strings.Contains(command, "\n") || len(bodyLines) == 0 {
 		return "", false
@@ -1841,83 +1892,17 @@ func TrimTrailingPromptLine(body string, promptContext PromptContext) string {
 	return stripTrailingPromptLine(body, promptContext)
 }
 
-func alignDisplayBodyToPlain(displayBody string, plainBody string) (string, bool) {
-	plainLines := nonEmptyPlainLines(plainBody)
-	if len(plainLines) == 0 {
-		return "", true
-	}
-
-	displayLines, strippedDisplayLines := nonEmptyDisplayLines(displayBody)
-	if len(displayLines) == 0 || len(displayLines) != len(strippedDisplayLines) {
-		return "", false
-	}
-
-	if displayWindowMatchesPlain(strippedDisplayLines, 0, plainLines) && len(displayLines) == len(plainLines) {
-		return strings.TrimSpace(strings.Join(displayLines, "\n")), true
-	}
-
-	for start := len(displayLines) - len(plainLines); start >= 0; start-- {
-		if displayWindowMatchesPlain(strippedDisplayLines, start, plainLines) {
-			return strings.TrimSpace(strings.Join(displayLines[start:start+len(plainLines)], "\n")), true
-		}
-	}
-
-	return "", false
-}
-
-func nonEmptyPlainLines(body string) []string {
-	rawLines := splitLines(body)
-	lines := make([]string, 0, len(rawLines))
-	for _, rawLine := range rawLines {
-		if strings.TrimSpace(rawLine) == "" {
-			continue
-		}
-		lines = append(lines, normalizeDisplayAlignmentLine(rawLine))
-	}
-	return lines
-}
-
-func nonEmptyDisplayLines(body string) ([]string, []string) {
-	rawLines := splitLines(body)
-	displayLines := make([]string, 0, len(rawLines))
-	strippedLines := make([]string, 0, len(rawLines))
-	for _, rawLine := range rawLines {
-		plainLine := xansi.Strip(rawLine)
-		if strings.TrimSpace(plainLine) == "" {
-			continue
-		}
-		displayLines = append(displayLines, rawLine)
-		strippedLines = append(strippedLines, normalizeDisplayAlignmentLine(plainLine))
-	}
-	return displayLines, strippedLines
-}
-
-func displayWindowMatchesPlain(displayLines []string, start int, plainLines []string) bool {
-	if start < 0 || start+len(plainLines) > len(displayLines) {
-		return false
-	}
-	for index, plainLine := range plainLines {
-		if displayLines[start+index] != plainLine {
-			return false
-		}
-	}
-	return true
-}
-
-func normalizeDisplayAlignmentLine(line string) string {
-	return strings.TrimRight(strings.ReplaceAll(line, "\r", ""), " \t")
-}
-
 func (o *Observer) captureCommandDisplayDelta(ctx context.Context, paneID string, beforeDisplay string, command string, promptContext PromptContext) string {
 	captured, err := o.capturePaneDisplay(ctx, paneID, -trackedCaptureLines)
 	if err != nil {
 		return ""
 	}
 
-	body := sanitizeDisplayBody(capturePaneDelta(beforeDisplay, captured))
-	body = stripEchoedCommand(body, command)
-	body = stripTrailingPromptLine(body, promptContext)
-	return strings.TrimSpace(body)
+	delta := monitorDisplayTail(capturePaneDelta(beforeDisplay, captured), command)
+	if promptContext.PromptLine() != "" {
+		delta = stripTrailingPromptLine(delta, promptContext)
+	}
+	return strings.TrimSpace(delta)
 }
 
 func (o *Observer) captureCommandDisplayResult(ctx context.Context, paneID string, beforeDisplay string, command string, markers protocol.Markers, promptContext PromptContext) string {
@@ -1925,11 +1910,18 @@ func (o *Observer) captureCommandDisplayResult(ctx context.Context, paneID strin
 	if err == nil {
 		if result, complete, parseErr := protocol.ParseCommandResult(captured, markers); parseErr == nil && complete {
 			body := sanitizeDisplayBody(result.Body)
-			body = stripTrailingPromptLine(body, promptContext)
-			return strings.TrimSpace(body)
+			return stripTrailingPromptLine(strings.TrimSpace(body), promptContext)
 		}
 	}
 	return o.captureCommandDisplayDelta(ctx, paneID, beforeDisplay, command, promptContext)
+}
+
+func (o *Observer) captureCommandDisplayDeltaFromMonitor(beforeDisplayCapture string, transportCommand string, promptContext PromptContext, paneID string, ctx context.Context) string {
+	displayDelta := o.captureCommandDisplayDelta(ctx, paneID, beforeDisplayCapture, transportCommand, promptContext)
+	if strings.TrimSpace(displayDelta) == "" {
+		return ""
+	}
+	return displayDelta
 }
 
 func parseShellContextProbeOutput(body string, baseline PromptContext) (string, PromptContext, int) {

@@ -254,7 +254,7 @@ func (h *interactiveHarness) submitPrompt(prompt string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := h.outerClient.SendKeys(ctx, h.tuiPaneID, "C-]", false); err != nil {
+	if err := h.outerClient.SendKeys(ctx, h.tuiPaneID, "BTab", false); err != nil {
 		h.t.Fatalf("SendKeys(agent mode toggle) error = %v", err)
 	}
 	if err := h.outerClient.SendLiteralKeys(ctx, h.tuiPaneID, prompt); err != nil {
