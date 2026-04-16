@@ -307,10 +307,6 @@ func (m Model) transcriptWindowDisplay(lines []transcriptRenderLine, height int)
 	return window
 }
 
-func (m Model) transcriptLineCount() int {
-	return len(m.transcriptLines(m.currentTranscriptWidth()))
-}
-
 func (m Model) maxTranscriptScroll() int {
 	return m.maxTranscriptScrollFor(m.transcriptLines(m.currentTranscriptWidth()), m.currentTranscriptHeight())
 }
@@ -1491,7 +1487,7 @@ func (m Model) transcriptTagStyle(style lipgloss.Style, selected bool) lipgloss.
 	if !selected {
 		return style
 	}
-	return style.Copy().Background(lipgloss.Color(transcriptSelectedBackground))
+	return style.Background(lipgloss.Color(transcriptSelectedBackground))
 }
 
 func transcriptEmojiEnabled() bool {

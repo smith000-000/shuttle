@@ -36,11 +36,6 @@ func buildActivePlan(plan Plan) ActivePlan {
 	}
 }
 
-func normalizePlanStepText(step string) string {
-	_, normalized := parsePlanStep(step)
-	return normalized
-}
-
 func parsePlanStep(step string) (PlanStepStatus, string) {
 	step = strings.TrimSpace(step)
 	if step == "" {

@@ -1187,30 +1187,8 @@ type pipePaneClient interface {
 	PipePaneOutput(ctx context.Context, target string, shellCommand string) error
 }
 
-type paneCapture struct {
-	display string
-	raw     string
-	clean   string
-}
-
 func (o *Observer) capturePane(ctx context.Context, paneID string, startLine int) (string, error) {
 	return o.capturePanePlain(ctx, paneID, startLine)
-}
-
-func (o *Observer) capturePaneOutput(ctx context.Context, paneID string, startLine int) (paneCapture, error) {
-	plainCaptured, err := o.capturePanePlain(ctx, paneID, startLine)
-	if err != nil {
-		return paneCapture{}, err
-	}
-	displayCaptured, err := o.capturePaneDisplay(ctx, paneID, startLine)
-	if err != nil {
-		displayCaptured = plainCaptured
-	}
-	return paneCapture{
-		display: sanitizeDisplayBody(displayCaptured),
-		raw:     plainCaptured,
-		clean:   sanitizeCapturedBody(plainCaptured),
-	}, nil
 }
 
 func (o *Observer) capturePanePlain(ctx context.Context, paneID string, startLine int) (string, error) {
@@ -1705,10 +1683,7 @@ func promptReturnedAfterTransition(beforeCapture string, baseline PromptContext,
 	}
 
 	if strings.TrimSpace(delta) != "" {
-		if TailSuggestsAwaitingInput(delta) {
-			return false
-		}
-		return true
+		return !TailSuggestsAwaitingInput(delta)
 	}
 
 	if baseline.RawLine != "" && candidate.RawLine == baseline.RawLine {

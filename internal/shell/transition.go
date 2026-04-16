@@ -16,10 +16,6 @@ type shellTransition struct {
 	Kind shellTransitionKind
 }
 
-func (t shellTransition) Active() bool {
-	return t.Kind != shellTransitionNone
-}
-
 func detectShellTransition(submittedCommand string, currentPaneCommand string, promptContext PromptContext, remembered shellTransitionKind) shellTransition {
 	if promptContext.Remote {
 		return shellTransition{Kind: shellTransitionRemote}

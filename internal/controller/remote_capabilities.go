@@ -95,20 +95,6 @@ func (s *remoteCapabilityStore) saveRecord(record remoteCapabilityRecord) {
 	s.saveLocked()
 }
 
-func (s *remoteCapabilityStore) invalidateShell(location *shell.ShellLocation, prompt *shell.PromptContext) {
-	key := remoteCapabilityKeyForShell(location, prompt)
-	if s == nil || key == "" {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.loaded {
-		s.loadLocked()
-	}
-	delete(s.entries, key)
-	s.saveLocked()
-}
-
 func (s *remoteCapabilityStore) markTransport(location *shell.ShellLocation, prompt *shell.PromptContext, transport PatchTransport) {
 	key := remoteCapabilityKeyForShell(location, prompt)
 	if s == nil || key == "" || transport == PatchTransportNone {

@@ -76,10 +76,6 @@ func ApprovalModeStatusBody(mode ApprovalMode) string {
 	}
 }
 
-func ApprovalModeStatusLabel(mode ApprovalMode) string {
-	return "APR " + string(normalizeApprovalMode(mode))
-}
-
 func autoRunNotice(command string) string {
 	return fmt.Sprintf("Auto-running safe local command under /approvals auto: %s", strings.TrimSpace(command))
 }
@@ -202,16 +198,8 @@ func hasLeadingEnvAssignments(fields []string) bool {
 	if len(fields) == 0 {
 		return false
 	}
-	for _, field := range fields {
-		if strings.HasPrefix(field, "-") {
-			return false
-		}
-		if !strings.Contains(field, "=") {
-			return false
-		}
-		return true
-	}
-	return false
+	first := fields[0]
+	return !strings.HasPrefix(first, "-") && strings.Contains(first, "=")
 }
 
 func hasOutsidePathArg(fields []string) bool {

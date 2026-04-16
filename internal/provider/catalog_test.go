@@ -16,7 +16,9 @@ func TestListModelsOpenAI(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer openai-key" {
 			t.Fatalf("expected auth header, got %q", got)
 		}
-		io.WriteString(w, `{"data":[{"id":"gpt-5-mini"},{"id":"gpt-5-nano"}]}`)
+		if _, err := io.WriteString(w, `{"data":[{"id":"gpt-5-mini"},{"id":"gpt-5-nano"}]}`); err != nil {
+			t.Fatalf("WriteString() error = %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -50,7 +52,9 @@ func TestListModelsOpenRouter(t *testing.T) {
 		if got := r.Header.Get("X-OpenRouter-Title"); got != "Shuttle" {
 			t.Fatalf("expected compatibility title header, got %q", got)
 		}
-		io.WriteString(w, `{"data":[{"id":"openrouter/auto","canonical_slug":"openrouter/auto","name":"Auto","description":"Routes automatically","context_length":200000,"top_provider":{"context_length":200000,"max_completion_tokens":64000,"is_moderated":false},"architecture":{"modality":"text+image->text","input_modalities":["text","image"],"output_modalities":["text"],"tokenizer":"Router"},"supported_parameters":["max_tokens","structured_outputs","reasoning"],"default_parameters":{"temperature":1},"pricing":{"prompt":"0","completion":"0"}},{"id":"openai/gpt-5-mini","canonical_slug":"openai/gpt-5-mini-20260305","name":"GPT-5 Mini","context_length":128000,"top_provider":{"context_length":128000,"max_completion_tokens":32768,"is_moderated":true},"architecture":{"modality":"text->text","input_modalities":["text"],"output_modalities":["text"],"tokenizer":"GPT"},"supported_parameters":["max_tokens","response_format"],"pricing":{"prompt":"0.00000025","completion":"0.000002"}}]}`)
+		if _, err := io.WriteString(w, `{"data":[{"id":"openrouter/auto","canonical_slug":"openrouter/auto","name":"Auto","description":"Routes automatically","context_length":200000,"top_provider":{"context_length":200000,"max_completion_tokens":64000,"is_moderated":false},"architecture":{"modality":"text+image->text","input_modalities":["text","image"],"output_modalities":["text"],"tokenizer":"Router"},"supported_parameters":["max_tokens","structured_outputs","reasoning"],"default_parameters":{"temperature":1},"pricing":{"prompt":"0","completion":"0"}},{"id":"openai/gpt-5-mini","canonical_slug":"openai/gpt-5-mini-20260305","name":"GPT-5 Mini","context_length":128000,"top_provider":{"context_length":128000,"max_completion_tokens":32768,"is_moderated":true},"architecture":{"modality":"text->text","input_modalities":["text"],"output_modalities":["text"],"tokenizer":"GPT"},"supported_parameters":["max_tokens","response_format"],"pricing":{"prompt":"0.00000025","completion":"0.000002"}}]}`); err != nil {
+			t.Fatalf("WriteString() error = %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -96,7 +100,9 @@ func TestListModelsAnthropic(t *testing.T) {
 		if got := r.Header.Get("anthropic-version"); got != anthropicVersionHeaderValue {
 			t.Fatalf("expected anthropic-version header, got %q", got)
 		}
-		io.WriteString(w, `{"data":[{"id":"claude-sonnet-4-20250514","display_name":"Claude Sonnet 4","type":"model"},{"id":"claude-3-5-haiku-20241022","display_name":"Claude 3.5 Haiku","type":"model"}]}`)
+		if _, err := io.WriteString(w, `{"data":[{"id":"claude-sonnet-4-20250514","display_name":"Claude Sonnet 4","type":"model"},{"id":"claude-3-5-haiku-20241022","display_name":"Claude 3.5 Haiku","type":"model"}]}`); err != nil {
+			t.Fatalf("WriteString() error = %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -127,12 +133,14 @@ func TestListModelsCodexCLI(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer codex-key" {
 			t.Fatalf("expected auth header, got %q", got)
 		}
-		io.WriteString(w, `{"data":[
+		if _, err := io.WriteString(w, `{"data":[
 			{"id":"gpt-5.4"},
 			{"id":"gpt-5.3-codex"},
 			{"id":"gpt-4.1"},
 			{"id":"o4-mini"}
-		]}`)
+		]}`); err != nil {
+			t.Fatalf("WriteString() error = %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -185,7 +193,9 @@ func TestListModelsOllama(t *testing.T) {
 		if r.URL.Path != "/api/tags" {
 			t.Fatalf("expected /api/tags, got %s", r.URL.Path)
 		}
-		io.WriteString(w, `{"models":[{"name":"qwen2.5-coder:7b","model":"qwen2.5-coder:7b","details":{"family":"qwen2","parameter_size":"7B","quantization_level":"Q4_K_M"}},{"name":"llama3.1:8b","model":"llama3.1:8b","details":{"family":"llama","parameter_size":"8B","quantization_level":"Q8_0"}}]}`)
+		if _, err := io.WriteString(w, `{"models":[{"name":"qwen2.5-coder:7b","model":"qwen2.5-coder:7b","details":{"family":"qwen2","parameter_size":"7B","quantization_level":"Q4_K_M"}},{"name":"llama3.1:8b","model":"llama3.1:8b","details":{"family":"llama","parameter_size":"8B","quantization_level":"Q8_0"}}]}`); err != nil {
+			t.Fatalf("WriteString() error = %v", err)
+		}
 	}))
 	defer server.Close()
 

@@ -188,10 +188,10 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 
 func inferHandoffPromptReturnResult(promptContext shell.PromptContext, semanticExitCode *int, observedSemanticSource string, execution CommandExecution, recentOutput string) (int, CommandExecutionState, shell.SignalConfidence, bool, string, bool) {
 	inferred := false
-	confidence := shell.ConfidenceStrong
 	semanticShell := false
 	semanticSource := ""
 	exitCode := 0
+	var confidence shell.SignalConfidence
 
 	switch {
 	case promptContext.LastExitCode != nil:
@@ -220,17 +220,14 @@ func inferHandoffPromptReturnResult(promptContext shell.PromptContext, semanticE
 		inferred = true
 	}
 
-	state := CommandExecutionCompleted
 	switch exitCode {
 	case shell.InterruptedExitCode:
-		state = CommandExecutionCanceled
+		return exitCode, CommandExecutionCanceled, confidence, semanticShell, strings.TrimSpace(semanticSource), inferred
 	case 0:
-		state = CommandExecutionCompleted
+		return exitCode, CommandExecutionCompleted, confidence, semanticShell, strings.TrimSpace(semanticSource), inferred
 	default:
-		state = CommandExecutionFailed
+		return exitCode, CommandExecutionFailed, confidence, semanticShell, strings.TrimSpace(semanticSource), inferred
 	}
-
-	return exitCode, state, confidence, semanticShell, strings.TrimSpace(semanticSource), inferred
 }
 
 func (c *LocalController) RefreshShellContext(ctx context.Context) (*shell.PromptContext, error) {
@@ -283,16 +280,6 @@ func (c *LocalController) captureRecoverySnapshot(ctx context.Context, paneID st
 	}
 
 	return strings.TrimSpace(captured)
-}
-
-func (c *LocalController) activeExecutionUsesTrackedShell() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	execution := c.primaryExecutionLocked()
-	if execution == nil {
-		return false
-	}
-	return shouldSyncExecutionIntoUserShellSession(execution, c.session)
 }
 
 func (c *LocalController) TrackedShellTarget() TrackedShellTarget {

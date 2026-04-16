@@ -45,7 +45,9 @@ func TestOllamaAgentRespondsWithStructuredOutput(t *testing.T) {
 			t.Fatalf("expected temperature 0, got %#v", payload["options"])
 		}
 
-		io.WriteString(w, `{"model":"qwen2.5-coder:7b","message":{"role":"assistant","content":"{\"message\":\"Ollama path works.\",\"plan_summary\":\"\",\"plan_steps\":[],\"proposal_kind\":\"\",\"proposal_command\":\"\",\"proposal_patch\":\"\",\"proposal_description\":\"\",\"approval_kind\":\"\",\"approval_title\":\"\",\"approval_summary\":\"\",\"approval_command\":\"\",\"approval_patch\":\"\",\"approval_risk\":\"\"}"}}`)
+		if _, err := io.WriteString(w, `{"model":"qwen2.5-coder:7b","message":{"role":"assistant","content":"{\"message\":\"Ollama path works.\",\"plan_summary\":\"\",\"plan_steps\":[],\"proposal_kind\":\"\",\"proposal_command\":\"\",\"proposal_patch\":\"\",\"proposal_description\":\"\",\"approval_kind\":\"\",\"approval_title\":\"\",\"approval_summary\":\"\",\"approval_command\":\"\",\"approval_patch\":\"\",\"approval_risk\":\"\"}"}}`); err != nil {
+			t.Fatalf("WriteString() error = %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -94,7 +96,9 @@ func TestOllamaAgentIncludesThinkToggle(t *testing.T) {
 		if payload["think"] != true {
 			t.Fatalf("expected think=true, got %#v", payload["think"])
 		}
-		io.WriteString(w, `{"model":"qwen2.5-coder:7b","message":{"role":"assistant","content":"{\"message\":\"ok\"}"}}`)
+		if _, err := io.WriteString(w, `{"model":"qwen2.5-coder:7b","message":{"role":"assistant","content":"{\"message\":\"ok\"}"}}`); err != nil {
+			t.Fatalf("WriteString() error = %v", err)
+		}
 	}))
 	defer server.Close()
 

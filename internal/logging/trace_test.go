@@ -15,7 +15,11 @@ func TestSafeTraceRedactsSensitiveAttrs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConfigureTrace() error = %v", err)
 	}
-	defer closeTrace()
+	defer func() {
+		if err := closeTrace(); err != nil {
+			t.Fatalf("close trace: %v", err)
+		}
+	}()
 
 	Trace(
 		"test",
@@ -47,7 +51,11 @@ func TestSensitiveTraceKeepsSensitiveAttrs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConfigureTrace() error = %v", err)
 	}
-	defer closeTrace()
+	defer func() {
+		if err := closeTrace(); err != nil {
+			t.Fatalf("close trace: %v", err)
+		}
+	}()
 
 	Trace("test", "command", "echo hi")
 

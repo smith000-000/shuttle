@@ -343,7 +343,9 @@ func TestResponsesAgentCustomBaseURLSmoke(t *testing.T) {
 			t.Fatalf("expected no auth header, got %q", got)
 		}
 
-		io.WriteString(w, `{"output_text":"{\"message\":\"Custom endpoint works.\"}"}`)
+		if _, err := io.WriteString(w, `{"output_text":"{\"message\":\"Custom endpoint works.\"}"}`); err != nil {
+			t.Fatalf("WriteString() error = %v", err)
+		}
 	}))
 	defer server.Close()
 

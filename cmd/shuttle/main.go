@@ -33,14 +33,22 @@ func main() {
 		fmt.Fprintf(os.Stderr, "logger error: %v\n", err)
 		os.Exit(1)
 	}
-	defer closeLogger()
+	defer func() {
+		if err := closeLogger(); err != nil {
+			fmt.Fprintf(os.Stderr, "logger close error: %v\n", err)
+		}
+	}()
 
 	closeTrace, err := logging.ConfigureTrace(cfg.TracePath, cfg.TraceMode)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "trace logger error: %v\n", err)
 		os.Exit(1)
 	}
-	defer closeTrace()
+	defer func() {
+		if err := closeTrace(); err != nil {
+			fmt.Fprintf(os.Stderr, "trace logger close error: %v\n", err)
+		}
+	}()
 
 	if cfg.TraceMode != config.TraceModeOff {
 		fmt.Fprintf(os.Stderr, "warning: %s trace enabled; output may contain debugging details in %s\n", cfg.TraceMode, cfg.TracePath)

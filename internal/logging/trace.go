@@ -60,19 +60,6 @@ func TraceError(event string, err error, attrs ...any) {
 	Trace(event, append(attrs, "error", err.Error())...)
 }
 
-func TraceEnabled() bool {
-	traceMu.RLock()
-	defer traceMu.RUnlock()
-
-	return traceEnabled
-}
-
-func TraceMode() config.TraceMode {
-	traceMu.RLock()
-	defer traceMu.RUnlock()
-	return traceMode
-}
-
 func sanitizeTraceAttrs(mode config.TraceMode, attrs ...any) []any {
 	if mode == config.TraceModeSensitive {
 		return attrs

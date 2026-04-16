@@ -147,15 +147,12 @@ func inferPromptReturnResult(promptContext PromptContext, tail string, semanticE
 		inferred = true
 	}
 
-	state := MonitorStateCompleted
 	switch exitCode {
 	case InterruptedExitCode:
-		state = MonitorStateCanceled
+		return exitCode, MonitorStateCanceled, confidence, inferred
 	case 0:
-		state = MonitorStateCompleted
+		return exitCode, MonitorStateCompleted, confidence, inferred
 	default:
-		state = MonitorStateFailed
+		return exitCode, MonitorStateFailed, confidence, inferred
 	}
-
-	return exitCode, state, confidence, inferred
 }

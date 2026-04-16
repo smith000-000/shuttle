@@ -58,7 +58,9 @@ func TestOpenRouterAgentAppliesProviderPolicyForStructuredModel(t *testing.T) {
 			t.Fatalf("expected provider.require_parameters=true, got %#v", payload["provider"])
 		}
 
-		io.WriteString(w, `{"model":"qwen/qwen3.5-9b-20260310","output_text":"{\"message\":\"OpenRouter path works.\"}"}`)
+		if _, err := io.WriteString(w, `{"model":"qwen/qwen3.5-9b-20260310","output_text":"{\"message\":\"OpenRouter path works.\"}"}`); err != nil {
+			t.Fatalf("WriteString() error = %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -128,7 +130,9 @@ func TestOpenRouterAgentFallsBackToPromptJSONWhenModelLacksStructuredOutputs(t *
 			t.Fatalf("expected prompt-only JSON instruction, got %q", textContent["text"])
 		}
 
-		io.WriteString(w, `{"model":"anthropic/claude-3-haiku","output_text":"{\"message\":\"Fallback path works.\"}"}`)
+		if _, err := io.WriteString(w, `{"model":"anthropic/claude-3-haiku","output_text":"{\"message\":\"Fallback path works.\"}"}`); err != nil {
+			t.Fatalf("WriteString() error = %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -175,7 +179,9 @@ func TestOpenRouterAgentAutoModelOmitsReasoningOverride(t *testing.T) {
 			t.Fatalf("expected structured outputs for openrouter/auto, got %#v", payload["text"])
 		}
 
-		io.WriteString(w, `{"model":"openai/gpt-5-nano-2025-08-07","output_text":"{\"message\":\"Auto path works.\"}"}`)
+		if _, err := io.WriteString(w, `{"model":"openai/gpt-5-nano-2025-08-07","output_text":"{\"message\":\"Auto path works.\"}"}`); err != nil {
+			t.Fatalf("WriteString() error = %v", err)
+		}
 	}))
 	defer server.Close()
 

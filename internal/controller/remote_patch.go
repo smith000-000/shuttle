@@ -20,7 +20,6 @@ import (
 )
 
 const remotePatchCommandTimeout = 20 * time.Second
-const remotePatchRepairTimeout = 120 * time.Second
 const remotePatchPayloadChunkSize = 1024
 
 type remotePatchCapabilities struct {

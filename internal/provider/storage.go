@@ -62,10 +62,6 @@ func ApplyStoredProviderConfig(cfg config.Config) (config.Config, error) {
 	return applyPersistedConfig(cfg, stored)
 }
 
-func SaveStoredProviderConfig(stateDir string, profile Profile) error {
-	return SaveStoredProviderConfigWithOptions(stateDir, profile, SecretStoreOptions{})
-}
-
 func SaveStoredProviderConfigWithOptions(stateDir string, profile Profile, opts SecretStoreOptions) error {
 	if strings.TrimSpace(stateDir) == "" {
 		return errors.New("state dir must not be empty")

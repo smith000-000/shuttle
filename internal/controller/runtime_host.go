@@ -211,14 +211,5 @@ func controllerOutcomeToRuntimeInput(outcome agentruntime.Outcome) AgentResponse
 }
 
 func runtimeApprovalToController(approval agentruntime.ApprovalRequest) ApprovalRequest {
-	return ApprovalRequest{
-		ID:          approval.ID,
-		Kind:        approval.Kind,
-		Title:       approval.Title,
-		Summary:     approval.Summary,
-		Command:     approval.Command,
-		Patch:       approval.Patch,
-		PatchTarget: approval.PatchTarget,
-		Risk:        approval.Risk,
-	}
+	return ApprovalRequest(approval)
 }

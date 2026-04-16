@@ -276,16 +276,6 @@ func defaultRuntimeDir() (string, error) {
 	return filepath.Join(stateDir, "runtime"), nil
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-
-	return ""
-}
-
 func resolveTraceMode(traceValue string, traceModeValue string) (TraceMode, error) {
 	if mode := strings.TrimSpace(traceModeValue); mode != "" {
 		resolved := TraceMode(strings.ToLower(mode))

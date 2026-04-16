@@ -23,8 +23,8 @@ func TestSaveStoredProviderConfigPrefersEnvReference(t *testing.T) {
 		APIKeyEnvVar: "OPENAI_API_KEY",
 	}
 
-	if err := SaveStoredProviderConfig(tempDir, profile); err != nil {
-		t.Fatalf("SaveStoredProviderConfig() error = %v", err)
+	if err := SaveStoredProviderConfigWithOptions(tempDir, profile, SecretStoreOptions{}); err != nil {
+		t.Fatalf("SaveStoredProviderConfigWithOptions() error = %v", err)
 	}
 
 	stored, ok, err := LoadStoredProviderConfig(tempDir)
@@ -57,8 +57,8 @@ func TestSaveStoredProviderConfigStoresManualKeyPerPreset(t *testing.T) {
 		APIKey:     "manual-secret",
 	}
 
-	if err := SaveStoredProviderConfig(tempDir, profile); err != nil {
-		t.Fatalf("SaveStoredProviderConfig() error = %v", err)
+	if err := SaveStoredProviderConfigWithOptions(tempDir, profile, SecretStoreOptions{}); err != nil {
+		t.Fatalf("SaveStoredProviderConfigWithOptions() error = %v", err)
 	}
 
 	stored, ok, err := LoadStoredProviderConfig(tempDir)
@@ -92,13 +92,13 @@ func TestSaveStoredProviderConfigClassifiesKeyringFailure(t *testing.T) {
 		keyringDelete = previousDelete
 	})
 
-	err := SaveStoredProviderConfig(tempDir, Profile{
+	err := SaveStoredProviderConfigWithOptions(tempDir, Profile{
 		Preset:     PresetAnthropic,
 		AuthMethod: AuthAPIKey,
 		BaseURL:    "https://api.anthropic.com",
 		Model:      "claude-sonnet-4-6",
 		APIKey:     "manual-secret",
-	})
+	}, SecretStoreOptions{})
 	if !errors.Is(err, ErrSecretStoreUnavailable) {
 		t.Fatalf("expected ErrSecretStoreUnavailable, got %v", err)
 	}
@@ -164,23 +164,23 @@ func TestLoadStoredProviderProfilesReturnsMultipleProfiles(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "openai-key")
 	withTestKeyring(t)
 
-	if err := SaveStoredProviderConfig(tempDir, Profile{
+	if err := SaveStoredProviderConfigWithOptions(tempDir, Profile{
 		Preset:       PresetOpenAI,
 		AuthMethod:   AuthAPIKey,
 		BaseURL:      "https://api.openai.com/v1",
 		Model:        "gpt-5-nano-2025-08-07",
 		APIKey:       "openai-key",
 		APIKeyEnvVar: "OPENAI_API_KEY",
-	}); err != nil {
-		t.Fatalf("SaveStoredProviderConfig(openai) error = %v", err)
+	}, SecretStoreOptions{}); err != nil {
+		t.Fatalf("SaveStoredProviderConfigWithOptions(openai) error = %v", err)
 	}
-	if err := SaveStoredProviderConfig(tempDir, Profile{
+	if err := SaveStoredProviderConfigWithOptions(tempDir, Profile{
 		Preset:     PresetOllama,
 		AuthMethod: AuthNone,
 		BaseURL:    "http://localhost:11434/api",
 		Model:      "qwen3.5:35b-a3b",
-	}); err != nil {
-		t.Fatalf("SaveStoredProviderConfig(ollama) error = %v", err)
+	}, SecretStoreOptions{}); err != nil {
+		t.Fatalf("SaveStoredProviderConfigWithOptions(ollama) error = %v", err)
 	}
 
 	profiles, selected, err := LoadStoredProviderProfiles(tempDir)

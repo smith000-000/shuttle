@@ -167,47 +167,6 @@ func (m Model) currentShellContext() *shell.PromptContext {
 	return &contextCopy
 }
 
-func (m Model) renderHeader(width int) string {
-	modeStyle := m.styles.modeShell
-	if m.mode == AgentMode {
-		modeStyle = m.styles.modeAgent
-	}
-
-	mode := modeStyle.Render(string(m.mode))
-	meta := []string{m.styles.headerTitle.Render("Shuttle"), mode}
-	switch {
-	case width >= 100:
-		meta = append(meta,
-			m.styles.headerMeta.Render("session="+m.workspace.SessionName),
-			m.styles.headerMeta.Render("top="+m.workspace.TopPane.ID),
-		)
-	case width >= 72:
-		meta = append(meta, m.styles.headerMeta.Render("top="+m.workspace.TopPane.ID))
-	}
-	if m.busy {
-		meta = append(meta, m.styles.modeBusy.Render("BUSY"))
-	}
-	if m.pendingApproval != nil {
-		risk := strings.ToUpper(string(m.pendingApproval.Risk))
-		if risk == "" {
-			risk = "REVIEW"
-		}
-		meta = append(meta, m.styles.modeApproval.Render("APPROVAL "+risk))
-	} else if m.refiningApproval != nil {
-		meta = append(meta, m.styles.modeProposal.Render("REFINING"))
-	} else if m.pendingProposal != nil && (m.pendingProposal.Command != "" || m.pendingProposal.Keys != "" || m.pendingProposal.Patch != "") {
-		meta = append(meta, m.styles.modeProposal.Render("PROPOSAL"))
-	}
-
-	status := m.styles.header.Render(strings.Join(meta, " "))
-	ruleWidth := width - lipgloss.Width(status)
-	if ruleWidth > 1 {
-		status = lipgloss.JoinHorizontal(lipgloss.Left, status, m.styles.headerRule.Render(strings.Repeat("━", ruleWidth-1)))
-	}
-
-	return status
-}
-
 func (m Model) renderActionCard(width int) string {
 	if m.refiningApproval != nil {
 		body := []string{
@@ -615,9 +574,9 @@ func (m Model) renderComposer(width int) string {
 		prompt = rootComposerPrompt
 	}
 
-	inputStyle := m.styles.input.Copy().Background(composerStyle.GetBackground())
-	ghostStyle := m.styles.inputGhost.Copy().Background(composerStyle.GetBackground())
-	cursorStyle := inputStyle.Copy().Reverse(true)
+	inputStyle := m.styles.input.Background(composerStyle.GetBackground())
+	ghostStyle := m.styles.inputGhost.Background(composerStyle.GetBackground())
+	cursorStyle := inputStyle.Reverse(true)
 	lines := composerViewportLines(composerDisplayLines(m.input, m.cursor, m.currentCompletionGhostText()), composerMaxVisibleLines)
 	prefixWidth := lipgloss.Width(prompt)
 	rendered := make([]string, 0, len(lines))
@@ -1068,17 +1027,6 @@ func startupNoticeForProfile(profile provider.Profile) *startupSecurityNotice {
 	}
 }
 
-func (m Model) activeComposerStyle() lipgloss.Style {
-	if m.refiningApproval != nil {
-		return m.styles.composerRefine
-	}
-	if m.mode == AgentMode {
-		return m.styles.composerAgent
-	}
-
-	return m.styles.composerShell
-}
-
 func (m Model) contentWidthFor(totalWidth int, style lipgloss.Style) int {
 	width := totalWidth - style.GetHorizontalFrameSize()
 	if width < 10 {
@@ -1107,14 +1055,6 @@ func (m Model) renderScreen(body string) string {
 	}
 
 	return m.styles.screen.Width(width).Height(height).Render(strings.Join(lines, "\n"))
-}
-
-func blankBlock(height int) string {
-	if height <= 0 {
-		return ""
-	}
-	lines := make([]string, height)
-	return strings.Join(lines, "\n")
 }
 
 func (m Model) resolvedTranscriptHeight(transcriptWidth int, screenHeight int, actionCard string, planCard string, activeExecutionCard string, statusLine string, shellTail string, composer string, footer string) int {
@@ -2158,10 +2098,6 @@ func settingsProviderDetail(candidate provider.OnboardingCandidate) string {
 		return status
 	}
 	return status + ". " + strings.TrimSpace(candidate.Reason)
-}
-
-func settingsProfileKey(profile provider.Profile) string {
-	return fmt.Sprintf("%s|%s|%s|%s|%s", profile.Preset, profile.BaseURL, profile.CLICommand, profile.Thinking, profile.ReasoningEffort)
 }
 
 func settingsModelChoiceKey(choice settingsModelChoice) string {

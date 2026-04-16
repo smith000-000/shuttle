@@ -30,7 +30,6 @@ func TestParseSemanticShellStatePrompt(t *testing.T) {
 	}
 }
 
-
 func TestParseSemanticShellStateLegacyPayloadStillParses(t *testing.T) {
 	state, ok := parseSemanticShellState("{\"event\":\"command\",\"exit\":null,\"cwd\":\"/tmp/demo\",\"shell\":\"bash\"}")
 	if !ok {
@@ -251,7 +250,6 @@ type fakeSemanticPaneClient struct {
 	escaped            string
 	escapedCaptures    []string
 	stream             string
-	dir                string
 	sent               []string
 	piped              []string
 	pipeTargets        []string

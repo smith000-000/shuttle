@@ -44,7 +44,9 @@ func TestAnthropicAgentRespondsWithStructuredOutput(t *testing.T) {
 			t.Fatalf("expected system prompt, got %#v", payload["system"])
 		}
 
-		io.WriteString(w, `{"id":"msg_123","type":"message","model":"claude-sonnet-4-20250514","content":[{"type":"text","text":"{\"message\":\"Anthropic path works.\",\"plan_summary\":\"\",\"plan_steps\":[],\"proposal_kind\":\"\",\"proposal_command\":\"\",\"proposal_patch\":\"\",\"proposal_description\":\"\",\"approval_kind\":\"\",\"approval_title\":\"\",\"approval_summary\":\"\",\"approval_command\":\"\",\"approval_patch\":\"\",\"approval_risk\":\"\"}"}]}`)
+		if _, err := io.WriteString(w, `{"id":"msg_123","type":"message","model":"claude-sonnet-4-20250514","content":[{"type":"text","text":"{\"message\":\"Anthropic path works.\",\"plan_summary\":\"\",\"plan_steps\":[],\"proposal_kind\":\"\",\"proposal_command\":\"\",\"proposal_patch\":\"\",\"proposal_description\":\"\",\"approval_kind\":\"\",\"approval_title\":\"\",\"approval_summary\":\"\",\"approval_command\":\"\",\"approval_patch\":\"\",\"approval_risk\":\"\"}"}]}`); err != nil {
+			t.Fatalf("WriteString() error = %v", err)
+		}
 	}))
 	defer server.Close()
 
@@ -84,7 +86,9 @@ func TestAnthropicAgentIncludesThinkingConfigWhenEnabled(t *testing.T) {
 		if !ok || thinking["type"] != "enabled" || thinking["budget_tokens"] != float64(1024) {
 			t.Fatalf("expected anthropic thinking config, got %#v", payload["thinking"])
 		}
-		io.WriteString(w, `{"id":"msg_124","type":"message","model":"claude-sonnet-4-20250514","content":[{"type":"text","text":"{\"message\":\"ok\"}"}]}`)
+		if _, err := io.WriteString(w, `{"id":"msg_124","type":"message","model":"claude-sonnet-4-20250514","content":[{"type":"text","text":"{\"message\":\"ok\"}"}]}`); err != nil {
+			t.Fatalf("WriteString() error = %v", err)
+		}
 	}))
 	defer server.Close()
 

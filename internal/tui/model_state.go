@@ -1033,12 +1033,6 @@ func (m Model) shouldConfirmFullscreenBeforeShellAction() bool {
 		m.activeExecution.State == controller.CommandExecutionInteractiveFullscreen
 }
 
-func (m Model) canSendFullscreenKeys() bool {
-	return m.pendingFullscreen == nil &&
-		m.activeExecution != nil &&
-		m.activeExecution.State == controller.CommandExecutionInteractiveFullscreen
-}
-
 func (m Model) canSendActiveKeys() bool {
 	return m.pendingFullscreen == nil &&
 		m.activeExecution != nil &&
@@ -1378,43 +1372,6 @@ func humanizeExecutionElapsed(startedAt time.Time) string {
 	return elapsed.String()
 }
 
-func (m Model) currentProviderChoiceIndex() int {
-	for index, choice := range m.onboardingChoices {
-		if onboardingCandidateMatchesProfile(choice, m.activeProvider) {
-			return index
-		}
-	}
-
-	return 0
-}
-
-func collapseOnboardingChoices(candidates []provider.OnboardingCandidate, active provider.Profile) []provider.OnboardingCandidate {
-	collapsed := make([]provider.OnboardingCandidate, 0, len(candidates))
-	indexByPreset := map[provider.ProviderPreset]int{}
-	selectedCurrent := map[provider.ProviderPreset]bool{}
-
-	for _, candidate := range candidates {
-		preset := candidate.Profile.Preset
-		if preset == "" {
-			continue
-		}
-		current := onboardingCandidateMatchesProfile(candidate, active)
-		index, exists := indexByPreset[preset]
-		if !exists {
-			indexByPreset[preset] = len(collapsed)
-			collapsed = append(collapsed, candidate)
-			selectedCurrent[preset] = current
-			continue
-		}
-		if current && !selectedCurrent[preset] {
-			collapsed[index] = candidate
-			selectedCurrent[preset] = true
-		}
-	}
-
-	return collapsed
-}
-
 func onboardingCandidateMatchesProfile(candidate provider.OnboardingCandidate, profile provider.Profile) bool {
 	if candidate.Profile.Preset == "" || profile.Preset == "" {
 		return false
@@ -1495,31 +1452,6 @@ func (m Model) currentSettingsModelIndex() int {
 		}
 	}
 	return 0
-}
-
-func (m Model) settingsConfiguredProfiles() []provider.Profile {
-	profiles := []provider.Profile{}
-	seen := map[string]struct{}{}
-
-	if m.activeProvider.Preset != "" {
-		key := settingsProfileKey(m.activeProvider)
-		seen[key] = struct{}{}
-		profiles = append(profiles, m.activeProvider)
-	}
-
-	for _, entry := range m.settingsProviders {
-		if entry.candidate == nil || entry.candidate.Manual {
-			continue
-		}
-		key := settingsProfileKey(entry.candidate.Profile)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		profiles = append(profiles, entry.candidate.Profile)
-	}
-
-	return profiles
 }
 
 func (m *Model) appendTranscriptEntry(entry Entry) {

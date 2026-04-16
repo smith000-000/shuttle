@@ -487,10 +487,6 @@ func (m Model) switchOnboardingProfile(profile provider.Profile) (tea.Model, tea
 	return m.switchProfile(profile, "")
 }
 
-func (m Model) switchSettingsProfile(profile provider.Profile, step settingsStep) (tea.Model, tea.Cmd) {
-	return m.switchProfile(profile, step)
-}
-
 func (m Model) switchRuntimeSelection(runtimeType string, runtimeCommand string, step settingsStep) (tea.Model, tea.Cmd) {
 	shellContext := m.currentShellContext()
 	trackedShell := m.ctrl.TrackedShellTarget()
@@ -839,62 +835,6 @@ func (m Model) loadSettingsModelsForProfile(profile provider.Profile) (tea.Model
 			choices = append(choices, settingsModelChoice{profile: profile, model: model})
 		}
 		return settingsModelsLoadedMsg{profile: profile, choices: choices}
-	}
-}
-
-func (m Model) loadSettingsModels() (tea.Model, tea.Cmd) {
-	profiles := m.settingsConfiguredProfiles()
-	if m.settingsModelScope != "" {
-		filtered := make([]provider.Profile, 0, len(profiles))
-		for _, profile := range profiles {
-			if profile.Preset == m.settingsModelScope {
-				filtered = append(filtered, profile)
-			}
-		}
-		profiles = filtered
-	}
-	if len(profiles) == 0 {
-		m.entries = append(m.entries, Entry{
-			Title: "system",
-			Body:  "No configured providers are available yet. Configure one from Providers first.",
-		})
-		m.selectedEntry = len(m.entries) - 1
-		m.clampSelection()
-		return m, nil
-	}
-	if m.loadModels == nil {
-		return m, nil
-	}
-
-	m.busy = true
-	m.busyStartedAt = time.Now()
-	return m, func() tea.Msg {
-		choices := make([]settingsModelChoice, 0, 16)
-		for _, profile := range profiles {
-			models, err := m.loadModels(profile)
-			if err != nil {
-				if strings.TrimSpace(profile.Model) == "" {
-					continue
-				}
-				models = []provider.ModelOption{{
-					ID:          profile.Model,
-					Description: "currently saved model",
-				}}
-			}
-			if strings.TrimSpace(profile.Model) != "" && !containsModelOption(models, profile.Model) {
-				models = append([]provider.ModelOption{{
-					ID:          profile.Model,
-					Description: "currently saved model",
-				}}, models...)
-			}
-			for _, model := range models {
-				choices = append(choices, settingsModelChoice{
-					profile: profile,
-					model:   model,
-				})
-			}
-		}
-		return settingsModelsLoadedMsg{choices: choices}
 	}
 }
 

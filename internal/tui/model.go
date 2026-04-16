@@ -423,7 +423,6 @@ type Model struct {
 	settingsModels               []settingsModelChoice
 	settingsModelIdx             int
 	settingsModelFilter          string
-	settingsModelScope           provider.ProviderPreset
 	settingsModelInfo            bool
 	settingsModelListActive      bool
 	settingsModelBrowseAll       bool
@@ -2279,7 +2278,6 @@ func (m Model) openSettings() (tea.Model, tea.Cmd) {
 	m.settingsModels = nil
 	m.settingsModelIdx = 0
 	m.settingsModelFilter = ""
-	m.settingsModelScope = ""
 	m.settingsModelInfo = false
 	m.settingsBanner = ""
 	m.settingsDetailReturnStep = settingsStepMenu

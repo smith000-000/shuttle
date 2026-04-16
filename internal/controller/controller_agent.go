@@ -221,11 +221,7 @@ func shellContextMateriallyChangedSinceLastResult(session SessionContext, lastRe
 
 	currentDirectory := normalizeComparableShellDirectory(currentPrompt.Directory, currentLocation)
 	previousDirectory := normalizeComparableShellDirectory(lastResult.ShellContext.Directory, previousLocation)
-	if currentDirectory != previousDirectory {
-		return true
-	}
-
-	return false
+	return currentDirectory != previousDirectory
 }
 
 func normalizeComparableShellDirectory(directory string, location shell.ShellLocation) string {

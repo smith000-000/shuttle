@@ -14,7 +14,11 @@ func TestOperationalLogRedactsSensitiveAttrs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer closeLogger()
+	defer func() {
+		if err := closeLogger(); err != nil {
+			t.Fatalf("close logger: %v", err)
+		}
+	}()
 
 	logger.Info(
 		"test",
@@ -56,7 +60,11 @@ func TestOperationalLogKeepsNonSensitiveAttrs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer closeLogger()
+	defer func() {
+		if err := closeLogger(); err != nil {
+			t.Fatalf("close logger: %v", err)
+		}
+	}()
 
 	logger.Info("workspace ready", slog.String("session", "shuttle_abc123"), slog.Bool("created", true))
 
@@ -76,7 +84,11 @@ func TestOperationalLogUsesPrivateFilePermissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	defer closeLogger()
+	defer func() {
+		if err := closeLogger(); err != nil {
+			t.Fatalf("close logger: %v", err)
+		}
+	}()
 
 	info, err := os.Stat(logPath)
 	if err != nil {
