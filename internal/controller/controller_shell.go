@@ -146,7 +146,7 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 		DisplaySummary: recentDisplayOutput,
 	}
 	if hasPromptContext {
-		contextCopy := promptContext
+		contextCopy := shellContextWithResolvedDirectory(promptContext, &observed.Location)
 		summary.ShellContext = &contextCopy
 	}
 
@@ -157,7 +157,7 @@ func (c *LocalController) reconcileExecutionAfterTakeControl(ctx context.Context
 		return prependTranscriptEvent(nil, trackedShellEvent), false, false, nil
 	}
 	if hasPromptContext {
-		contextCopy := promptContext
+		contextCopy := shellContextWithResolvedDirectory(promptContext, &observed.Location)
 		c.applyPromptContextLocked(&contextCopy)
 	} else if observed.Location.Kind != "" {
 		c.applyShellLocationLocked(observed.Location)
@@ -239,7 +239,7 @@ func (c *LocalController) RefreshShellContext(ctx context.Context) (*shell.Promp
 			c.session.SessionName = trackedShell.SessionName
 		}
 		c.applyObservedShellStateLocked(observed)
-		contextCopy := observed.PromptContext
+		contextCopy := shellContextWithResolvedDirectory(observed.PromptContext, c.session.CurrentShellLocation)
 		c.mu.Unlock()
 		return &contextCopy, nil
 	}
@@ -251,7 +251,7 @@ func (c *LocalController) RefreshShellContext(ctx context.Context) (*shell.Promp
 	if current == nil || current.PromptLine() == "" {
 		return nil, nil
 	}
-	contextCopy := *current
+	contextCopy := shellContextWithResolvedDirectory(*current, c.session.CurrentShellLocation)
 	return &contextCopy, nil
 }
 

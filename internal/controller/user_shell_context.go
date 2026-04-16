@@ -126,6 +126,24 @@ func (c *LocalController) applyObservedShellStateLocked(observed *shell.Observed
 	c.refreshRemoteCapabilityHintLocked()
 }
 
+func shellContextWithResolvedDirectory(promptContext shell.PromptContext, location *shell.ShellLocation) shell.PromptContext {
+	contextCopy := promptContext
+	if location == nil {
+		return contextCopy
+	}
+
+	resolvedDirectory := normalizeShellWorkingDirectory(location.Directory, location)
+	if resolvedDirectory == "" {
+		return contextCopy
+	}
+
+	promptDirectory := normalizeShellWorkingDirectory(contextCopy.Directory, location)
+	if promptDirectory == "" || promptDirectory != resolvedDirectory {
+		contextCopy.Directory = strings.TrimSpace(location.Directory)
+	}
+	return contextCopy
+}
+
 func isRemoteShellLocation(location *shell.ShellLocation, prompt *shell.PromptContext) bool {
 	return effectiveShellLocation(location, prompt).Kind == shell.ShellLocationRemote
 }

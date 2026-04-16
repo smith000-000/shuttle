@@ -19,18 +19,21 @@ const (
 	RequestCompactTask            RequestKind = "compact_task"
 	RequestExecutionCheckIn       RequestKind = "execution_checkin"
 	RequestLostExecutionRecovery  RequestKind = "lost_execution_recovery"
+	RequestResolveApproval        RequestKind = "resolve_approval"
 	RequestResumeAfterTakeControl RequestKind = "resume_after_take_control"
 )
 
 type Request struct {
-	Kind          RequestKind
-	Prompt        string
-	UserPrompt    string
-	SessionName   string
-	TaskID        string
-	InspectBudget int
-	Proposal      *Proposal
-	Approval      *ApprovalRequest
+	Kind             RequestKind
+	Prompt           string
+	UserPrompt       string
+	SessionName      string
+	TaskID           string
+	InspectBudget    int
+	Proposal         *Proposal
+	Approval         *ApprovalRequest
+	ApprovalDecision ApprovalDecision
+	ApprovalNote     string
 }
 
 type Outcome struct {
@@ -477,6 +480,8 @@ func codexSDKKindGuidance(kind RequestKind) string {
 		return "Interpret the active execution check-in and decide whether to wait, report status, or intervene."
 	case RequestLostExecutionRecovery:
 		return "Recover from lost execution tracking using the latest execution snapshot and shell context."
+	case RequestResolveApproval:
+		return "Resolve the pending runtime-owned approval using the supplied approval context and user decision, then continue the suspended turn."
 	case RequestResumeAfterTakeControl:
 		return "Resume the task after the operator took control. Reconcile the current shell state before choosing the next action."
 	default:

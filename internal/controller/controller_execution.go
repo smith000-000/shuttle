@@ -599,7 +599,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 			completedAt := time.Now()
 			lostExecution.CompletedAt = &completedAt
 			if result.ShellContext.PromptLine() != "" {
-				shellContext := result.ShellContext
+				shellContext := shellContextWithResolvedDirectory(result.ShellContext, &result.Location)
 				lostExecution.ShellContextAfter = &shellContext
 				c.applyPromptContextLocked(&shellContext)
 			}
@@ -622,7 +622,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 				DisplaySummary: lostExecution.LatestDisplayTail,
 			}
 			if result.ShellContext.PromptLine() != "" {
-				shellContext := result.ShellContext
+				shellContext := shellContextWithResolvedDirectory(result.ShellContext, &result.Location)
 				summary.ShellContext = &shellContext
 			}
 			c.task.LastCommandResult = &summary
@@ -709,7 +709,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 			DisplaySummary: finalDisplayOutput,
 		}
 		if result.ShellContext.PromptLine() != "" {
-			shellContext := result.ShellContext
+			shellContext := shellContextWithResolvedDirectory(result.ShellContext, &result.Location)
 			summary.ShellContext = &shellContext
 			canceledExecution.ShellContextAfter = &shellContext
 			if shouldSyncExecutionIntoUserShellSession(current, c.session) {
@@ -766,7 +766,7 @@ func (c *LocalController) submitShellCommand(ctx context.Context, command string
 		DisplaySummary: finalDisplayOutput,
 	}
 	if result.ShellContext.PromptLine() != "" {
-		shellContext := result.ShellContext
+		shellContext := shellContextWithResolvedDirectory(result.ShellContext, &result.Location)
 		summary.ShellContext = &shellContext
 		completedExecution.ShellContextAfter = &shellContext
 		if shouldSyncExecutionIntoUserShellSession(current, c.session) {
@@ -856,6 +856,11 @@ func (c *LocalController) DecideApproval(ctx context.Context, approvalID string,
 		c.mu.Unlock()
 		return []TranscriptEvent{errEvent}, nil
 	}
+	if strings.TrimSpace(pending.ContinuationToken) != "" {
+		approvalCopy := *pending
+		c.mu.Unlock()
+		return c.resolveRuntimeOwnedApproval(ctx, approvalCopy, decision, refineText)
+	}
 
 	switch decision {
 	case DecisionReject:
@@ -900,6 +905,61 @@ func (c *LocalController) DecideApproval(ctx context.Context, approvalID string,
 		c.mu.Unlock()
 		return nil, fmt.Errorf("unsupported approval decision %q", decision)
 	}
+}
+
+func (c *LocalController) resolveRuntimeOwnedApproval(ctx context.Context, approval ApprovalRequest, decision ApprovalDecision, refineText string) ([]TranscriptEvent, error) {
+	if decision == DecisionRefine {
+		c.mu.Lock()
+		event := c.newEvent(EventError, TextPayload{Text: "Refining runtime-owned approvals is not supported yet."})
+		c.appendEvents(event)
+		c.mu.Unlock()
+		return []TranscriptEvent{event}, nil
+	}
+
+	c.mu.Lock()
+	req := agentruntime.Request{
+		Kind:             agentruntime.RequestResolveApproval,
+		SessionName:      c.session.SessionName,
+		TaskID:           c.task.TaskID,
+		ApprovalDecision: agentruntime.ApprovalDecision(decision),
+		ApprovalNote:     strings.TrimSpace(refineText),
+		Approval: &agentruntime.ApprovalRequest{
+			ID:                approval.ID,
+			Kind:              approval.Kind,
+			Title:             approval.Title,
+			Summary:           approval.Summary,
+			Command:           approval.Command,
+			Patch:             approval.Patch,
+			PatchTarget:       approval.PatchTarget,
+			Risk:              approval.Risk,
+			ContinuationToken: approval.ContinuationToken,
+		},
+	}
+	c.mu.Unlock()
+
+	events, err := c.handleRuntimeRequest(ctx, req, false)
+	if err != nil {
+		return events, err
+	}
+	if containsRuntimeEventKind(events, EventError) {
+		return events, nil
+	}
+
+	c.mu.Lock()
+	if c.task.PendingApproval != nil && c.task.PendingApproval.ID == approval.ID {
+		c.task.PendingApproval = nil
+	}
+	c.mu.Unlock()
+	return events, nil
+}
+
+func containsRuntimeEventKind(events []TranscriptEvent, kind TranscriptEventKind) bool {
+	for _, event := range events {
+		if event.Kind == kind {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *LocalController) ActiveExecution() *CommandExecution {

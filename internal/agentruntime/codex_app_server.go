@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -32,24 +33,26 @@ type codexAppServerRuntime struct {
 type codexAppServerClientFactoryFunc func(context.Context) (codexAppServerClient, error)
 
 type codexAppServerDefaultHandler struct {
-	meta          RuntimeMetadata
-	clientFactory codexAppServerClientFactoryFunc
-	mu            sync.Mutex
-	client        codexAppServerClient
-	threads       map[string]string
+	meta             RuntimeMetadata
+	clientFactory    codexAppServerClientFactoryFunc
+	mu               sync.Mutex
+	client           codexAppServerClient
+	threads          map[string]string
+	pendingApprovals map[string]codexAppServerPendingApproval
 }
 
 type codexAppServerClient interface {
 	Initialize(context.Context) error
 	StartThread(context.Context, codexAppServerThreadStartParams) (codexAppServerThreadStartResult, error)
 	StartTurn(context.Context, codexAppServerTurnStartParams) (codexAppServerTurnStartResult, error)
-	WaitForTurnCompletion(context.Context, string, string) (codexAppServerTurn, error)
+	WaitForTurnCompletion(context.Context, string, string) (codexAppServerWaitResult, error)
+	ResolveApproval(context.Context, codexAppServerPendingApproval, ApprovalDecision) error
 	Close() error
 }
 
 type codexAppServerJSONRPC struct {
 	JSONRPC string          `json:"jsonrpc,omitempty"`
-	ID      int64           `json:"id,omitempty"`
+	ID      string          `json:"id,omitempty"`
 	Method  string          `json:"method,omitempty"`
 	Params  json.RawMessage `json:"params,omitempty"`
 	Result  json.RawMessage `json:"result,omitempty"`
@@ -57,6 +60,58 @@ type codexAppServerJSONRPC struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
+}
+
+type codexAppServerPermissionsRequestApprovalParams struct {
+	ItemID      string `json:"itemId"`
+	Permissions any    `json:"permissions"`
+	Reason      string `json:"reason,omitempty"`
+	ThreadID    string `json:"threadId"`
+	TurnID      string `json:"turnId"`
+}
+
+type codexAppServerCommandExecutionRequestApprovalParams struct {
+	ItemID                string `json:"itemId"`
+	ApprovalID            string `json:"approvalId,omitempty"`
+	ThreadID              string `json:"threadId"`
+	TurnID                string `json:"turnId"`
+	Command               string `json:"command,omitempty"`
+	Cwd                   string `json:"cwd,omitempty"`
+	Reason                string `json:"reason,omitempty"`
+	AdditionalPermissions any    `json:"additionalPermissions,omitempty"`
+}
+
+type codexAppServerPermissionsApprovalResponse struct {
+	Permissions any    `json:"permissions"`
+	Scope       string `json:"scope,omitempty"`
+}
+
+type codexAppServerCommandExecutionApprovalResponse struct {
+	Decision string `json:"decision"`
+}
+
+type codexAppServerFileChangeRequestApprovalParams struct {
+	ItemID    string `json:"itemId"`
+	ThreadID  string `json:"threadId"`
+	TurnID    string `json:"turnId"`
+	Reason    string `json:"reason,omitempty"`
+	GrantRoot string `json:"grantRoot,omitempty"`
+}
+
+type codexAppServerFileChangeApprovalResponse struct {
+	Decision string `json:"decision"`
+}
+
+type codexAppServerTurnPlanUpdatedNotification struct {
+	ThreadID    string                       `json:"threadId"`
+	TurnID      string                       `json:"turnId"`
+	Explanation string                       `json:"explanation,omitempty"`
+	Plan        []codexAppServerTurnPlanStep `json:"plan"`
+}
+
+type codexAppServerTurnPlanStep struct {
+	Status string `json:"status"`
+	Step   string `json:"step"`
 }
 
 type codexAppServerThreadStartParams struct {
@@ -74,13 +129,14 @@ type codexAppServerThreadStartResult struct {
 }
 
 type codexAppServerTurnStartParams struct {
-	ThreadID       string                    `json:"threadId"`
-	Input          []codexAppServerUserInput `json:"input"`
-	Cwd            string                    `json:"cwd,omitempty"`
-	Model          string                    `json:"model,omitempty"`
-	OutputSchema   map[string]any            `json:"outputSchema,omitempty"`
-	ApprovalPolicy string                    `json:"approvalPolicy,omitempty"`
-	Personality    string                    `json:"personality,omitempty"`
+	ThreadID          string                    `json:"threadId"`
+	Input             []codexAppServerUserInput `json:"input"`
+	Cwd               string                    `json:"cwd,omitempty"`
+	Model             string                    `json:"model,omitempty"`
+	OutputSchema      map[string]any            `json:"outputSchema,omitempty"`
+	ApprovalPolicy    string                    `json:"approvalPolicy,omitempty"`
+	ApprovalsReviewer string                    `json:"approvalsReviewer,omitempty"`
+	Personality       string                    `json:"personality,omitempty"`
 }
 
 type codexAppServerUserInput struct {
@@ -109,9 +165,30 @@ type codexAppServerThread struct {
 }
 
 type codexAppServerTurn struct {
-	ID     string                     `json:"id"`
-	Status string                     `json:"status,omitempty"`
-	Items  []codexAppServerThreadItem `json:"items,omitempty"`
+	ID       string                     `json:"id"`
+	Status   string                     `json:"status,omitempty"`
+	Items    []codexAppServerThreadItem `json:"items,omitempty"`
+	Plan     []codexAppServerTurnPlanStep
+	PlanNote string
+}
+
+type codexAppServerPendingApproval struct {
+	RequestID            string
+	Method               string
+	ThreadID             string
+	TurnID               string
+	ItemID               string
+	ApprovalID           string
+	Command              string
+	Cwd                  string
+	Reason               string
+	GrantRoot            string
+	RequestedPermissions any
+}
+
+type codexAppServerWaitResult struct {
+	Turn            *codexAppServerTurn
+	PendingApproval *codexAppServerPendingApproval
 }
 
 type codexAppServerThreadItem struct {
@@ -167,9 +244,10 @@ func NewCodexAppServerRuntime(meta RuntimeMetadata, handler CodexAppServerTurnHa
 	runtime := codexAppServerRuntime{meta: meta, handler: handler}
 	if handler == nil {
 		runtime.handler = &codexAppServerDefaultHandler{
-			meta:          meta,
-			clientFactory: codexAppServerClientFactory(strings.TrimSpace(meta.Command), meta),
-			threads:       map[string]string{},
+			meta:             meta,
+			clientFactory:    codexAppServerClientFactory(strings.TrimSpace(meta.Command), meta),
+			threads:          map[string]string{},
+			pendingApprovals: map[string]codexAppServerPendingApproval{},
 		}
 	}
 	return runtime
@@ -189,6 +267,9 @@ func (r codexAppServerRuntime) Handle(ctx context.Context, host Host, req Reques
 func (h *codexAppServerDefaultHandler) respond(ctx context.Context, req Request) (Outcome, error) {
 	if h.clientFactory == nil {
 		return Outcome{}, errors.New("codex app server client factory is required")
+	}
+	if req.Kind == RequestResolveApproval {
+		return h.resolvePendingApproval(ctx, req)
 	}
 
 	outcome, reusedStoredThread, err := h.respondOnce(ctx, req)
@@ -239,7 +320,7 @@ func (h *codexAppServerDefaultHandler) respondWithThreadPreference(ctx context.C
 	threadID := strings.TrimSpace(storedThreadID)
 	if !useStoredThread || threadID == "" {
 		thread, startErr := client.StartThread(ctx, codexAppServerThreadStartParams{
-			ApprovalPolicy: "never",
+			ApprovalPolicy: "on-request",
 			Cwd:            cwd,
 			Ephemeral:      false,
 			Model:          strings.TrimSpace(h.meta.Model),
@@ -259,19 +340,29 @@ func (h *codexAppServerDefaultHandler) respondWithThreadPreference(ctx context.C
 			Type: "text",
 			Text: buildCodexSDKPrompt(req),
 		}},
-		Cwd:            cwd,
-		Model:          strings.TrimSpace(h.meta.Model),
-		OutputSchema:   shuttleAgentResponseSchema(),
-		ApprovalPolicy: "never",
-		Personality:    "pragmatic",
+		Cwd:               cwd,
+		Model:             strings.TrimSpace(h.meta.Model),
+		OutputSchema:      shuttleAgentResponseSchema(),
+		ApprovalPolicy:    "on-request",
+		ApprovalsReviewer: "user",
+		Personality:       "pragmatic",
 	})
 	if err != nil {
 		return Outcome{}, err
 	}
-	completedTurn, err := client.WaitForTurnCompletion(ctx, threadID, turn.Turn.ID)
+	waitResult, err := client.WaitForTurnCompletion(ctx, threadID, turn.Turn.ID)
 	if err != nil {
 		return Outcome{}, err
 	}
+	if waitResult.PendingApproval != nil {
+		approval := *waitResult.PendingApproval
+		h.storePendingApproval(req, approval)
+		return Outcome{Approval: codexAppServerPendingApprovalToApprovalRequest(approval)}, nil
+	}
+	if waitResult.Turn == nil {
+		return Outcome{}, errors.New("codex app server turn completed without a result")
+	}
+	completedTurn := *waitResult.Turn
 	text := latestCodexAppServerAgentMessage(completedTurn.Items)
 	if strings.TrimSpace(text) == "" {
 		return Outcome{}, errors.New("codex app server completed turn without a final agent message")
@@ -280,7 +371,63 @@ func (h *codexAppServerDefaultHandler) respondWithThreadPreference(ctx context.C
 	if err := json.Unmarshal([]byte(text), &structured); err != nil {
 		return Outcome{}, fmt.Errorf("decode codex app server structured output: %w", err)
 	}
-	return structuredToOutcome(structured)
+	outcome, err := structuredToOutcome(structured)
+	if err != nil {
+		return Outcome{}, err
+	}
+	return applyCodexAppServerTurnPlanToOutcome(outcome, completedTurn.Plan, completedTurn.PlanNote), nil
+}
+
+func (h *codexAppServerDefaultHandler) resolvePendingApproval(ctx context.Context, req Request) (Outcome, error) {
+	if req.Approval == nil {
+		return Outcome{}, errors.New("runtime approval resolution requires approval context")
+	}
+	if req.ApprovalDecision == "" {
+		return Outcome{}, errors.New("runtime approval resolution requires a decision")
+	}
+	pending, ok := h.pendingApprovalFor(req)
+	if !ok {
+		return Outcome{}, errors.New("runtime approval request not found")
+	}
+	if token := strings.TrimSpace(req.Approval.ContinuationToken); token != "" && token != pending.RequestID {
+		return Outcome{}, errors.New("runtime approval continuation token does not match the active request")
+	}
+
+	client, err := h.clientFor(ctx)
+	if err != nil {
+		return Outcome{}, err
+	}
+	if err := client.ResolveApproval(ctx, pending, req.ApprovalDecision); err != nil {
+		return Outcome{}, err
+	}
+	h.clearPendingApproval(req)
+
+	waitResult, err := client.WaitForTurnCompletion(ctx, pending.ThreadID, pending.TurnID)
+	if err != nil {
+		return Outcome{}, err
+	}
+	if waitResult.PendingApproval != nil {
+		approval := *waitResult.PendingApproval
+		h.storePendingApproval(req, approval)
+		return Outcome{Approval: codexAppServerPendingApprovalToApprovalRequest(approval)}, nil
+	}
+	if waitResult.Turn == nil {
+		return Outcome{}, errors.New("codex app server approval resolution completed without a turn result")
+	}
+	completedTurn := *waitResult.Turn
+	text := latestCodexAppServerAgentMessage(completedTurn.Items)
+	if strings.TrimSpace(text) == "" {
+		return Outcome{}, errors.New("codex app server completed turn without a final agent message")
+	}
+	var structured shuttleStructuredResponse
+	if err := json.Unmarshal([]byte(text), &structured); err != nil {
+		return Outcome{}, fmt.Errorf("decode codex app server structured output: %w", err)
+	}
+	outcome, err := structuredToOutcome(structured)
+	if err != nil {
+		return Outcome{}, err
+	}
+	return applyCodexAppServerTurnPlanToOutcome(outcome, completedTurn.Plan, completedTurn.PlanNote), nil
 }
 
 func (h *codexAppServerDefaultHandler) clientFor(ctx context.Context) (codexAppServerClient, error) {
@@ -301,6 +448,9 @@ func (h *codexAppServerDefaultHandler) clientFor(ctx context.Context) (codexAppS
 	if h.threads == nil {
 		h.threads = map[string]string{}
 	}
+	if h.pendingApprovals == nil {
+		h.pendingApprovals = map[string]codexAppServerPendingApproval{}
+	}
 	return h.client, nil
 }
 
@@ -320,6 +470,28 @@ func (h *codexAppServerDefaultHandler) storeThread(req Request, threadID string)
 	h.threads[codexAppServerMemoryThreadKey(req.SessionName, req.TaskID)] = strings.TrimSpace(threadID)
 }
 
+func (h *codexAppServerDefaultHandler) pendingApprovalFor(req Request) (codexAppServerPendingApproval, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	approval, ok := h.pendingApprovals[codexAppServerMemoryThreadKey(req.SessionName, req.TaskID)]
+	return approval, ok
+}
+
+func (h *codexAppServerDefaultHandler) storePendingApproval(req Request, approval codexAppServerPendingApproval) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.pendingApprovals == nil {
+		h.pendingApprovals = map[string]codexAppServerPendingApproval{}
+	}
+	h.pendingApprovals[codexAppServerMemoryThreadKey(req.SessionName, req.TaskID)] = approval
+}
+
+func (h *codexAppServerDefaultHandler) clearPendingApproval(req Request) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.pendingApprovals, codexAppServerMemoryThreadKey(req.SessionName, req.TaskID))
+}
+
 func (h *codexAppServerDefaultHandler) resetClientAndThread(req Request) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -328,6 +500,7 @@ func (h *codexAppServerDefaultHandler) resetClientAndThread(req Request) {
 		h.client = nil
 	}
 	delete(h.threads, codexAppServerMemoryThreadKey(req.SessionName, req.TaskID))
+	delete(h.pendingApprovals, codexAppServerMemoryThreadKey(req.SessionName, req.TaskID))
 }
 
 func codexAppServerMemoryThreadKey(sessionName string, taskID string) string {
@@ -357,9 +530,17 @@ func newStdioCodexAppServerClient(ctx context.Context, command string, meta Runt
 }
 
 func (c *stdioCodexAppServerClient) Initialize(ctx context.Context) error {
-	params := map[string]any{"clientInfo": map[string]any{"name": "shuttle", "version": "0.1"}}
+	params := map[string]any{
+		"clientInfo": map[string]any{"name": "shuttle", "version": "0.1"},
+		"capabilities": map[string]any{
+			"experimentalApi": true,
+		},
+	}
 	var result map[string]any
-	return c.call(ctx, "initialize", params, &result)
+	if err := c.call(ctx, "initialize", params, &result); err != nil {
+		return err
+	}
+	return c.sendNotification(ctx, "initialized", nil)
 }
 
 func (c *stdioCodexAppServerClient) StartThread(ctx context.Context, params codexAppServerThreadStartParams) (codexAppServerThreadStartResult, error) {
@@ -372,21 +553,43 @@ func (c *stdioCodexAppServerClient) StartTurn(ctx context.Context, params codexA
 	return result, c.call(ctx, "turn/start", params, &result)
 }
 
-func (c *stdioCodexAppServerClient) WaitForTurnCompletion(ctx context.Context, threadID string, turnID string) (codexAppServerTurn, error) {
+func (c *stdioCodexAppServerClient) WaitForTurnCompletion(ctx context.Context, threadID string, turnID string) (codexAppServerWaitResult, error) {
 	var latestAgentMessage string
+	var latestPlan []codexAppServerTurnPlanStep
+	var latestPlanNote string
 	for {
 		message, err := c.readMessage(ctx)
 		if err != nil {
-			return codexAppServerTurn{}, err
+			return codexAppServerWaitResult{}, err
 		}
 		if message.Method == "error" {
-			return codexAppServerTurn{}, fmt.Errorf("codex app server error notification: %s", strings.TrimSpace(string(message.Params)))
+			return codexAppServerWaitResult{}, fmt.Errorf("codex app server error notification: %s", strings.TrimSpace(string(message.Params)))
+		}
+		if strings.TrimSpace(message.Method) != "" && strings.TrimSpace(message.ID) != "" {
+			pendingApproval, handled, err := c.decodePendingApproval(message)
+			if err != nil {
+				return codexAppServerWaitResult{}, err
+			}
+			if handled {
+				return codexAppServerWaitResult{PendingApproval: pendingApproval}, nil
+			}
+			return codexAppServerWaitResult{}, c.sendRequestError(ctx, message.ID, -32601, "unsupported request from codex app server")
 		}
 		switch message.Method {
+		case "turn/plan/updated":
+			var notification codexAppServerTurnPlanUpdatedNotification
+			if err := json.Unmarshal(message.Params, &notification); err != nil {
+				return codexAppServerWaitResult{}, fmt.Errorf("decode codex app server plan update: %w", err)
+			}
+			if strings.TrimSpace(notification.ThreadID) != strings.TrimSpace(threadID) || strings.TrimSpace(notification.TurnID) != strings.TrimSpace(turnID) {
+				continue
+			}
+			latestPlan = append([]codexAppServerTurnPlanStep(nil), notification.Plan...)
+			latestPlanNote = strings.TrimSpace(notification.Explanation)
 		case "item/completed":
 			var notification codexAppServerItemCompletedNotification
 			if err := json.Unmarshal(message.Params, &notification); err != nil {
-				return codexAppServerTurn{}, fmt.Errorf("decode codex app server item completion: %w", err)
+				return codexAppServerWaitResult{}, fmt.Errorf("decode codex app server item completion: %w", err)
 			}
 			if strings.TrimSpace(notification.ThreadID) != strings.TrimSpace(threadID) || strings.TrimSpace(notification.TurnID) != strings.TrimSpace(turnID) {
 				continue
@@ -394,10 +597,13 @@ func (c *stdioCodexAppServerClient) WaitForTurnCompletion(ctx context.Context, t
 			if notification.Item.Type == "agentMessage" && strings.TrimSpace(notification.Item.Text) != "" {
 				latestAgentMessage = strings.TrimSpace(notification.Item.Text)
 			}
+			if notification.Item.Type == "plan" && strings.TrimSpace(notification.Item.Text) != "" {
+				latestPlan = append(latestPlan, codexAppServerTurnPlanStep{Step: notification.Item.Text, Status: "pending"})
+			}
 		case "turn/completed":
 			var notification codexAppServerTurnCompletedNotification
 			if err := json.Unmarshal(message.Params, &notification); err != nil {
-				return codexAppServerTurn{}, fmt.Errorf("decode codex app server turn completion: %w", err)
+				return codexAppServerWaitResult{}, fmt.Errorf("decode codex app server turn completion: %w", err)
 			}
 			if strings.TrimSpace(notification.ThreadID) != strings.TrimSpace(threadID) {
 				continue
@@ -408,8 +614,37 @@ func (c *stdioCodexAppServerClient) WaitForTurnCompletion(ctx context.Context, t
 			if len(notification.Turn.Items) == 0 && latestAgentMessage != "" {
 				notification.Turn.Items = []codexAppServerThreadItem{{Type: "agentMessage", Text: latestAgentMessage, Phase: "final_answer"}}
 			}
-			return notification.Turn, nil
+			notification.Turn.Plan = latestPlan
+			notification.Turn.PlanNote = latestPlanNote
+			return codexAppServerWaitResult{Turn: &notification.Turn}, nil
 		}
+	}
+}
+
+func (c *stdioCodexAppServerClient) ResolveApproval(ctx context.Context, pending codexAppServerPendingApproval, decision ApprovalDecision) error {
+	switch pending.Method {
+	case "item/permissions/requestApproval":
+		response := codexAppServerPermissionsApprovalResponse{Scope: "turn"}
+		if decision == DecisionApprove {
+			response.Permissions = pending.RequestedPermissions
+		} else {
+			response.Permissions = map[string]any{}
+		}
+		return c.sendRequestResponse(ctx, pending.RequestID, response)
+	case "item/commandExecution/requestApproval":
+		response := codexAppServerCommandExecutionApprovalResponse{Decision: "decline"}
+		if decision == DecisionApprove {
+			response.Decision = "accept"
+		}
+		return c.sendRequestResponse(ctx, pending.RequestID, response)
+	case "item/fileChange/requestApproval":
+		response := codexAppServerFileChangeApprovalResponse{Decision: "decline"}
+		if decision == DecisionApprove {
+			response.Decision = "accept"
+		}
+		return c.sendRequestResponse(ctx, pending.RequestID, response)
+	default:
+		return fmt.Errorf("unsupported codex app server approval method %q", pending.Method)
 	}
 }
 
@@ -474,9 +709,116 @@ func (c *stdioCodexAppServerClient) call(ctx context.Context, method string, par
 	}
 }
 
-func (c *stdioCodexAppServerClient) nextRequestID() int64 {
+func (c *stdioCodexAppServerClient) nextRequestID() string {
 	c.nextID++
-	return c.nextID
+	return strconv.FormatInt(c.nextID, 10)
+}
+
+func (c *stdioCodexAppServerClient) decodePendingApproval(message codexAppServerJSONRPC) (*codexAppServerPendingApproval, bool, error) {
+	if message.Method == "" || message.ID == "" {
+		return nil, false, nil
+	}
+	switch message.Method {
+	case "item/permissions/requestApproval":
+		var params codexAppServerPermissionsRequestApprovalParams
+		if err := json.Unmarshal(message.Params, &params); err != nil {
+			return nil, false, fmt.Errorf("decode codex app server permissions approval request: %w", err)
+		}
+		return &codexAppServerPendingApproval{
+			RequestID:            message.ID,
+			Method:               message.Method,
+			ThreadID:             params.ThreadID,
+			TurnID:               params.TurnID,
+			ItemID:               params.ItemID,
+			Reason:               strings.TrimSpace(params.Reason),
+			RequestedPermissions: params.Permissions,
+		}, true, nil
+	case "item/commandExecution/requestApproval":
+		var params codexAppServerCommandExecutionRequestApprovalParams
+		if err := json.Unmarshal(message.Params, &params); err != nil {
+			return nil, false, fmt.Errorf("decode codex app server command approval request: %w", err)
+		}
+		return &codexAppServerPendingApproval{
+			RequestID:            message.ID,
+			Method:               message.Method,
+			ThreadID:             params.ThreadID,
+			TurnID:               params.TurnID,
+			ItemID:               params.ItemID,
+			ApprovalID:           params.ApprovalID,
+			Command:              strings.TrimSpace(params.Command),
+			Cwd:                  strings.TrimSpace(params.Cwd),
+			Reason:               strings.TrimSpace(params.Reason),
+			RequestedPermissions: params.AdditionalPermissions,
+		}, true, nil
+	case "item/fileChange/requestApproval":
+		var params codexAppServerFileChangeRequestApprovalParams
+		if err := json.Unmarshal(message.Params, &params); err != nil {
+			return nil, false, fmt.Errorf("decode codex app server file-change approval request: %w", err)
+		}
+		return &codexAppServerPendingApproval{
+			RequestID: message.ID,
+			Method:    message.Method,
+			ThreadID:  params.ThreadID,
+			TurnID:    params.TurnID,
+			ItemID:    params.ItemID,
+			Reason:    strings.TrimSpace(params.Reason),
+			GrantRoot: strings.TrimSpace(params.GrantRoot),
+		}, true, nil
+	}
+	return nil, false, nil
+}
+
+func (c *stdioCodexAppServerClient) sendRequestResponse(ctx context.Context, requestID string, result any) error {
+	payload := codexAppServerJSONRPC{JSONRPC: "2.0", ID: requestID, Result: mustMarshalJSON(result)}
+	return c.sendJSONRPC(ctx, payload)
+}
+
+func (c *stdioCodexAppServerClient) sendNotification(ctx context.Context, method string, params any) error {
+	payload := codexAppServerJSONRPC{JSONRPC: "2.0", Method: strings.TrimSpace(method)}
+	if params != nil {
+		payload.Params = mustMarshalJSON(params)
+	}
+	return c.sendJSONRPC(ctx, payload)
+}
+
+func (c *stdioCodexAppServerClient) sendRequestError(ctx context.Context, requestID string, code int, message string) error {
+	payload := codexAppServerJSONRPC{
+		JSONRPC: "2.0",
+		ID:      requestID,
+		Error: &struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		}{
+			Code:    code,
+			Message: message,
+		},
+	}
+	return c.sendJSONRPC(ctx, payload)
+}
+
+func (c *stdioCodexAppServerClient) sendJSONRPC(ctx context.Context, payload codexAppServerJSONRPC) error {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal codex app server json-rpc message: %w", err)
+	}
+	c.writeMu.Lock()
+	_, err = c.stdin.Write(append(encoded, '\n'))
+	c.writeMu.Unlock()
+	if err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return ctx.Err()
+		}
+		return fmt.Errorf("write codex app server json-rpc message: %w", err)
+	}
+	return nil
+}
+
+func mustMarshalJSON(value any) json.RawMessage {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return json.RawMessage("{}")
+	}
+	return json.RawMessage(encoded)
 }
 
 func (c *stdioCodexAppServerClient) readMessage(ctx context.Context) (codexAppServerJSONRPC, error) {
@@ -564,19 +906,76 @@ func shouldRetryCodexAppServerTurn(err error) bool {
 	}
 }
 
+func codexAppServerPendingApprovalToApprovalRequest(pending codexAppServerPendingApproval) *ApprovalRequest {
+	approval := &ApprovalRequest{
+		ID:                "runtime-approval:" + strings.TrimSpace(pending.RequestID),
+		Title:             "Runtime approval required",
+		Risk:              RiskMedium,
+		ContinuationToken: strings.TrimSpace(pending.RequestID),
+	}
+	switch pending.Method {
+	case "item/commandExecution/requestApproval":
+		approval.Kind = ApprovalCommand
+		approval.Title = "Approve command execution"
+		approval.Command = strings.TrimSpace(pending.Command)
+		parts := make([]string, 0, 4)
+		if reason := strings.TrimSpace(pending.Reason); reason != "" {
+			parts = append(parts, reason)
+		}
+		if cwd := strings.TrimSpace(pending.Cwd); cwd != "" {
+			parts = append(parts, "cwd: "+cwd)
+		}
+		if perms := formatCodexAppServerPermissionSummary(pending.RequestedPermissions); perms != "" {
+			parts = append(parts, "additional permissions: "+perms)
+		}
+		approval.Summary = strings.Join(parts, "\n")
+	case "item/fileChange/requestApproval":
+		approval.Kind = ApprovalPatch
+		approval.Title = "Approve file changes"
+		parts := make([]string, 0, 3)
+		if reason := strings.TrimSpace(pending.Reason); reason != "" {
+			parts = append(parts, reason)
+		}
+		if root := strings.TrimSpace(pending.GrantRoot); root != "" {
+			parts = append(parts, "grant root: "+root)
+		}
+		approval.Summary = strings.Join(parts, "\n")
+	case "item/permissions/requestApproval":
+		approval.Kind = ApprovalPlan
+		approval.Title = "Approve additional permissions"
+		parts := make([]string, 0, 2)
+		if reason := strings.TrimSpace(pending.Reason); reason != "" {
+			parts = append(parts, reason)
+		}
+		if perms := formatCodexAppServerPermissionSummary(pending.RequestedPermissions); perms != "" {
+			parts = append(parts, "requested permissions: "+perms)
+		}
+		approval.Summary = strings.Join(parts, "\n")
+	}
+	return approval
+}
+
+func formatCodexAppServerPermissionSummary(value any) string {
+	if value == nil {
+		return ""
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(encoded))
+}
+
 func structuredToOutcome(input shuttleStructuredResponse) (Outcome, error) {
 	outcome := Outcome{Message: strings.TrimSpace(input.Message)}
 	if len(input.PlanStepStatuses) > 0 {
 		statuses := make([]PlanStepStatus, 0, len(input.PlanStepStatuses))
 		for _, status := range input.PlanStepStatuses {
-			switch PlanStepStatus(strings.TrimSpace(status)) {
-			case PlanStepPending, PlanStepInProgress, PlanStepDone:
-				statuses = append(statuses, PlanStepStatus(strings.TrimSpace(status)))
-			case "":
-				return Outcome{}, fmt.Errorf("unsupported empty plan status")
-			default:
-				return Outcome{}, fmt.Errorf("unsupported plan status %q", status)
+			stepStatus, err := normalizeCodexPlanStepStatus(status)
+			if err != nil {
+				return Outcome{}, err
 			}
+			statuses = append(statuses, stepStatus)
 		}
 		outcome.PlanStatuses = statuses
 	}
@@ -602,6 +1001,56 @@ func structuredToOutcome(input shuttleStructuredResponse) (Outcome, error) {
 	}
 	outcome.Approval = approval
 	return outcome, nil
+}
+
+func applyCodexAppServerTurnPlanToOutcome(outcome Outcome, plan []codexAppServerTurnPlanStep, note string) Outcome {
+	steps := make([]string, 0, len(plan))
+	statuses := make([]PlanStepStatus, 0, len(plan))
+	for _, step := range plan {
+		stepText := strings.TrimSpace(step.Step)
+		if stepText == "" {
+			continue
+		}
+		steps = append(steps, stepText)
+		stepStatus, err := normalizeCodexPlanStepStatus(step.Status)
+		if err != nil {
+			stepStatus = PlanStepPending
+		}
+		statuses = append(statuses, stepStatus)
+	}
+	if len(steps) == 0 {
+		return outcome
+	}
+
+	if outcome.Plan == nil {
+		outcome.Plan = &Plan{}
+	}
+	if len(outcome.Plan.Steps) == 0 {
+		outcome.Plan.Steps = steps
+	}
+	if strings.TrimSpace(outcome.Plan.Summary) == "" {
+		outcome.Plan.Summary = strings.TrimSpace(note)
+	}
+	if len(outcome.PlanStatuses) == 0 {
+		outcome.PlanStatuses = statuses
+	}
+	return outcome
+}
+
+func normalizeCodexPlanStepStatus(status string) (PlanStepStatus, error) {
+	switch PlanStepStatus(strings.TrimSpace(status)) {
+	case "", "pending":
+		if strings.TrimSpace(status) == "" {
+			return "", fmt.Errorf("unsupported empty plan status")
+		}
+		return PlanStepPending, nil
+	case "in_progress", "inProgress":
+		return PlanStepInProgress, nil
+	case "done", "completed":
+		return PlanStepDone, nil
+	default:
+		return "", fmt.Errorf("unsupported plan status %q", status)
+	}
 }
 
 func parseStructuredProposal(input shuttleStructuredResponse) (*Proposal, error) {

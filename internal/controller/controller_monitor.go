@@ -224,7 +224,7 @@ func (c *LocalController) awaitAttachedMonitor(executionID string, monitor shell
 	completedAt := time.Now()
 	execution.CompletedAt = &completedAt
 	if result.ShellContext.PromptLine() != "" {
-		contextCopy := result.ShellContext
+		contextCopy := shellContextWithResolvedDirectory(result.ShellContext, &result.Location)
 		execution.ShellContextAfter = &contextCopy
 		if syncIntoUserShell {
 			c.applyPromptContextLocked(&contextCopy)
@@ -268,7 +268,7 @@ func (c *LocalController) awaitAttachedMonitor(executionID string, monitor shell
 		DisplaySummary: finalDisplayOutput,
 	}
 	if result.ShellContext.PromptLine() != "" {
-		contextCopy := result.ShellContext
+		contextCopy := shellContextWithResolvedDirectory(result.ShellContext, &result.Location)
 		summary.ShellContext = &contextCopy
 	}
 	c.task.LastCommandResult = &summary

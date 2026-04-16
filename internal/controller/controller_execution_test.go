@@ -1470,6 +1470,61 @@ func TestLocalControllerDirectShellCommandRefreshesTrackedUserShellContext(t *te
 	}
 }
 
+func TestLocalControllerCommandResultShellContextUsesResolvedDirectory(t *testing.T) {
+	controller := New(nil, &stubRunner{
+		result: shell.TrackedExecution{
+			CommandID: "cmd-1",
+			Command:   "pwd",
+			ExitCode:  0,
+			ShellContext: shell.PromptContext{
+				User:         "openclaw",
+				Host:         "openclaw",
+				Directory:    "~",
+				PromptSymbol: "$",
+				RawLine:      "openclaw@openclaw ~ $",
+				Remote:       true,
+			},
+			Location: shell.ShellLocation{
+				Kind:                shell.ShellLocationRemote,
+				User:                "openclaw",
+				Host:                "openclaw",
+				Directory:           "/srv/app",
+				DirectorySource:     shell.ShellDirectorySourceProbe,
+				DirectoryConfidence: shell.ConfidenceStrong,
+			},
+		},
+	}, nil, SessionContext{
+		SessionName:  "shuttle-test",
+		TrackedShell: TrackedShellTarget{SessionName: "shuttle-test", PaneID: "%0"},
+		CurrentShell: &shell.PromptContext{
+			User:         "openclaw",
+			Host:         "openclaw",
+			Directory:    "~",
+			PromptSymbol: "$",
+			RawLine:      "openclaw@openclaw ~ $",
+			Remote:       true,
+		},
+		CurrentShellLocation: &shell.ShellLocation{
+			Kind: shell.ShellLocationRemote,
+			User: "openclaw",
+			Host: "openclaw",
+		},
+	})
+
+	if _, err := controller.SubmitShellCommand(context.Background(), "pwd"); err != nil {
+		t.Fatalf("SubmitShellCommand() error = %v", err)
+	}
+
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if controller.task.LastCommandResult == nil || controller.task.LastCommandResult.ShellContext == nil {
+		t.Fatalf("expected shell context on last command result, got %#v", controller.task.LastCommandResult)
+	}
+	if controller.task.LastCommandResult.ShellContext.Directory != "/srv/app" {
+		t.Fatalf("expected resolved directory in command result shell context, got %#v", controller.task.LastCommandResult.ShellContext)
+	}
+}
+
 func TestLocalControllerActiveExecutionVisibleWhileCommandRuns(t *testing.T) {
 	runner := &blockingRunner{
 		started: make(chan struct{}, 1),

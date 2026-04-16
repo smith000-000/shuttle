@@ -110,14 +110,15 @@ func (c *LocalController) submitAgentTurnWithInspectBudget(ctx context.Context, 
 	}
 	if refinement != nil {
 		req.Approval = &agentruntime.ApprovalRequest{
-			ID:          refinement.ID,
-			Kind:        refinement.Kind,
-			Title:       refinement.Title,
-			Summary:     refinement.Summary,
-			Command:     refinement.Command,
-			Patch:       refinement.Patch,
-			PatchTarget: refinement.PatchTarget,
-			Risk:        refinement.Risk,
+			ID:                refinement.ID,
+			Kind:              refinement.Kind,
+			Title:             refinement.Title,
+			Summary:           refinement.Summary,
+			Command:           refinement.Command,
+			Patch:             refinement.Patch,
+			PatchTarget:       refinement.PatchTarget,
+			Risk:              refinement.Risk,
+			ContinuationToken: refinement.ContinuationToken,
 		}
 	}
 	if proposal != nil {

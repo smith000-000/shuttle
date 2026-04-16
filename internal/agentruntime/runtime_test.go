@@ -1,7 +1,10 @@
 package agentruntime
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -70,8 +73,12 @@ func (s *stubCodexAppServerHandler) Respond(_ context.Context, _ Request) (Outco
 type fakeCodexAppServerClient struct {
 	startThreadCalls int
 	startTurnCalls   []codexAppServerTurnStartParams
+	resolveCalls     []ApprovalDecision
 	threadID         string
+	turnPlan         []codexAppServerTurnPlanStep
+	turnPlanNote     string
 	turnResponse     shuttleStructuredResponse
+	pendingApproval  *codexAppServerPendingApproval
 	startTurnErr     error
 	waitErr          error
 }
@@ -99,18 +106,31 @@ func (f *fakeCodexAppServerClient) StartTurn(_ context.Context, params codexAppS
 	}, nil
 }
 
-func (f *fakeCodexAppServerClient) WaitForTurnCompletion(context.Context, string, string) (codexAppServerTurn, error) {
+func (f *fakeCodexAppServerClient) WaitForTurnCompletion(context.Context, string, string) (codexAppServerWaitResult, error) {
 	if f.waitErr != nil {
-		return codexAppServerTurn{}, f.waitErr
+		return codexAppServerWaitResult{}, f.waitErr
 	}
-	return codexAppServerTurn{
-		ID:     "turn-1",
-		Status: "completed",
+	if f.pendingApproval != nil {
+		approval := *f.pendingApproval
+		f.pendingApproval = nil
+		return codexAppServerWaitResult{PendingApproval: &approval}, nil
+	}
+	turn := codexAppServerTurn{
+		ID:       "turn-1",
+		Status:   "completed",
+		Plan:     append([]codexAppServerTurnPlanStep(nil), f.turnPlan...),
+		PlanNote: strings.TrimSpace(f.turnPlanNote),
 		Items: []codexAppServerThreadItem{{
 			Type: "agentMessage",
 			Text: `{"message":"` + f.turnResponse.Message + `","plan_summary":"","plan_steps":[],"plan_step_statuses":[],"proposal_kind":"","proposal_command":"","proposal_keys":"","proposal_patch":"","proposal_patch_target":"","proposal_edit_path":"","proposal_edit_operation":"","proposal_edit_anchor_text":"","proposal_edit_old_text":"","proposal_edit_new_text":"","proposal_edit_start_line":0,"proposal_edit_end_line":0,"proposal_description":"","approval_kind":"","approval_title":"","approval_summary":"","approval_command":"","approval_patch":"","approval_patch_target":"","approval_risk":""}`,
 		}},
-	}, nil
+	}
+	return codexAppServerWaitResult{Turn: &turn}, nil
+}
+
+func (f *fakeCodexAppServerClient) ResolveApproval(_ context.Context, _ codexAppServerPendingApproval, decision ApprovalDecision) error {
+	f.resolveCalls = append(f.resolveCalls, decision)
+	return nil
 }
 
 func (f *fakeCodexAppServerClient) Close() error { return nil }
@@ -276,12 +296,198 @@ func TestCodexAppServerDefaultHandlerPersistsThreadAcrossTurns(t *testing.T) {
 	}
 }
 
+func TestCodexAppServerDefaultHandlerUsesTurnPlanWhenStructuredPlanMissing(t *testing.T) {
+	client := &fakeCodexAppServerClient{threadID: "thread-a", turnResponse: shuttleStructuredResponse{Message: "ready"}, turnPlan: []codexAppServerTurnPlanStep{{Step: "Inspect workspace", Status: "in_progress"}, {Step: "Run tests", Status: "completed"}}, turnPlanNote: "Check current task state"}
+	handler := &codexAppServerDefaultHandler{
+		meta:             RuntimeMetadata{Type: RuntimeCodexAppServer, Command: "codex"},
+		clientFactory:    func(context.Context) (codexAppServerClient, error) { return client, nil },
+		threads:          map[string]string{},
+		pendingApprovals: map[string]codexAppServerPendingApproval{},
+	}
+
+	outcome, err := handler.Respond(context.Background(), Request{Kind: RequestUserTurn, Prompt: "help", SessionName: "shuttle", TaskID: "task-a"})
+	if err != nil {
+		t.Fatalf("Respond() error = %v", err)
+	}
+	if outcome.Plan == nil {
+		t.Fatalf("expected fallback plan from turn update")
+	}
+	if len(outcome.Plan.Steps) != 2 {
+		t.Fatalf("expected two plan steps, got %d", len(outcome.Plan.Steps))
+	}
+	if outcome.Plan.Steps[0] != "Inspect workspace" || outcome.Plan.Steps[1] != "Run tests" {
+		t.Fatalf("unexpected plan steps: %#v", outcome.Plan.Steps)
+	}
+	if strings.TrimSpace(outcome.Plan.Summary) != "Check current task state" {
+		t.Fatalf("expected plan summary from turn note, got %#v", outcome.Plan.Summary)
+	}
+	if len(outcome.PlanStatuses) != 2 {
+		t.Fatalf("expected two plan statuses, got %d", len(outcome.PlanStatuses))
+	}
+	if outcome.PlanStatuses[0] != PlanStepInProgress || outcome.PlanStatuses[1] != PlanStepDone {
+		t.Fatalf("unexpected plan statuses: %#v", outcome.PlanStatuses)
+	}
+}
+
+func TestCodexAppServerDefaultHandlerSuspendsForRuntimeApprovalAndResumesTurn(t *testing.T) {
+	client := &fakeCodexAppServerClient{
+		threadID: "thread-a",
+		pendingApproval: &codexAppServerPendingApproval{
+			RequestID: "req-1",
+			Method:    "item/commandExecution/requestApproval",
+			ThreadID:  "thread-a",
+			TurnID:    "turn-1",
+			ItemID:    "item-1",
+			Command:   "ls",
+			Cwd:       "/tmp",
+			Reason:    "need to inspect the workspace",
+		},
+		turnResponse: shuttleStructuredResponse{Message: "done"},
+	}
+	handler := &codexAppServerDefaultHandler{
+		meta:             RuntimeMetadata{Type: RuntimeCodexAppServer, Command: "codex"},
+		clientFactory:    func(context.Context) (codexAppServerClient, error) { return client, nil },
+		threads:          map[string]string{},
+		pendingApprovals: map[string]codexAppServerPendingApproval{},
+	}
+
+	req := Request{Kind: RequestUserTurn, Prompt: "help", SessionName: "shuttle", TaskID: "task-a"}
+	outcome, err := handler.Respond(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Respond() approval phase error = %v", err)
+	}
+	if outcome.Approval == nil {
+		t.Fatalf("expected runtime-managed approval outcome")
+	}
+	if outcome.Approval.Command != "ls" || outcome.Approval.ContinuationToken != "req-1" {
+		t.Fatalf("unexpected approval payload: %#v", outcome.Approval)
+	}
+
+	resolved, err := handler.Respond(context.Background(), Request{
+		Kind:             RequestResolveApproval,
+		SessionName:      "shuttle",
+		TaskID:           "task-a",
+		ApprovalDecision: DecisionApprove,
+		Approval:         outcome.Approval,
+	})
+	if err != nil {
+		t.Fatalf("Respond() resolve phase error = %v", err)
+	}
+	if resolved.Message != "done" {
+		t.Fatalf("expected resumed turn message, got %#v", resolved)
+	}
+	if len(client.resolveCalls) != 1 || client.resolveCalls[0] != DecisionApprove {
+		t.Fatalf("expected one approval resolution call, got %#v", client.resolveCalls)
+	}
+}
+
+type closeBuffer struct {
+	bytes.Buffer
+}
+
+func (b *closeBuffer) Close() error { return nil }
+
+func TestStdioCodexAppServerClientInitializeSendsInitializedNotification(t *testing.T) {
+	buffer := &closeBuffer{}
+	client := &stdioCodexAppServerClient{
+		stdin:  buffer,
+		reader: bufio.NewReader(strings.NewReader(`{"jsonrpc":"2.0","id":"1","result":{}}` + "\n")),
+	}
+	if err := client.Initialize(context.Background()); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	frames := bytes.Split(bytes.TrimSpace(buffer.Bytes()), []byte("\n"))
+	if len(frames) != 2 {
+		t.Fatalf("expected initialize request plus initialized notification, got %d frame(s)", len(frames))
+	}
+	var request codexAppServerJSONRPC
+	if err := json.Unmarshal(frames[0], &request); err != nil {
+		t.Fatalf("decode initialize request: %v", err)
+	}
+	if request.Method != "initialize" {
+		t.Fatalf("expected initialize method, got %q", request.Method)
+	}
+	var notification codexAppServerJSONRPC
+	if err := json.Unmarshal(frames[1], &notification); err != nil {
+		t.Fatalf("decode initialized notification: %v", err)
+	}
+	if notification.Method != "initialized" {
+		t.Fatalf("expected initialized notification, got %q", notification.Method)
+	}
+}
+
+func TestStdioCodexAppServerClientDecodesPendingApprovalRequests(t *testing.T) {
+	requestID := "9"
+
+	client := &stdioCodexAppServerClient{}
+	request := codexAppServerJSONRPC{JSONRPC: "2.0", ID: requestID, Method: "item/commandExecution/requestApproval", Params: []byte(`{"itemId":"item-1","threadId":"thread-1","turnId":"turn-1","command":"ls","cwd":"/tmp"}`)}
+	pending, handled, err := client.decodePendingApproval(request)
+	if err != nil {
+		t.Fatalf("decodePendingApproval() error = %v", err)
+	}
+	if !handled || pending == nil {
+		t.Fatalf("expected handled command approval request, got handled=%v pending=%#v", handled, pending)
+	}
+	if pending.RequestID != requestID || pending.Command != "ls" || pending.Cwd != "/tmp" {
+		t.Fatalf("unexpected pending approval: %#v", pending)
+	}
+}
+
+func TestStdioCodexAppServerClientResolveApprovalWritesExpectedResponses(t *testing.T) {
+	buffer := &closeBuffer{}
+	client := &stdioCodexAppServerClient{stdin: buffer}
+
+	if err := client.ResolveApproval(context.Background(), codexAppServerPendingApproval{
+		RequestID:            "req-1",
+		Method:               "item/permissions/requestApproval",
+		RequestedPermissions: map[string]any{"network": map[string]any{"enabled": true}},
+	}, DecisionApprove); err != nil {
+		t.Fatalf("ResolveApproval(permission) error = %v", err)
+	}
+	if err := client.ResolveApproval(context.Background(), codexAppServerPendingApproval{
+		RequestID: "req-2",
+		Method:    "item/commandExecution/requestApproval",
+	}, DecisionReject); err != nil {
+		t.Fatalf("ResolveApproval(command) error = %v", err)
+	}
+
+	frames := bytes.Split(bytes.TrimSpace(buffer.Bytes()), []byte("\n"))
+	if len(frames) != 2 {
+		t.Fatalf("expected two approval responses, got %d", len(frames))
+	}
+	var permissionResponse codexAppServerJSONRPC
+	if err := json.Unmarshal(frames[0], &permissionResponse); err != nil {
+		t.Fatalf("decode permission response: %v", err)
+	}
+	if permissionResponse.ID != "req-1" {
+		t.Fatalf("expected permission response id req-1, got %q", permissionResponse.ID)
+	}
+	var commandResponse codexAppServerJSONRPC
+	if err := json.Unmarshal(frames[1], &commandResponse); err != nil {
+		t.Fatalf("decode command response: %v", err)
+	}
+	if commandResponse.ID != "req-2" {
+		t.Fatalf("expected command response id req-2, got %q", commandResponse.ID)
+	}
+	var decision struct {
+		Decision string `json:"decision"`
+	}
+	if err := json.Unmarshal(commandResponse.Result, &decision); err != nil {
+		t.Fatalf("decode command decision: %v", err)
+	}
+	if decision.Decision != "decline" {
+		t.Fatalf("expected declined command approval, got %q", decision.Decision)
+	}
+}
+
 func TestCodexAppServerDefaultHandlerSeparatesBindingsByTask(t *testing.T) {
 	client := &fakeCodexAppServerClient{threadID: "thread-a", turnResponse: shuttleStructuredResponse{Message: "task"}}
 	handler := &codexAppServerDefaultHandler{
-		meta:          RuntimeMetadata{Type: RuntimeCodexAppServer, Command: "codex"},
-		clientFactory: func(context.Context) (codexAppServerClient, error) { return client, nil },
-		threads:       map[string]string{},
+		meta:             RuntimeMetadata{Type: RuntimeCodexAppServer, Command: "codex"},
+		clientFactory:    func(context.Context) (codexAppServerClient, error) { return client, nil },
+		threads:          map[string]string{},
+		pendingApprovals: map[string]codexAppServerPendingApproval{},
 	}
 
 	if _, err := handler.Respond(context.Background(), Request{Kind: RequestUserTurn, Prompt: "help", SessionName: "shuttle", TaskID: "task-a"}); err != nil {
@@ -306,7 +512,8 @@ func TestCodexAppServerDefaultHandlerRetriesSameTurnAfterStaleThreadStartFailure
 			clients = clients[1:]
 			return client, nil
 		},
-		threads: map[string]string{"shuttle\x00task-a": "thread-stale"},
+		threads:          map[string]string{"shuttle\x00task-a": "thread-stale"},
+		pendingApprovals: map[string]codexAppServerPendingApproval{},
 	}
 
 	outcome, err := handler.Respond(context.Background(), Request{Kind: RequestUserTurn, Prompt: "help", SessionName: "shuttle", TaskID: "task-a"})

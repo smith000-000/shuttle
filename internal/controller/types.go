@@ -28,6 +28,7 @@ type PatchTarget = agentruntime.PatchTarget
 type ApprovalKind = agentruntime.ApprovalKind
 type RiskLevel = agentruntime.RiskLevel
 type ApprovalMode = agentruntime.ApprovalMode
+type ApprovalDecision = agentruntime.ApprovalDecision
 type TranscriptEvent = agentruntime.TranscriptEvent
 type TranscriptEventKind = agentruntime.TranscriptEventKind
 type PatchApplyFile = agentruntime.PatchApplyFile
@@ -72,6 +73,10 @@ const (
 	ApprovalModeAuto    = agentruntime.ApprovalModeAuto
 	ApprovalModeDanger  = agentruntime.ApprovalModeDanger
 
+	DecisionApprove = agentruntime.DecisionApprove
+	DecisionReject  = agentruntime.DecisionReject
+	DecisionRefine  = agentruntime.DecisionRefine
+
 	EventUserMessage      = agentruntime.EventUserMessage
 	EventAgentMessage     = agentruntime.EventAgentMessage
 	EventPlan             = agentruntime.EventPlan
@@ -115,14 +120,6 @@ const (
 	RuntimeCodexSDK       = agentruntime.RuntimeCodexSDK
 	RuntimeCodexAppServer = agentruntime.RuntimeCodexAppServer
 	RuntimeAuto           = agentruntime.RuntimeAuto
-)
-
-type ApprovalDecision string
-
-const (
-	DecisionApprove ApprovalDecision = "approve"
-	DecisionReject  ApprovalDecision = "reject"
-	DecisionRefine  ApprovalDecision = "refine"
 )
 
 type ContextWindowUsage struct {

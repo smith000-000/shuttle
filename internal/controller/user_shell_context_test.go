@@ -164,6 +164,9 @@ func TestRefreshShellContextUsesResolvedTrackedPaneAndProbeAuthoritativeRemoteDi
 	if context == nil || !context.Remote || context.Host != "openclaw" {
 		t.Fatalf("expected refreshed remote prompt context, got %#v", context)
 	}
+	if context.Directory != "/srv/app" {
+		t.Fatalf("expected returned prompt context to use authoritative directory, got %#v", context)
+	}
 	if controller.session.TrackedShell.PaneID != "%5" {
 		t.Fatalf("expected resolved tracked shell pane %%5, got %#v", controller.session.TrackedShell)
 	}
@@ -175,6 +178,26 @@ func TestRefreshShellContextUsesResolvedTrackedPaneAndProbeAuthoritativeRemoteDi
 	}
 	if controller.session.WorkingDirectory != "/srv/app" {
 		t.Fatalf("expected working directory from remote probe, got %q", controller.session.WorkingDirectory)
+	}
+}
+
+func TestShellContextWithResolvedDirectoryPreservesPromptShorthandWhenEquivalent(t *testing.T) {
+	location := &shell.ShellLocation{
+		Kind:                shell.ShellLocationLocal,
+		Directory:           filepath.Join(os.Getenv("HOME"), "workspace"),
+		DirectorySource:     shell.ShellDirectorySourceProbe,
+		DirectoryConfidence: shell.ConfidenceStrong,
+	}
+	context := shell.PromptContext{
+		User:         "localuser",
+		Host:         "workstation",
+		Directory:    "~/workspace",
+		PromptSymbol: "%",
+	}
+
+	merged := shellContextWithResolvedDirectory(context, location)
+	if merged.Directory != "~/workspace" {
+		t.Fatalf("expected prompt-shaped directory to be preserved, got %#v", merged)
 	}
 }
 

@@ -144,14 +144,15 @@ type EditIntent struct {
 }
 
 type ApprovalRequest struct {
-	ID          string
-	Kind        ApprovalKind
-	Title       string
-	Summary     string
-	Command     string
-	Patch       string
-	PatchTarget PatchTarget
-	Risk        RiskLevel
+	ID                string
+	Kind              ApprovalKind
+	Title             string
+	Summary           string
+	Command           string
+	Patch             string
+	PatchTarget       PatchTarget
+	Risk              RiskLevel
+	ContinuationToken string
 }
 
 type PatchTarget string
@@ -183,6 +184,14 @@ const (
 	ApprovalModeConfirm ApprovalMode = "confirm"
 	ApprovalModeAuto    ApprovalMode = "auto"
 	ApprovalModeDanger  ApprovalMode = "dangerous"
+)
+
+type ApprovalDecision string
+
+const (
+	DecisionApprove ApprovalDecision = "approve"
+	DecisionReject  ApprovalDecision = "reject"
+	DecisionRefine  ApprovalDecision = "refine"
 )
 
 type TranscriptEvent struct {

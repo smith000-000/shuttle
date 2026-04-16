@@ -128,14 +128,15 @@ func runtimeOutcomeFromController(response AgentResponse) agentruntime.Outcome {
 	}
 	if response.Approval != nil {
 		outcome.Approval = &agentruntime.ApprovalRequest{
-			ID:          response.Approval.ID,
-			Kind:        response.Approval.Kind,
-			Title:       response.Approval.Title,
-			Summary:     response.Approval.Summary,
-			Command:     response.Approval.Command,
-			Patch:       response.Approval.Patch,
-			PatchTarget: response.Approval.PatchTarget,
-			Risk:        response.Approval.Risk,
+			ID:                response.Approval.ID,
+			Kind:              response.Approval.Kind,
+			Title:             response.Approval.Title,
+			Summary:           response.Approval.Summary,
+			Command:           response.Approval.Command,
+			Patch:             response.Approval.Patch,
+			PatchTarget:       response.Approval.PatchTarget,
+			Risk:              response.Approval.Risk,
+			ContinuationToken: response.Approval.ContinuationToken,
 		}
 	}
 	if response.ModelInfo != nil {
