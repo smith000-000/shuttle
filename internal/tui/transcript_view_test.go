@@ -6,6 +6,7 @@ import (
 	"aiterm/internal/shell"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 	"strings"
 	"testing"
 	"time"
@@ -769,6 +770,83 @@ func TestCommandResultEntryIsCollapsedInTranscriptButPreservedInDetail(t *testin
 
 	if !strings.Contains(entries[0].Detail, "line 29") {
 		t.Fatalf("expected detail to retain full output, got %q", entries[0].Detail)
+	}
+}
+
+func TestCommandResultEntryWrapsLongPathLikeCommandHeaders(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.width = 70
+	model.height = 10
+	events := []controller.TranscriptEvent{
+		{
+			Kind: controller.EventCommandResult,
+			Payload: controller.CommandResultSummary{
+				Command:  "nl -ba /Users/jsmith/source/shuttle/testapp/some/really/long/path/that/used/to/blow/up/the/transcript_layout_when_rendered.py",
+				ExitCode: 0,
+				Summary:  "1\tprint('ok')",
+			},
+		},
+	}
+
+	entries := eventsToEntries(events, true)
+	if len(entries) != 1 {
+		t.Fatalf("expected one entry, got %d", len(entries))
+	}
+
+	model.entries = entries
+	renderedLines := model.renderEntryLines(0, entries[0], model.currentTranscriptWidth())
+	if len(renderedLines) < 2 {
+		t.Fatalf("expected wrapped command header across multiple lines, got %#v", renderedLines)
+	}
+
+	renderedTranscript := model.renderTranscript(model.currentTranscriptWidth(), model.currentTranscriptHeight())
+	for _, line := range strings.Split(renderedTranscript, "\n") {
+		if xansi.StringWidth(line) > model.currentTranscriptWidth() {
+			t.Fatalf("expected rendered transcript line width <= transcript width (%d), got %d for %q", model.currentTranscriptWidth(), xansi.StringWidth(line), line)
+		}
+	}
+	if !strings.Contains(renderedLines[0].text, "nl -ba") {
+		t.Fatalf("expected command header on first line, got %q", renderedLines[0].text)
+	}
+	if !strings.Contains(renderedLines[len(renderedLines)-2].text, "print('ok')") {
+		t.Fatalf("expected body line before closing border, got %q", renderedLines[len(renderedLines)-2].text)
+	}
+	if xansi.StringWidth(renderedLines[0].text) < max(8, model.currentTranscriptWidth()/3) {
+		t.Fatalf("expected first rendered line to include substantial header content, got %q", renderedLines[0].text)
+	}
+}
+
+func TestCommandResultEntryExpandsTabsBeforeRendering(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.width = 80
+	model.height = 12
+	events := []controller.TranscriptEvent{
+		{
+			Kind: controller.EventCommandResult,
+			Payload: controller.CommandResultSummary{
+				Command:  "nl -ba tests/test_main.py | sed -n '1,12p'",
+				ExitCode: 0,
+				Summary: strings.Join([]string{
+					"1\timport unittest",
+					"2\t",
+					"3\tfrom testapp.main import build_message",
+				}, "\n"),
+			},
+		},
+	}
+
+	model.entries = eventsToEntries(events, true)
+	renderedTranscript := model.renderTranscript(model.currentTranscriptWidth(), model.currentTranscriptHeight())
+	if strings.ContainsRune(renderedTranscript, '\t') {
+		t.Fatalf("expected transcript rendering to expand tabs, got %q", renderedTranscript)
+	}
+	for _, line := range strings.Split(renderedTranscript, "\n") {
+		if xansi.StringWidth(line) > model.currentTranscriptWidth() {
+			t.Fatalf("expected rendered transcript line width <= transcript width (%d), got %d for %q", model.currentTranscriptWidth(), xansi.StringWidth(line), line)
+		}
+	}
+	if !strings.Contains(renderedTranscript, "1       import unittest") {
+		t.Fatalf("expected tabbed line numbers to render with spaces, got %q", renderedTranscript)
 	}
 }
 

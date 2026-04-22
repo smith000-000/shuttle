@@ -1387,6 +1387,30 @@ func TestLocalControllerOwnedExecutionDoesNotOverwriteUserShellContext(t *testin
 	}
 }
 
+func TestLocalControllerRuntimeOwnedApprovalRefineClearsPendingApproval(t *testing.T) {
+	controller := New(nil, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	controller.task.PendingApproval = &ApprovalRequest{
+		ID:                "runtime-approval:req-1",
+		Kind:              ApprovalCommand,
+		Title:             "Approve command execution",
+		Command:           "./migrate up",
+		ContinuationToken: "req-1",
+	}
+
+	events, err := controller.DecideApproval(context.Background(), "runtime-approval:req-1", DecisionRefine, "Add a dry-run first.")
+	if err != nil {
+		t.Fatalf("DecideApproval() error = %v", err)
+	}
+	if len(events) != 1 || events[0].Kind != EventSystemNotice {
+		t.Fatalf("expected refinement notice, got %#v", events)
+	}
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if controller.task.PendingApproval != nil {
+		t.Fatalf("expected runtime-owned approval to clear for refinement, got %#v", controller.task.PendingApproval)
+	}
+}
+
 func TestLocalControllerDirectShellCommandRefreshesTrackedUserShellContext(t *testing.T) {
 	homeDirectory, err := os.UserHomeDir()
 	if err != nil {

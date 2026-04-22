@@ -14,6 +14,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/mattn/go-runewidth"
 	xansi "github.com/charmbracelet/x/ansi"
 )
 
@@ -722,8 +723,60 @@ func wrapText(value string, width int) []string {
 	if value == "" {
 		return []string{""}
 	}
+	value = expandDisplayTabs(value, 8)
 
-	return strings.Split(xansi.Wrap(value, width, " \t"), "\n")
+	softWrapped := strings.Split(xansi.Wrap(value, width, " \t"), "\n")
+	lines := make([]string, 0, len(softWrapped))
+	for _, line := range softWrapped {
+		if xansi.StringWidth(line) <= width {
+			lines = append(lines, line)
+			continue
+		}
+
+		remainingWidth := xansi.StringWidth(line)
+		if remainingWidth == 0 {
+			lines = append(lines, "")
+			continue
+		}
+		for start := 0; start < remainingWidth; start += width {
+			end := min(remainingWidth, start+width)
+			lines = append(lines, xansi.Cut(line, start, end))
+		}
+	}
+	if len(lines) == 0 {
+		return []string{""}
+	}
+	return lines
+}
+
+func expandDisplayTabs(value string, tabWidth int) string {
+	if tabWidth <= 0 || !strings.ContainsRune(value, '\t') {
+		return value
+	}
+
+	var b strings.Builder
+	column := 0
+	for _, r := range value {
+		switch r {
+		case '\t':
+			spaces := tabWidth - (column % tabWidth)
+			if spaces <= 0 {
+				spaces = tabWidth
+			}
+			b.WriteString(strings.Repeat(" ", spaces))
+			column += spaces
+		case '\n':
+			b.WriteRune(r)
+			column = 0
+		case '\r':
+			b.WriteRune(r)
+			column = 0
+		default:
+			b.WriteRune(r)
+			column += runewidth.RuneWidth(r)
+		}
+	}
+	return b.String()
 }
 
 func trimLastRune(value string) string {

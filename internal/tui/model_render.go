@@ -453,7 +453,7 @@ func (m Model) renderPlanCard(width int) string {
 		body = append(body, fmt.Sprintf("... (%d more steps)", hiddenSteps))
 	}
 	body = append(body, m.planProgressSummary())
-	footerLine := "Informational only. Ctrl+G continues the plan."
+	footerLine := "Informational only. Ctrl+G continues the plan, or type a new prompt to replace it."
 
 	renderedBody := make([]string, 0, len(body)+1)
 	for _, line := range body {

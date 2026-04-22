@@ -45,7 +45,9 @@ type codexAppServerClient interface {
 	Initialize(context.Context) error
 	StartThread(context.Context, codexAppServerThreadStartParams) (codexAppServerThreadStartResult, error)
 	StartTurn(context.Context, codexAppServerTurnStartParams) (codexAppServerTurnStartResult, error)
+	StartThreadCompaction(context.Context, string) error
 	WaitForTurnCompletion(context.Context, string, string) (codexAppServerWaitResult, error)
+	WaitForThreadCompaction(context.Context, string) error
 	ResolveApproval(context.Context, codexAppServerPendingApproval, ApprovalDecision) error
 	Close() error
 }
@@ -153,6 +155,10 @@ type codexAppServerTurnCompletedNotification struct {
 	Turn     codexAppServerTurn `json:"turn"`
 }
 
+type codexAppServerThreadCompactedNotification struct {
+	ThreadID string `json:"threadId"`
+}
+
 type codexAppServerItemCompletedNotification struct {
 	ThreadID string                   `json:"threadId"`
 	TurnID   string                   `json:"turnId"`
@@ -190,6 +196,14 @@ type codexAppServerWaitResult struct {
 	Turn            *codexAppServerTurn
 	PendingApproval *codexAppServerPendingApproval
 }
+
+type codexAppServerFailureClass string
+
+const (
+	codexAppServerFailureNone             codexAppServerFailureClass = ""
+	codexAppServerFailureStaleThread      codexAppServerFailureClass = "stale_thread"
+	codexAppServerFailureTransientProcess codexAppServerFailureClass = "transient_process"
+)
 
 type codexAppServerThreadItem struct {
 	Type  string `json:"type"`
@@ -271,12 +285,21 @@ func (h *codexAppServerDefaultHandler) respond(ctx context.Context, req Request)
 	if req.Kind == RequestResolveApproval {
 		return h.resolvePendingApproval(ctx, req)
 	}
+	if req.Kind == RequestCompactTask {
+		return h.respondCompact(ctx, req)
+	}
+	if req.Kind == RequestApprovalRefinement {
+		if err := h.prepareApprovalRefinement(ctx, req); err != nil {
+			return Outcome{}, err
+		}
+	}
 
 	outcome, reusedStoredThread, err := h.respondOnce(ctx, req)
 	if err == nil {
 		return outcome, nil
 	}
-	if errors.Is(err, context.Canceled) || !shouldRetryCodexAppServerTurn(err) {
+	failureClass := classifyCodexAppServerFailure(err)
+	if errors.Is(err, context.Canceled) || failureClass == codexAppServerFailureNone {
 		return Outcome{}, err
 	}
 	recoveryNote := "Recovered from a stale Codex app-server thread by starting a fresh native thread."
@@ -299,6 +322,34 @@ func (h *codexAppServerDefaultHandler) respond(ctx context.Context, req Request)
 
 func (h *codexAppServerDefaultHandler) Respond(ctx context.Context, req Request) (Outcome, error) {
 	return h.respond(ctx, req)
+}
+
+func (h *codexAppServerDefaultHandler) respondCompact(ctx context.Context, req Request) (Outcome, error) {
+	threadID, found := h.threadFor(req)
+	threadID = strings.TrimSpace(threadID)
+	if !found || threadID == "" {
+		return h.respondOnceFresh(ctx, req)
+	}
+
+	client, err := h.clientFor(ctx)
+	if err != nil {
+		return Outcome{}, err
+	}
+	if err := client.StartThreadCompaction(ctx, threadID); err != nil {
+		if failureClass := classifyCodexAppServerFailure(err); failureClass != codexAppServerFailureNone {
+			h.resetClientAndThread(req)
+			return Outcome{}, codexAppServerCompactionError(failureClass)
+		}
+		return Outcome{}, err
+	}
+	if err := client.WaitForThreadCompaction(ctx, threadID); err != nil {
+		if failureClass := classifyCodexAppServerFailure(err); failureClass != codexAppServerFailureNone {
+			h.resetClientAndThread(req)
+			return Outcome{}, codexAppServerCompactionError(failureClass)
+		}
+		return Outcome{}, err
+	}
+	return Outcome{NativeCompaction: true}, nil
 }
 
 func (h *codexAppServerDefaultHandler) respondOnce(ctx context.Context, req Request) (Outcome, bool, error) {
@@ -338,11 +389,10 @@ func (h *codexAppServerDefaultHandler) respondWithThreadPreference(ctx context.C
 		ThreadID: threadID,
 		Input: []codexAppServerUserInput{{
 			Type: "text",
-			Text: buildCodexSDKPrompt(req),
+			Text: buildNativeDelegatedRuntimePrompt(req),
 		}},
 		Cwd:               cwd,
 		Model:             strings.TrimSpace(h.meta.Model),
-		OutputSchema:      shuttleAgentResponseSchema(),
 		ApprovalPolicy:    "on-request",
 		ApprovalsReviewer: "user",
 		Personality:       "pragmatic",
@@ -363,15 +413,7 @@ func (h *codexAppServerDefaultHandler) respondWithThreadPreference(ctx context.C
 		return Outcome{}, errors.New("codex app server turn completed without a result")
 	}
 	completedTurn := *waitResult.Turn
-	text := latestCodexAppServerAgentMessage(completedTurn.Items)
-	if strings.TrimSpace(text) == "" {
-		return Outcome{}, errors.New("codex app server completed turn without a final agent message")
-	}
-	var structured shuttleStructuredResponse
-	if err := json.Unmarshal([]byte(text), &structured); err != nil {
-		return Outcome{}, fmt.Errorf("decode codex app server structured output: %w", err)
-	}
-	outcome, err := structuredToOutcome(structured)
+	outcome, err := codexAppServerTurnOutcome(completedTurn)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -398,12 +440,20 @@ func (h *codexAppServerDefaultHandler) resolvePendingApproval(ctx context.Contex
 		return Outcome{}, err
 	}
 	if err := client.ResolveApproval(ctx, pending, req.ApprovalDecision); err != nil {
+		if failureClass := classifyCodexAppServerFailure(err); failureClass != codexAppServerFailureNone {
+			h.resetClientAndThread(req)
+			return Outcome{}, codexAppServerApprovalResumeError(failureClass)
+		}
 		return Outcome{}, err
 	}
 	h.clearPendingApproval(req)
 
 	waitResult, err := client.WaitForTurnCompletion(ctx, pending.ThreadID, pending.TurnID)
 	if err != nil {
+		if failureClass := classifyCodexAppServerFailure(err); failureClass != codexAppServerFailureNone {
+			h.resetClientAndThread(req)
+			return Outcome{}, codexAppServerApprovalResumeError(failureClass)
+		}
 		return Outcome{}, err
 	}
 	if waitResult.PendingApproval != nil {
@@ -415,19 +465,51 @@ func (h *codexAppServerDefaultHandler) resolvePendingApproval(ctx context.Contex
 		return Outcome{}, errors.New("codex app server approval resolution completed without a turn result")
 	}
 	completedTurn := *waitResult.Turn
-	text := latestCodexAppServerAgentMessage(completedTurn.Items)
-	if strings.TrimSpace(text) == "" {
-		return Outcome{}, errors.New("codex app server completed turn without a final agent message")
-	}
-	var structured shuttleStructuredResponse
-	if err := json.Unmarshal([]byte(text), &structured); err != nil {
-		return Outcome{}, fmt.Errorf("decode codex app server structured output: %w", err)
-	}
-	outcome, err := structuredToOutcome(structured)
+	outcome, err := codexAppServerTurnOutcome(completedTurn)
 	if err != nil {
 		return Outcome{}, err
 	}
 	return applyCodexAppServerTurnPlanToOutcome(outcome, completedTurn.Plan, completedTurn.PlanNote), nil
+}
+
+func (h *codexAppServerDefaultHandler) prepareApprovalRefinement(ctx context.Context, req Request) error {
+	pending, ok := h.pendingApprovalFor(req)
+	if !ok {
+		return nil
+	}
+	if req.Approval != nil {
+		if token := strings.TrimSpace(req.Approval.ContinuationToken); token != "" && token != pending.RequestID {
+			return errors.New("runtime approval continuation token does not match the active request")
+		}
+	}
+
+	client, err := h.clientFor(ctx)
+	if err != nil {
+		return err
+	}
+	if err := client.ResolveApproval(ctx, pending, DecisionReject); err != nil {
+		if errors.Is(err, context.Canceled) || classifyCodexAppServerFailure(err) == codexAppServerFailureNone {
+			return err
+		}
+		h.resetClientAndThread(req)
+		return nil
+	}
+	h.clearPendingApproval(req)
+
+	waitResult, err := client.WaitForTurnCompletion(ctx, pending.ThreadID, pending.TurnID)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || classifyCodexAppServerFailure(err) == codexAppServerFailureNone {
+			return err
+		}
+		h.resetClientAndThread(req)
+		return nil
+	}
+	if waitResult.PendingApproval != nil {
+		// The original suspended turn stayed in an approval loop; abandon the old thread
+		// before sending the new refinement turn so the refinement runs on a clean thread.
+		h.resetClientAndThread(req)
+	}
+	return nil
 }
 
 func (h *codexAppServerDefaultHandler) clientFor(ctx context.Context) (codexAppServerClient, error) {
@@ -456,9 +538,22 @@ func (h *codexAppServerDefaultHandler) clientFor(ctx context.Context) (codexAppS
 
 func (h *codexAppServerDefaultHandler) threadFor(req Request) (string, bool) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	threadID, ok := h.threads[codexAppServerMemoryThreadKey(req.SessionName, req.TaskID)]
-	return strings.TrimSpace(threadID), ok && strings.TrimSpace(threadID) != ""
+	h.mu.Unlock()
+	threadID = strings.TrimSpace(threadID)
+	if ok && threadID != "" {
+		return threadID, true
+	}
+	if stored, found, err := LoadStoredCodexAppServerThreadBinding(strings.TrimSpace(h.meta.StateDir), req.SessionName, req.TaskID); err == nil && found {
+		h.mu.Lock()
+		if h.threads == nil {
+			h.threads = map[string]string{}
+		}
+		h.threads[codexAppServerMemoryThreadKey(req.SessionName, req.TaskID)] = strings.TrimSpace(stored)
+		h.mu.Unlock()
+		return strings.TrimSpace(stored), true
+	}
+	return "", false
 }
 
 func (h *codexAppServerDefaultHandler) storeThread(req Request, threadID string) {
@@ -467,7 +562,11 @@ func (h *codexAppServerDefaultHandler) storeThread(req Request, threadID string)
 	if h.threads == nil {
 		h.threads = map[string]string{}
 	}
-	h.threads[codexAppServerMemoryThreadKey(req.SessionName, req.TaskID)] = strings.TrimSpace(threadID)
+	threadID = strings.TrimSpace(threadID)
+	h.threads[codexAppServerMemoryThreadKey(req.SessionName, req.TaskID)] = threadID
+	if threadID != "" {
+		_ = SaveStoredCodexAppServerThreadBinding(strings.TrimSpace(h.meta.StateDir), req.SessionName, req.TaskID, threadID)
+	}
 }
 
 func (h *codexAppServerDefaultHandler) pendingApprovalFor(req Request) (codexAppServerPendingApproval, bool) {
@@ -501,6 +600,7 @@ func (h *codexAppServerDefaultHandler) resetClientAndThread(req Request) {
 	}
 	delete(h.threads, codexAppServerMemoryThreadKey(req.SessionName, req.TaskID))
 	delete(h.pendingApprovals, codexAppServerMemoryThreadKey(req.SessionName, req.TaskID))
+	_ = DeleteStoredCodexAppServerThreadBinding(strings.TrimSpace(h.meta.StateDir), req.SessionName, req.TaskID)
 }
 
 func codexAppServerMemoryThreadKey(sessionName string, taskID string) string {
@@ -551,6 +651,11 @@ func (c *stdioCodexAppServerClient) StartThread(ctx context.Context, params code
 func (c *stdioCodexAppServerClient) StartTurn(ctx context.Context, params codexAppServerTurnStartParams) (codexAppServerTurnStartResult, error) {
 	var result codexAppServerTurnStartResult
 	return result, c.call(ctx, "turn/start", params, &result)
+}
+
+func (c *stdioCodexAppServerClient) StartThreadCompaction(ctx context.Context, threadID string) error {
+	params := map[string]any{"threadId": strings.TrimSpace(threadID)}
+	return c.call(ctx, "thread/compact/start", params, nil)
 }
 
 func (c *stdioCodexAppServerClient) WaitForTurnCompletion(ctx context.Context, threadID string, turnID string) (codexAppServerWaitResult, error) {
@@ -617,6 +722,62 @@ func (c *stdioCodexAppServerClient) WaitForTurnCompletion(ctx context.Context, t
 			notification.Turn.Plan = latestPlan
 			notification.Turn.PlanNote = latestPlanNote
 			return codexAppServerWaitResult{Turn: &notification.Turn}, nil
+		}
+	}
+}
+
+func (c *stdioCodexAppServerClient) WaitForThreadCompaction(ctx context.Context, threadID string) error {
+	threadID = strings.TrimSpace(threadID)
+	sawMatchingStatus := false
+	for {
+		message, err := c.readMessage(ctx)
+		if err != nil {
+			return err
+		}
+		if message.Method == "error" {
+			return fmt.Errorf("codex app server error notification: %s", strings.TrimSpace(string(message.Params)))
+		}
+		if strings.TrimSpace(message.Method) != "" && strings.TrimSpace(message.ID) != "" {
+			pendingApproval, handled, err := c.decodePendingApproval(message)
+			if err != nil {
+				return err
+			}
+			if handled {
+				return fmt.Errorf("codex app server requested approval while compacting thread %s via %s", threadID, pendingApproval.Method)
+			}
+			return c.sendRequestError(ctx, message.ID, -32601, "unsupported request from codex app server")
+		}
+		switch message.Method {
+		case "thread/compacted":
+			var notification codexAppServerThreadCompactedNotification
+			if err := json.Unmarshal(message.Params, &notification); err != nil {
+				return fmt.Errorf("decode codex app server thread compaction: %w", err)
+			}
+			if strings.TrimSpace(notification.ThreadID) == threadID {
+				return nil
+			}
+		case "thread/status/changed":
+			matched, status, err := decodeCodexAppServerThreadStatus(message.Params, threadID)
+			if err != nil {
+				return err
+			}
+			if !matched {
+				continue
+			}
+			sawMatchingStatus = true
+			if status == "idle" {
+				return nil
+			}
+		case "turn/completed":
+			if sawMatchingStatus {
+				var notification codexAppServerTurnCompletedNotification
+				if err := json.Unmarshal(message.Params, &notification); err != nil {
+					return fmt.Errorf("decode codex app server turn completion: %w", err)
+				}
+				if strings.TrimSpace(notification.ThreadID) == threadID {
+					return nil
+				}
+			}
 		}
 	}
 }
@@ -869,6 +1030,17 @@ func latestCodexAppServerAgentMessage(items []codexAppServerThreadItem) string {
 	return ""
 }
 
+func codexAppServerTurnOutcome(turn codexAppServerTurn) (Outcome, error) {
+	text := latestCodexAppServerAgentMessage(turn.Items)
+	if strings.TrimSpace(text) == "" {
+		if len(turn.Plan) > 0 || strings.TrimSpace(turn.PlanNote) != "" {
+			return Outcome{}, nil
+		}
+		return Outcome{}, errors.New("codex app server completed turn without a final agent message")
+	}
+	return Outcome{Message: strings.TrimSpace(text)}, nil
+}
+
 func modelProviderForPreset(preset string) string {
 	preset = strings.ToLower(strings.TrimSpace(preset))
 	switch {
@@ -883,27 +1055,82 @@ func modelProviderForPreset(preset string) string {
 	}
 }
 
-func shouldRetryCodexAppServerTurn(err error) bool {
+func classifyCodexAppServerFailure(err error) codexAppServerFailureClass {
 	if err == nil {
-		return false
+		return codexAppServerFailureNone
 	}
 	message := strings.ToLower(strings.TrimSpace(err.Error()))
 	switch {
 	case strings.Contains(message, "unknown thread"):
-		return true
+		return codexAppServerFailureStaleThread
 	case strings.Contains(message, "exited before returning a response"):
-		return true
+		return codexAppServerFailureTransientProcess
 	case strings.Contains(message, "broken pipe"):
-		return true
+		return codexAppServerFailureTransientProcess
 	case strings.Contains(message, "connection reset"):
-		return true
+		return codexAppServerFailureTransientProcess
 	case strings.Contains(message, "eof"):
-		return true
+		return codexAppServerFailureTransientProcess
 	case strings.Contains(message, "without a final agent message"):
-		return true
+		return codexAppServerFailureTransientProcess
 	default:
-		return false
+		return codexAppServerFailureNone
 	}
+}
+
+func codexAppServerApprovalResumeError(class codexAppServerFailureClass) error {
+	switch class {
+	case codexAppServerFailureStaleThread:
+		return errors.New("Codex app-server lost the suspended approval turn because its native thread went stale. Retry the task or switch runtimes.")
+	case codexAppServerFailureTransientProcess:
+		return errors.New("Codex app-server lost the suspended approval turn because the app-server process disconnected. Retry the task or switch runtimes.")
+	default:
+		return errors.New("Codex app-server could not resume the suspended approval turn. Retry the task or switch runtimes.")
+	}
+}
+
+func codexAppServerCompactionError(class codexAppServerFailureClass) error {
+	switch class {
+	case codexAppServerFailureStaleThread:
+		return errors.New("Codex app-server could not compact the task because its native thread went stale. Retry the task or switch runtimes.")
+	case codexAppServerFailureTransientProcess:
+		return errors.New("Codex app-server could not compact the task because the app-server process disconnected. Retry the task or switch runtimes.")
+	default:
+		return errors.New("Codex app-server could not compact the task. Retry the task or switch runtimes.")
+	}
+}
+
+func decodeCodexAppServerThreadStatus(params json.RawMessage, threadID string) (bool, string, error) {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(params, &payload); err != nil {
+		return false, "", fmt.Errorf("decode codex app server thread status change: %w", err)
+	}
+	if id := strings.TrimSpace(decodeJSONString(payload["threadId"])); id != threadID {
+		return false, "", nil
+	}
+	if status := strings.TrimSpace(decodeJSONString(payload["status"])); status != "" {
+		return true, strings.ToLower(status), nil
+	}
+	if rawThread, ok := payload["thread"]; ok && len(bytes.TrimSpace(rawThread)) > 0 {
+		var thread codexAppServerThread
+		if err := json.Unmarshal(rawThread, &thread); err != nil {
+			return false, "", fmt.Errorf("decode codex app server thread status change thread: %w", err)
+		}
+		return true, strings.ToLower(strings.TrimSpace(decodeJSONString(thread.Status))), nil
+	}
+	return true, "", nil
+}
+
+func decodeJSONString(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err == nil {
+		return value
+	}
+	return strings.TrimSpace(string(raw))
 }
 
 func codexAppServerPendingApprovalToApprovalRequest(pending codexAppServerPendingApproval) *ApprovalRequest {

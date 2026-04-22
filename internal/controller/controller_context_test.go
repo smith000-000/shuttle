@@ -9,6 +9,34 @@ import (
 	"aiterm/internal/agentruntime"
 )
 
+type stubRuntime struct {
+	outcome agentruntime.Outcome
+	err     error
+	reqs    []agentruntime.Request
+}
+
+func (s *stubRuntime) Handle(_ context.Context, _ agentruntime.Host, req agentruntime.Request) (agentruntime.Outcome, error) {
+	s.reqs = append(s.reqs, req)
+	if s.err != nil {
+		return agentruntime.Outcome{}, s.err
+	}
+	return s.outcome, nil
+}
+
+type stubRuntimeHost struct{}
+
+func (stubRuntimeHost) Respond(context.Context, agentruntime.Request) (agentruntime.Outcome, error) {
+	return agentruntime.Outcome{}, nil
+}
+
+func (stubRuntimeHost) InspectContext(context.Context, agentruntime.Request) error { return nil }
+
+func (stubRuntimeHost) SynthesizeStructuredEdit(_ context.Context, outcome agentruntime.Outcome) (agentruntime.Outcome, error) {
+	return outcome, nil
+}
+
+func (stubRuntimeHost) ValidatePatch(context.Context, string, string) error { return nil }
+
 func TestLocalControllerStartNewTaskResetsTaskStateButPreservesSession(t *testing.T) {
 	stateDir := t.TempDir()
 	controller := New(nil, nil, nil, SessionContext{
@@ -125,6 +153,46 @@ func TestLocalControllerCompactTaskStoresSummaryAndTrimsTranscript(t *testing.T)
 	last := controller.task.PriorTranscript[len(controller.task.PriorTranscript)-1]
 	if last.Kind != EventSystemNotice {
 		t.Fatalf("expected final compaction notice in transcript, got %#v", last)
+	}
+}
+
+func TestLocalControllerCompactTaskAcceptsNativeCompactionAndClearsSummary(t *testing.T) {
+	controller := New(nil, nil, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+	runtime := &stubRuntime{outcome: agentruntime.Outcome{NativeCompaction: true}}
+	controller.SetRuntime(runtime)
+	controller.SetRuntimeHost(stubRuntimeHost{})
+	for index := 0; index < 12; index++ {
+		controller.task.PriorTranscript = append(controller.task.PriorTranscript, TranscriptEvent{
+			Kind:    EventUserMessage,
+			Payload: TextPayload{Text: fmt.Sprintf("event-%02d", index)},
+		})
+	}
+	controller.task.RecoverySnapshot = "snapshot lines"
+	controller.task.CompactedSummary = "old summary"
+
+	events, err := controller.CompactTask(context.Background())
+	if err != nil {
+		t.Fatalf("CompactTask() error = %v", err)
+	}
+	if len(events) != 1 || events[0].Kind != EventSystemNotice {
+		t.Fatalf("expected one compaction notice event, got %#v", events)
+	}
+	if len(runtime.reqs) != 1 || runtime.reqs[0].Kind != agentruntime.RequestCompactTask {
+		t.Fatalf("expected native compact runtime request, got %#v", runtime.reqs)
+	}
+	if controller.task.CompactedSummary != "" {
+		t.Fatalf("expected native compaction to clear stored summary, got %q", controller.task.CompactedSummary)
+	}
+	if controller.task.RecoverySnapshot != "" {
+		t.Fatalf("expected recovery snapshot to clear after native compaction, got %q", controller.task.RecoverySnapshot)
+	}
+	if len(controller.task.PriorTranscript) != compactTaskTranscriptTail+1 {
+		t.Fatalf("expected trimmed transcript plus compaction notice, got %d entries", len(controller.task.PriorTranscript))
+	}
+	last := controller.task.PriorTranscript[len(controller.task.PriorTranscript)-1]
+	payload, _ := last.Payload.(TextPayload)
+	if last.Kind != EventSystemNotice || !strings.Contains(payload.Text, "runtime thread") {
+		t.Fatalf("expected native compaction notice, got %#v", last)
 	}
 }
 

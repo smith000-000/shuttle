@@ -117,6 +117,24 @@ Expected:
 - runtime status shows `codex_app_server`
 - ordinary turns, continue-after-command, and `/compact` complete without switching runtimes
 - if you inspect model/runtime detail, the selected and effective runtime remain `codex_app_server`
+- when the task already has a bound native app-server thread, `/compact` uses native thread compaction instead of returning a Shuttle-authored summary
+- ordinary app-server turns execute tools inside the runtime thread instead of surfacing Shuttle-owned command or patch proposals for every step
+
+## C1. `codex_app_server` Approval And Refinement Flow
+
+While still on `codex_app_server`:
+
+1. Submit a prompt that is likely to produce an approval, for example:
+   `Propose one medium-risk workspace-changing command, but ask for approval before running it.`
+2. If an approval card appears, choose `reject`.
+3. Submit another prompt that should produce an approval again.
+4. This time choose `refine`, add a note such as `Add a dry-run first.`, and submit the refinement.
+
+Expected:
+- approve/reject decisions resolve cleanly without switching runtimes
+- refining a runtime-owned approval returns to agent mode instead of failing immediately
+- the follow-up refinement turn stays on `codex_app_server`
+- no silent builtin fallback occurs during approval handling
 
 ## D. Native Thread Reuse On The Live App-Server Session
 
@@ -130,7 +148,7 @@ While still on `codex_app_server`:
 Expected:
 - the second turn succeeds on the same selected `codex_app_server` runtime
 - there is no `thread not found` failure between same-task turns
-- `/compact` later in that same task still works
+- `/compact` later in that same task still works and does not switch to a fresh thread
 
 ## E. `/new` Reset Semantics
 
@@ -153,6 +171,7 @@ Manual expectation:
 Practical manual guidance:
 - do not block on forcing this case from the UI today
 - rely on the existing unit coverage for the stale-thread branch and focus manual effort on baseline turns, `/compact`, patch continuation, startup fallback, and transient process failure
+- note that `/compact` is intentionally stricter: if the bound native thread is gone, Shuttle should now surface an explicit compaction failure instead of silently replaying the compact on a fresh thread
 
 ## G. Forced Process-Retry Recovery
 
@@ -168,6 +187,22 @@ Expected:
 - a transient app-server process failure should not force a runtime switch
 - when the failure is retryable, Shuttle retries once with a fresh native thread
 - runtime detail includes a runtime note indicating recovery from a transient app-server process failure
+- exception: if the failure happens during a native `/compact`, Shuttle should surface an explicit compaction failure because the old runtime context was lost
+
+## G1. Approval Resume Failure Handling
+
+This path is specifically about a runtime-owned approval that cannot be resumed after the approval card is already on screen.
+
+1. Stay on `codex_app_server`.
+2. Submit a prompt that produces an approval card.
+3. Before approving or rejecting it, intentionally break the live app-server process.
+4. Then approve or reject the pending runtime approval.
+
+Expected:
+- Shuttle does not silently fall back to builtin
+- Shuttle surfaces an explicit error saying the suspended approval turn was lost
+- the task remains recoverable by retrying the task or switching runtimes explicitly
+- a stale or broken suspended approval turn does not get silently replayed as if it were still safe to resume
 
 ## H. Patch Continuation Path
 

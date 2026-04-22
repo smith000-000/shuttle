@@ -37,12 +37,13 @@ type Request struct {
 }
 
 type Outcome struct {
-	Message      string
-	Plan         *Plan
-	PlanStatuses []PlanStepStatus
-	Proposal     *Proposal
-	Approval     *ApprovalRequest
-	ModelInfo    *ModelInfo
+	Message          string
+	Plan             *Plan
+	PlanStatuses     []PlanStepStatus
+	Proposal         *Proposal
+	Approval         *ApprovalRequest
+	ModelInfo        *ModelInfo
+	NativeCompaction bool
 }
 
 type Host interface {
@@ -425,6 +426,35 @@ func (hostBackedCodexSDKHandler) Respond(ctx context.Context, host Host, req Req
 	return host.Respond(ctx, req)
 }
 
+func buildNativeDelegatedRuntimePrompt(req Request) string {
+	sections := []string{
+		"Shuttle delegated runtime turn",
+		"You are the authoritative runtime for this task. Execute tools directly when appropriate instead of emitting Shuttle proposals.",
+		"Keep command execution, file changes, and context management inside the runtime thread. Only surface a final user-facing result, a plan update, a runtime-native approval request, or a genuine blocked/help-needed state back to Shuttle.",
+		"If the controller instructions mention a proposal or say to propose the next action, interpret that as taking the next action directly unless approval is required or the task is complete.",
+	}
+	if guidance := strings.TrimSpace(nativeDelegatedKindGuidance(req.Kind)); guidance != "" {
+		sections = append(sections, "Turn guidance:\n"+guidance)
+	}
+
+	contextLines := []string{"request_kind: " + string(normalizeCodexSDKRequestKind(req.Kind))}
+	if userPrompt := strings.TrimSpace(req.UserPrompt); userPrompt != "" {
+		contextLines = append(contextLines, "user_prompt: "+userPrompt)
+	}
+	if req.Proposal != nil {
+		contextLines = append(contextLines, formatCodexSDKProposalContext(*req.Proposal)...)
+	}
+	if req.Approval != nil {
+		contextLines = append(contextLines, formatCodexSDKApprovalContext(*req.Approval)...)
+	}
+	sections = append(sections, "Turn context:\n"+strings.Join(contextLines, "\n"))
+
+	if prompt := strings.TrimSpace(req.Prompt); prompt != "" {
+		sections = append(sections, "Controller instructions:\n"+prompt)
+	}
+	return strings.TrimSpace(strings.Join(sections, "\n\n"))
+}
+
 func buildCodexSDKPrompt(req Request) string {
 	sections := []string{
 		"Shuttle Codex runtime turn",
@@ -486,6 +516,35 @@ func codexSDKKindGuidance(kind RequestKind) string {
 		return "Resume the task after the operator took control. Reconcile the current shell state before choosing the next action."
 	default:
 		return "Respond with the best Shuttle structured outcome for the provided turn context."
+	}
+}
+
+func nativeDelegatedKindGuidance(kind RequestKind) string {
+	switch normalizeCodexSDKRequestKind(kind) {
+	case RequestUserTurn:
+		return "Handle the user turn directly inside the runtime. Use tools when needed, update the plan only when it materially helps, and stop once the user's request is satisfied."
+	case RequestApprovalRefinement:
+		return "Revise the pending approval in light of the user note, then continue the task inside the runtime thread."
+	case RequestProposalRefinement:
+		return "Refine the pending proposal intent, but execute the revised work directly inside the runtime thread instead of returning a Shuttle proposal."
+	case RequestContinuePlan:
+		return "Continue the active plan from its current state. Update plan step statuses if helpful, then take the next action directly unless approval is required."
+	case RequestContinueAfterCommand:
+		return "Interpret the latest command result and continue the task directly. Avoid rerunning commands unless the result or context justifies it."
+	case RequestContinueAfterPatch:
+		return "Interpret the patch application result and continue from the updated workspace state."
+	case RequestCompactTask:
+		return "Compact the task context using the runtime's own context-management mechanism."
+	case RequestExecutionCheckIn:
+		return "Interpret the active execution check-in and either keep waiting, explain the current blocked state, or request help if the user needs to intervene."
+	case RequestLostExecutionRecovery:
+		return "Recover from lost execution tracking using the supplied execution snapshot and shell context, and explain the best next step."
+	case RequestResolveApproval:
+		return "Resolve the pending runtime-owned approval using the supplied approval context and user decision, then continue the suspended turn."
+	case RequestResumeAfterTakeControl:
+		return "Resume the task after the operator took control. Reconcile the current shell state before choosing the next action."
+	default:
+		return "Handle the turn directly inside the runtime and surface only the resulting message, plan, approval request, or blocked/help-needed state."
 	}
 }
 

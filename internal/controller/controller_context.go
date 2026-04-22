@@ -11,11 +11,12 @@ import (
 )
 
 const (
-	compactTaskTranscriptTail      = 8
-	approxSystemPromptTokens       = 1462
-	compactTaskPrompt              = "Summarize the current Shuttle task for future continuation. Return the summary only in message. Do not emit a plan, proposal, approval, keys proposal, patch, or shell command. Capture the user's goal, important work completed, relevant shell or workspace state, unresolved issues, and the next recommended step if one remains. Keep it concise but sufficient to resume the task later."
-	startNewTaskSuccessNotice      = "Started a fresh task context. Shell continuity and provider settings were preserved."
-	compactTaskSuccessNoticeFormat = "Compacted task context into a summary and kept %d recent transcript event(s)."
+	compactTaskTranscriptTail            = 8
+	approxSystemPromptTokens             = 1462
+	compactTaskPrompt                    = "Summarize the current Shuttle task for future continuation. Return the summary only in message. Do not emit a plan, proposal, approval, keys proposal, patch, or shell command. Capture the user's goal, important work completed, relevant shell or workspace state, unresolved issues, and the next recommended step if one remains. Keep it concise but sufficient to resume the task later."
+	startNewTaskSuccessNotice            = "Started a fresh task context. Shell continuity and provider settings were preserved."
+	compactTaskSuccessNoticeFormat       = "Compacted task context into a summary and kept %d recent transcript event(s)."
+	nativeCompactTaskSuccessNoticeFormat = "Compacted task context on the runtime thread and kept %d recent transcript event(s)."
 )
 
 func (c *LocalController) StartNewTask(ctx context.Context) ([]TranscriptEvent, error) {
@@ -78,17 +79,27 @@ func (c *LocalController) CompactTask(ctx context.Context) ([]TranscriptEvent, e
 		return []TranscriptEvent{errEvent}, nil
 	}
 
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if outcome.NativeCompaction {
+		c.task.CompactedSummary = ""
+		c.task.RecoverySnapshot = ""
+		c.task.PriorTranscript = tailTranscriptEvents(c.task.PriorTranscript, compactTaskTranscriptTail)
+
+		event := c.newEvent(EventSystemNotice, TextPayload{
+			Text: fmt.Sprintf(nativeCompactTaskSuccessNoticeFormat, len(c.task.PriorTranscript)),
+		})
+		c.appendEvents(event)
+		return []TranscriptEvent{event}, nil
+	}
+
 	summary := strings.TrimSpace(outcome.Message)
 	if summary == "" {
-		c.mu.Lock()
-		defer c.mu.Unlock()
 		errEvent := c.newEvent(EventError, TextPayload{Text: "task compaction returned an empty summary"})
 		c.appendEvents(errEvent)
 		return []TranscriptEvent{errEvent}, nil
 	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	c.task.CompactedSummary = summary
 	c.task.RecoverySnapshot = ""

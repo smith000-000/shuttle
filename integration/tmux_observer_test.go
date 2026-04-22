@@ -115,7 +115,7 @@ func TestManagedShellProfilesKeepTrackedOutputAndContextTransitionsClean(t *test
 		t.Fatalf("BootstrapWorkspace() error = %v", err)
 	}
 
-	observer := shell.NewObserver(client).WithStateDir(runtimeDir).WithLaunchProfiles(launchProfiles)
+	observer := shell.NewObserver(client).WithStateDir(runtimeDir).WithSessionName(sessionName).WithStartDir("..").WithLaunchProfiles(launchProfiles)
 
 	lsResult, err := observer.RunTrackedCommand(ctx, workspace.TopPane.ID, "ls", 10*time.Second)
 	if err != nil {
@@ -148,6 +148,75 @@ func TestManagedShellProfilesKeepTrackedOutputAndContextTransitionsClean(t *test
 	if !strings.HasSuffix(strings.TrimSpace(pwdResult.Captured), "/inprocess") {
 		t.Fatalf("expected managed-shell cwd to update after cd, got %q", pwdResult.Captured)
 	}
+}
+
+func TestOwnedExecutionPanePreservesFindOutputUnderManagedExecutionProfile(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	socketName := fmt.Sprintf("shuttle-track-owned-%d", time.Now().UnixNano())
+	sessionName := fmt.Sprintf("shuttle-track-owned-%d", time.Now().UnixNano())
+
+	client, err := tmux.NewClient(socketName)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	repoRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatalf("filepath.Abs(..) error = %v", err)
+	}
+
+	t.Cleanup(func() {
+		_ = client.KillSession(context.Background(), sessionName)
+	})
+
+	runtimeDir := t.TempDir()
+	launchProfiles := shell.DefaultLaunchProfiles()
+	persistentLaunch, err := shell.PersistentLaunchSpec(runtimeDir, launchProfiles)
+	if err != nil {
+		t.Fatalf("PersistentLaunchSpec() error = %v", err)
+	}
+
+	workspace, _, err := tmux.BootstrapWorkspace(ctx, client, tmux.BootstrapOptions{
+		SessionName:       sessionName,
+		StartDir:          repoRoot,
+		BottomPanePercent: 30,
+		HistoryFile:       filepath.Join(t.TempDir(), "shell_history"),
+		Launch:            persistentLaunch,
+	})
+	if err != nil {
+		t.Fatalf("BootstrapWorkspace() error = %v", err)
+	}
+
+	observer := shell.NewObserver(client).WithStateDir(runtimeDir).WithSessionName(sessionName).WithStartDir(repoRoot).WithLaunchProfiles(launchProfiles)
+	ownedPane, cleanup, err := observer.CreateOwnedExecutionPane(ctx, repoRoot)
+	if err != nil {
+		t.Fatalf("CreateOwnedExecutionPane() error = %v", err)
+	}
+	defer func() {
+		if cleanup != nil {
+			_ = cleanup(context.Background())
+		}
+	}()
+
+	waitForObservedPrompt(t, ctx, observer, ownedPane.PaneID)
+
+	result, err := observer.RunTrackedCommand(ctx, ownedPane.PaneID, "find . -maxdepth 2 -type f | sort", 10*time.Second)
+	if err != nil {
+		t.Fatalf("RunTrackedCommand(find) error = %v", err)
+	}
+	if !strings.Contains(result.Captured, "./AGENTS.md") {
+		t.Fatalf("expected owned execution find output to include ./AGENTS.md, got %q", result.Captured)
+	}
+	if strings.Contains(result.Captured, "runtime/commands/") {
+		t.Fatalf("expected owned execution result to hide transport wrapper chatter, got %q", result.Captured)
+	}
+
+	_ = workspace
 }
 
 func TestRunTrackedInteractiveCommand(t *testing.T) {

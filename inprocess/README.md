@@ -318,7 +318,7 @@ Runtime selection controls how Shuttle labels and routes the coding runtime laye
 - `auto`: prefer the installed authoritative runtime with the best declared parity, then fall back to `builtin`
 - `pi`: currently rejected for authoritative use until it supports the full required request-kind set
 - `codex_sdk`: select the CLI-backed authoritative Codex bridge explicitly
-- `codex_app_server`: native Codex App Server bridge over stdio JSON-RPC with a long-lived app-server process per Shuttle runtime session and in-memory per-task native thread reuse across turns
+- `codex_app_server`: native Codex App Server bridge over stdio JSON-RPC with a long-lived app-server process per Shuttle runtime session and per-task native thread reuse across turns
 
 Current implementation boundary:
 - runtime selection is real and deterministic, including default command filling for explicit external runtime selections
@@ -327,7 +327,7 @@ Current implementation boundary:
 - `codex_sdk` currently uses a codex-specific turn handler over the shared Shuttle orchestration helpers and a local `codex` CLI compatibility check rather than a fully independent external execution stack
 - Shuttle does not silently fall back to builtin for ordinary continuation turns once an authoritative external runtime is selected; if the runtime cannot continue, Shuttle stops and requires an explicit retry or runtime switch
 
-Use `SHUTTLE_RUNTIME_COMMAND` to override the executable path for an explicit runtime selection. When you switch runtimes from `F10`, Shuttle persists both the selected runtime type and the current runtime command path, unless `--runtime` or `--runtime-command` was explicitly provided on startup. For `codex_sdk` and `codex_app_server`, the command must be installed and report a compatible Codex version (`0.118.0` or newer). `codex_sdk` remains the primary CLI-backed UX-validation bridge. `codex_app_server` now keeps one app-server process alive for the Shuttle runtime session and reuses in-memory native thread state for the active Shuttle task across ordinary continuation turns, including compaction. It still needs stronger restart/reconnect policy before `auto` should prefer it.
+Use `SHUTTLE_RUNTIME_COMMAND` to override the executable path for an explicit runtime selection. When you switch runtimes from `F10`, Shuttle persists both the selected runtime type and the current runtime command path, unless `--runtime` or `--runtime-command` was explicitly provided on startup. For `codex_sdk` and `codex_app_server`, the command must be installed and report a compatible Codex version (`0.118.0` or newer). `codex_sdk` remains the primary CLI-backed UX-validation bridge. `codex_app_server` now keeps one app-server process alive for the Shuttle runtime session, reuses native thread bindings for the active Shuttle task across ordinary continuation turns, and treats the app-server as the delegated owner of tool execution for those turns: ordinary app-server turns now run tools natively inside the runtime thread and surface only final messages, plan updates, and approval requests back to Shuttle. Manual `/compact` also routes through native thread compaction when that task already has a live app-server thread. If the native thread has already been lost, Shuttle now reports that failure explicitly instead of silently pretending compaction succeeded on a fresh thread.
 
 Current confidence level:
 - cursory manual smoke testing now shows both `codex_sdk` and `codex_app_server` can at least accept ordinary prompts and return agent responses in the TUI
@@ -411,7 +411,7 @@ Slash commands in agent mode:
 - `/help`: open the in-app help view
 - `/approvals`: show or change the current session approval mode
 - `/new`: start a fresh task without restarting Shuttle or losing shell continuity
-- `/compact`: summarize older task context and keep a shorter live context window
+- `/compact`: shrink the live task context; on `codex_app_server`, Shuttle asks the native runtime thread to compact itself when one is already bound to the task
 - `/onboard`, `/provider`, `/model`, `/quit`: provider/settings/session commands; `/onboard` and `/provider` open `Configure Providers`, and `/model` opens the current provider detail focused on model selection
 
 Approval modes:

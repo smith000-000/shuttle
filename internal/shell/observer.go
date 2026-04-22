@@ -305,6 +305,7 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 	)
 
 	started := false
+	sawSemanticCommandStart := false
 	startDeadline := time.Now().Add(timeout)
 	lastCapture := ""
 	lastPaneInfoCheck := time.Time{}
@@ -383,6 +384,7 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 		}
 		if !started && observed.HasSemanticState && observed.SemanticState.Event == semanticEventCommand && !observed.SemanticState.UpdatedAt.Before(commandSentAt) {
 			started = true
+			sawSemanticCommandStart = true
 			monitor.setState(classifyActiveMonitorState(command, observed))
 			logging.Trace(
 				"shell.tracked.started_inferred_by_semantic_state",
@@ -392,6 +394,9 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 				"pane_command", currentPaneCommand,
 				"semantic_event", observed.SemanticState.Event,
 			)
+		}
+		if observed.HasSemanticState && observed.SemanticState.Event == semanticEventCommand && !observed.SemanticState.UpdatedAt.Before(commandSentAt) {
+			sawSemanticCommandStart = true
 		}
 		if started {
 			monitor.setState(classifyActiveMonitorState(command, observed))
@@ -531,7 +536,7 @@ func (o *Observer) runTrackedMonitor(ctx context.Context, monitor *trackedComman
 			return
 		}
 
-		if started && observed.HasSemanticState && observed.SemanticState.Event == semanticEventPrompt && !observed.SemanticState.UpdatedAt.Before(commandSentAt) {
+		if started && sawSemanticCommandStart && observed.HasSemanticState && observed.SemanticState.Event == semanticEventPrompt && !observed.SemanticState.UpdatedAt.Before(commandSentAt) {
 			evaluation, complete := evaluateSemanticPromptReturn(promptReturnInputs{
 				CommandID:  markers.CommandID,
 				Command:    command,

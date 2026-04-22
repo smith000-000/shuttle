@@ -70,7 +70,7 @@ func TestPlanEventUpdatesActivePlanCard(t *testing.T) {
 	if !strings.Contains(view, "Step 2 of 3 in progress (1 complete)") {
 		t.Fatalf("expected progress summary, got %q", view)
 	}
-	if !strings.Contains(view, "Informational only. Ctrl+G continues the plan.") {
+	if !strings.Contains(view, "Informational only. Ctrl+G continues the plan, or type a new prompt to replace it.") {
 		t.Fatalf("expected informational plan footer, got %q", view)
 	}
 	if strings.Contains(view, "Y continue") {
@@ -105,7 +105,7 @@ func TestPlanEventHighlightsContinueAfterLatestCommandResult(t *testing.T) {
 	if !strings.Contains(view, "Ctrl+G continue from result") {
 		t.Fatalf("expected explicit continue affordance, got %q", view)
 	}
-	if !strings.Contains(view, "Informational only. Ctrl+G continues the plan.") {
+	if !strings.Contains(view, "Informational only. Ctrl+G continues the plan, or type a new prompt to replace it.") {
 		t.Fatalf("expected plan card to remain informational, got %q", view)
 	}
 	if strings.Index(view, "Command Ready For Follow-Up") > strings.Index(view, "Active Plan") {

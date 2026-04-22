@@ -910,7 +910,14 @@ func (c *LocalController) DecideApproval(ctx context.Context, approvalID string,
 func (c *LocalController) resolveRuntimeOwnedApproval(ctx context.Context, approval ApprovalRequest, decision ApprovalDecision, refineText string) ([]TranscriptEvent, error) {
 	if decision == DecisionRefine {
 		c.mu.Lock()
-		event := c.newEvent(EventError, TextPayload{Text: "Refining runtime-owned approvals is not supported yet."})
+		if c.task.PendingApproval != nil && c.task.PendingApproval.ID == approval.ID {
+			c.task.PendingApproval = nil
+		}
+		message := "Approval sent back for refinement."
+		if refineText != "" {
+			message = "Refine request: " + refineText
+		}
+		event := c.newEvent(EventSystemNotice, TextPayload{Text: message})
 		c.appendEvents(event)
 		c.mu.Unlock()
 		return []TranscriptEvent{event}, nil
