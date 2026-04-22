@@ -43,6 +43,7 @@ Responsibilities:
 - talk to the real tmux server and socket
 - create or repair the Shuttle workspace
 - identify panes in a session
+- launch Shuttle-created PTYs with the configured shell profile when the product wants deterministic startup behavior
 - bootstrap either:
   - the normal two-pane workspace
   - a shell-only recovery session
@@ -52,6 +53,15 @@ Important distinction:
 - destructive recovery uses `BootstrapShellSession(...)`
 
 That distinction exists because after a broken handoff recovery there is no real embedded bottom TUI pane inside tmux. Recreating a fake two-pane tmux session caused confusing double-`exit` behavior, so recovery now prefers a one-pane shell session.
+
+Current shell-startup rule:
+- Shuttle now distinguishes between shell-family selection and shell-startup policy
+- the persistent tracked shell and owned execution panes each have a saved launch profile
+- `inherit` leaves shell startup untouched
+- `managed-prompt` keeps the shell family but forces a simple deterministic prompt and disables right-prompt output for Shuttle-created PTYs
+- `managed-minimal` uses Shuttle-owned startup files for the same shell family, with user rc/env inheritance controlled explicitly by settings
+- managed startup profiles also preload Shuttle's local semantic-shell hooks into those Shuttle-created PTYs, so prompt/cwd tracking does not depend on a later injected bootstrap command for the common local `bash`/`zsh` path
+- these profiles apply only when Shuttle creates or recreates the PTY; nested remote shells and user-started subshells remain outside that control surface
 
 ## 2.2 Shell Observer
 
@@ -64,7 +74,7 @@ The observer is the low-level shell integration layer.
 
 Responsibilities:
 - capture pane output
-- preserve an ANSI-bearing display capture separately from the sanitized control capture
+- use one sanitized capture pipeline for both shell reconciliation and transcript/result summaries
 - capture prompt context
 - send commands into the tracked pane
 - run tracked command monitors
@@ -85,9 +95,7 @@ Current transition rule:
 Current implementation note:
 - monitor loops now build an `ObservedShellState` snapshot that bundles prompt parse, pane metadata, semantic state, remembered transition kind, and inferred shell location
 - tracked-command and attached-foreground monitors now share the same semantic/prompt completion helpers for semantic command-finish settlement, semantic prompt settlement, inferred prompt-return completion, and tail normalization; the launch-mode-specific code only owns start detection, attach gating, and capture windowing
-- display-oriented transcript/output surfaces now use ANSI-preserving capture while command parsing, prompt reconciliation, and execution-state inference continue to use sanitized plain-text capture
-- the current implementation no longer uses ANSI/plain alignment as a completion decision path; display tails are now segmented independently from control tails, and transport-noise filtering is applied in the display path after `monitorDisplayTail`
-- this change was introduced in `4fbe9ca` and is currently validated by unit tests for prompt-only/noise and ANSI-preserving tails
+- transcript summaries and shell reconciliation intentionally share the same sanitized capture source of truth so cwd tracking, prompt return, and rendered command results stay aligned
 - `ShellLocation` now also carries cwd source/confidence metadata so the controller can distinguish prompt-derived directories, probe-confirmed directories, and low-confidence carried-forward cwd
 - context-transition polling now routes through a dedicated transition tracker state machine with states such as `submitted`, `candidate_prompt_seen`, `awaiting_interactive_input`, and `probe_verifying`
 - this is intended as an internal cleanup seam so later remote-shell reliability work can replace scattered boolean checks without redesigning the shell product model again
@@ -110,6 +118,8 @@ Semantic shell state is consumed from multiple sources with explicit precedence:
 - `osc_capture`
 - `state_file`
 - heuristics
+
+For Shuttle-created managed `bash`/`zsh` PTYs, the startup profile now emits semantic OSC markers and writes the state-file payload from the first prompt. The older live-pane source-command bootstrap still exists as a fallback for inherited shells and later local subshell transitions, but it is no longer the primary local-shell path.
 
 Current preferred source is `osc_stream`, backed by `tmux pipe-pane -O`.
 

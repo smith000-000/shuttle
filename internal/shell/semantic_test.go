@@ -135,6 +135,67 @@ func TestEnsureLocalShellIntegrationSkipsBootstrapWhenSemanticStateAlreadyPresen
 	}
 }
 
+func TestEnsureLocalShellIntegrationWaitsForManagedStartupSemanticState(t *testing.T) {
+	client := &fakeSemanticPaneClient{
+		pane:    tmux.Pane{ID: "%0", CurrentCommand: "zsh", TTY: "/dev/pts/21"},
+		capture: shellTestProjectPrompt(t),
+	}
+	dir := t.TempDir()
+	projectDir := shellTestProjectDir(t)
+	statePath := semanticStatePath(dir, client.pane.TTY)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		_ = os.MkdirAll(filepath.Dir(statePath), 0o755)
+		_ = os.WriteFile(statePath, []byte("{\"version\":1,\"event\":\"prompt\",\"exit\":0,\"cwd\":\""+projectDir+"\",\"shell\":\"zsh\"}\n"), 0o644)
+	}()
+
+	observer := (&Observer{client: client}).WithStateDir(dir).WithLaunchProfiles(DefaultLaunchProfiles())
+	if err := observer.EnsureLocalShellIntegration(context.Background(), "%0"); err != nil {
+		t.Fatalf("EnsureLocalShellIntegration() error = %v", err)
+	}
+	if len(client.sent) != 0 {
+		t.Fatalf("expected managed shell grace path to avoid bootstrap command, got %#v", client.sent)
+	}
+}
+
+func TestCaptureObservedShellStateBootstrapsSemanticIntegrationFromPromptHintWhenPromptIsUnparseable(t *testing.T) {
+	projectDir := shellTestProjectDir(t)
+	stateDir := t.TempDir()
+	base := &fakeSemanticPaneClient{
+		pane:    tmux.Pane{ID: "%0", CurrentCommand: "zsh", TTY: "/dev/pts/31"},
+		capture: "➜ project git:(main) ✗",
+	}
+	client := &semanticBootstrapClient{
+		fakeSemanticPaneClient: base,
+		stateDir:               stateDir,
+		projectDir:             projectDir,
+	}
+	observer := (&Observer{client: client}).WithStateDir(stateDir).WithPromptHint(GuessLocalContext(projectDir))
+
+	observed, err := observer.CaptureObservedShellState(context.Background(), "%0")
+	if err != nil {
+		t.Fatalf("CaptureObservedShellState() error = %v", err)
+	}
+	if len(base.sent) != 1 {
+		t.Fatalf("expected one semantic bootstrap command, got %#v", base.sent)
+	}
+	if !observed.HasSemanticState {
+		t.Fatalf("expected semantic shell state after bootstrap, got %#v", observed)
+	}
+	if observed.SemanticState.Event != semanticEventPrompt {
+		t.Fatalf("expected prompt semantic state after bootstrap, got %#v", observed.SemanticState)
+	}
+	if !observed.HasPromptContext {
+		t.Fatalf("expected prompt context synthesized from semantic state, got %#v", observed)
+	}
+	if observed.PromptContext.Directory != "~/workspace/project" {
+		t.Fatalf("expected synthesized cwd from semantic state, got %#v", observed.PromptContext)
+	}
+	if observed.Location.Kind != ShellLocationLocal {
+		t.Fatalf("expected local shell location after semantic bootstrap, got %#v", observed.Location)
+	}
+}
+
 func TestSemanticShellScriptsUseSTTerminators(t *testing.T) {
 	bashScript := bashSemanticShellIntegrationScript("/tmp/bash.state")
 	zshScript := zshSemanticShellIntegrationScript("/tmp/zsh.state")
@@ -222,7 +283,7 @@ func TestRunTrackedMonitorCompletesFromSemanticPromptState(t *testing.T) {
 		_ = os.WriteFile(statePath, []byte("{\"event\":\"prompt\",\"exit\":0,\"cwd\":\""+projectDir+"\",\"shell\":\"bash\"}\n"), 0o644)
 	}()
 
-	observer.runTrackedMonitor(context.Background(), monitor, "%0", "sleep 1", "sleep 1", 250*time.Millisecond, client.capture, client.capture, markers, func() {})
+	observer.runTrackedMonitor(context.Background(), monitor, "%0", "sleep 1", "sleep 1", 250*time.Millisecond, client.capture, markers, func() {})
 	result, err := monitor.Wait()
 	if err != nil {
 		t.Fatalf("Wait() error = %v", err)
@@ -257,6 +318,23 @@ type fakeSemanticPaneClient struct {
 	captureReads       int
 	escapedReads       int
 	paneReads          int
+}
+
+type semanticBootstrapClient struct {
+	*fakeSemanticPaneClient
+	stateDir   string
+	projectDir string
+}
+
+func (c *semanticBootstrapClient) SendKeys(ctx context.Context, target string, command string, pressEnter bool) error {
+	if err := c.fakeSemanticPaneClient.SendKeys(ctx, target, command, pressEnter); err != nil {
+		return err
+	}
+	statePath := semanticStatePath(c.stateDir, c.fakeSemanticPaneClient.pane.TTY)
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(statePath, []byte("{\"version\":1,\"event\":\"prompt\",\"exit\":0,\"cwd\":\""+c.projectDir+"\",\"shell\":\"zsh\"}\n"), 0o644)
 }
 
 func (f *fakeSemanticPaneClient) CapturePane(ctx context.Context, target string, startLine int) (string, error) {
@@ -294,7 +372,66 @@ func (f *fakeSemanticPaneClient) SendKeys(ctx context.Context, target string, co
 		}
 		f.captureReads = 0
 	}
+	if err := f.writeSemanticStateForInstallLocked(command); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (f *fakeSemanticPaneClient) writeSemanticStateForInstallLocked(command string) error {
+	scriptPath := semanticIntegrationScriptPath(command)
+	if scriptPath == "" || f.pane.TTY == "" {
+		return nil
+	}
+	stateDir, _, ok := strings.Cut(scriptPath, "/shell-integration/")
+	if !ok || strings.TrimSpace(stateDir) == "" {
+		return nil
+	}
+	directory := semanticInstallDirectoryFromCapture(f.capture)
+	if directory == "" {
+		directory = semanticInstallDirectoryFromCapture(strings.Join(f.captures, "\n"))
+	}
+	if directory == "" {
+		directory = "/workspace/project"
+	}
+	shellName := strings.TrimSpace(strings.ToLower(f.pane.CurrentCommand))
+	if shellName == "" {
+		shellName = "zsh"
+	}
+	statePath := semanticStatePath(stateDir, f.pane.TTY)
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		return err
+	}
+	payload := "{\"version\":1,\"event\":\"prompt\",\"exit\":0,\"cwd\":\"" + directory + "\",\"shell\":\"" + shellName + "\"}\n"
+	return os.WriteFile(statePath, []byte(payload), 0o644)
+}
+
+func semanticIntegrationScriptPath(command string) string {
+	match := regexp.MustCompile(`'([^']+/shell-integration/[^']+\.sh)'`).FindStringSubmatch(command)
+	if len(match) == 2 {
+		return match[1]
+	}
+	return ""
+}
+
+func semanticInstallDirectoryFromCapture(captured string) string {
+	context, ok := ParsePromptContextFromCapture(captured)
+	if !ok {
+		return ""
+	}
+	directory := strings.TrimSpace(context.Directory)
+	if directory == "" {
+		return ""
+	}
+	if directory == "~" || strings.HasPrefix(directory, "~/") {
+		if homeDir, err := os.UserHomeDir(); err == nil && strings.TrimSpace(homeDir) != "" {
+			if directory == "~" {
+				return homeDir
+			}
+			return filepath.Join(homeDir, strings.TrimPrefix(directory, "~/"))
+		}
+	}
+	return directory
 }
 
 func (f *fakeSemanticPaneClient) PaneInfo(ctx context.Context, target string) (tmux.Pane, error) {

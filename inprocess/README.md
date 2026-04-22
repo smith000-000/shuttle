@@ -31,8 +31,7 @@ What is working now:
 - first-class shell-context inspection support so the model can refresh authoritative user@host/cwd state instead of guessing from stale prompt text
 - inspect-context and provider turn context now include cwd source/confidence metadata so prompt-derived remote directories like `~` are treated as approximate while probe-confirmed directories are treated as authoritative
 - ordinary agent turns refresh tracked-shell identity and manual shell history without blindly reusing whatever old scrollback is still visible in the top pane as fresh command output
-- Shuttle now preserves ANSI-colored command output for display in most tracked command paths while still using sanitized plain-text captures for controller logic and prompt reconciliation
-- Known tracking limitation: directory-changing command output (for example `cd`) can still lose ANSI styling in some transitions and falls back toward plain output after the command settles
+- Shuttle now uses a single sanitized plain-text capture path for both controller logic and rendered command summaries/tails so shell tracking and cwd reconciliation stay aligned
 - tracked command capture now keeps cwd/prompt reconciliation stable across directory changes by joining wrapped pane lines, bounding result extraction to Shuttle markers when available, and stripping leaked Shuttle shell-plumbing fragments from transcript output
 - native unified-diff patch proposals with explicit apply/reject/ask-agent flow
 - controller-synthesized patch proposals for common single-file text edits, so the model can express insert/replace intent without hand-authoring unified hunks
@@ -45,7 +44,12 @@ What is working now:
 - real OpenAI Responses API path with API-key auth
 - provider onboarding and settings UI with:
   - one shared settings flow behind `F10`, `/onboard`, `/provider`, and `/model`
-  - `F10` runtime selection with persisted `builtin`, `auto`, `codex_sdk`, and `codex_app_server` choices, inline command-path editing, and runtime health/resolution preview
+  - `F10` runtime selection with persisted `builtin`, `auto`, `codex_sdk`, and `codex_app_server` choices, inline command-path editing, and runtime health/resolution preview that validates on selection changes or when you leave the command field
+  - `F10` shell settings with separate persistent-shell and execution-shell startup profiles:
+    - `inherit`: leave shell startup untouched
+    - `managed-prompt`: keep the shell family and usually keep user rc/env, but force a simple deterministic prompt with right prompt disabled and preload Shuttle's local semantic-shell hooks for those Shuttle-created PTYs
+    - `managed-minimal`: use Shuttle-owned startup files for the same shell family for a more controlled bootstrap path, including the same startup-owned prompt and semantic-shell setup
+    - per-target toggles for shell family (`auto`, `zsh`, `bash`), sourcing user rc, and inheriting the launch environment
   - `/onboard` and `/provider` jumping straight to `Configure Providers`
   - `/model` jumping to the current provider detail with the model field focused
   - provider detail editing with the discovered model list on the same screen
@@ -73,15 +77,15 @@ What is still in progress:
 - deeper shell-transition verification for more interactive and nested remote cases beyond the current prompt-plus-probe state machine
 - broader provider onboarding polish for additional backends and more proactive pre-selection health probes
 - provider registry/plugin architecture instead of static first-class wiring
-- any richer shell bootstrap/helper mode beyond those standards
+- richer managed-shell bootstrap and broader shell-family coverage beyond the current `bash`/`zsh` deterministic prompt profiles
 - transcript/UI cleanup and continued TUI/controller decomposition
 - stronger bounded-command guidance for event-stream listeners such as `xinput test`, `tail -f`, and similar monitors
 - multi-card or parallel execution UI
 - package-manager distribution and other post-archive release UX
 
 Tracking notes for current work-in-progress:
-- display capture was reworked to remove ANSI/plain alignment coupling from command completion; display tails now use dedicated ANSI-preserving capture + residual transport-noise filtering
-- the remaining `cd`/directory-change color loss appears most commonly when terminal output lands on the same capture boundary as a wrapped transport command echo
+- command/result display now deliberately follows the same sanitized capture used for shell reconciliation instead of a separate ANSI-preserving render path
+- if shell styling is important for a debugging session, rely on the real shell pane rather than the Shuttle transcript/result preview
 - this behavior is intentionally tracked in GitHub while we continue to tighten start/end marker-driven completion and prompt-return fallback paths
 
 ## Requirements
@@ -177,8 +181,55 @@ Important variables:
 - `SHUTTLE_TRACE_CONSENT`: must be true or passed as `--trace-consent` when using sensitive trace; Shuttle rejects sensitive trace at config-parse time until consent is explicit
 - `SHUTTLE_RUNTIME`: coding runtime selection: `builtin`, `auto`, `pi`, `codex_sdk`, or `codex_app_server`
 - `SHUTTLE_RUNTIME_COMMAND`: optional explicit runtime command path override
+- `SHUTTLE_TUI_DISABLE`: optional comma-separated TUI diagnostic disable list; also available as `--tui-disable`
 
 `launch.sh` loads `./env.sh` if present, otherwise it falls back to `./env.sh.sample`.
+
+## TUI Lag Isolation
+
+Shuttle now supports targeted TUI disable switches so you can isolate composer lag without editing code:
+
+```bash
+./launch.sh --tui-disable shell-completion
+```
+
+Or with environment config:
+
+```bash
+export SHUTTLE_TUI_DISABLE="shell-completion,completion-ghost"
+./launch.sh
+```
+
+Available disable values:
+- `shell-completion`
+- `history-completion`
+- `slash-completion`
+- `completion-ghost`
+- `footer-hints`
+- `status-line`
+- `shell-context`
+- `approval-label`
+- `model-status`
+- `context-usage`
+- `busy-indicator`
+- `action-card`
+- `plan-card`
+- `execution-card`
+- `shell-tail`
+- `transcript`
+- `transcript-chrome`
+- `mouse`
+- `busy-tick`
+- `execution-polling`
+- `shell-context-polling`
+
+For repeatable manual sweeps, use the helper script:
+
+```bash
+scripts/diagnose-tui-lag.sh list
+scripts/diagnose-tui-lag.sh shell-completion
+scripts/diagnose-tui-lag.sh chrome-off --tui
+```
 
 Release-oriented tmux defaults:
 - Shuttle now derives a stable workspace ID from the absolute project path
@@ -370,7 +421,7 @@ Approval modes:
 - `/approvals` without an argument shows the current session mode; `/approvals confirm`, `/approvals auto`, and `/approvals dangerous` switch it
 
 Settings notes:
-- `F10` opens settings with `Session Settings`, `Runtime`, and `Configure Providers`; the runtime screen switches the active runtime immediately, lets you edit the runtime command path, previews selected versus effective runtime resolution plus current health, and persists that selection for future launches, while selecting a provider opens the shared provider detail screen that also contains model selection
+- `F10` opens settings with `Session Settings`, `Runtime`, and `Configure Providers`; the runtime screen switches the active runtime immediately, lets you edit the runtime command path, previews selected versus effective runtime resolution, validates runtime health on selection changes or when you leave the command field, and persists that selection for future launches, while selecting a provider opens the shared provider detail screen that also contains model selection
 - provider detail editing supports `F7` to test the provider config, automatic provider validation when loading that provider's model list, and `F8` to save and activate it immediately
 - supported providers expose a `Thinking` radio control; OpenAI and OpenRouter also expose `Reasoning Effort` when `Thinking` is on
 - the provider list and model list support direct mouse clicks; `Thinking` and `Reasoning Effort` stay keyboard toggles via `Space` or `Left`/`Right`

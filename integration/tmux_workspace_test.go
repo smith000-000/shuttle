@@ -28,6 +28,12 @@ func TestBootstrapWorkspace(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	runtimeDir := t.TempDir()
+	launchProfiles := shell.DefaultLaunchProfiles()
+	persistentLaunch, err := shell.PersistentLaunchSpec(runtimeDir, launchProfiles)
+	if err != nil {
+		t.Fatalf("PersistentLaunchSpec() error = %v", err)
+	}
 
 	t.Cleanup(func() {
 		_ = client.KillSession(context.Background(), sessionName)
@@ -38,6 +44,7 @@ func TestBootstrapWorkspace(t *testing.T) {
 		StartDir:          ".",
 		BottomPanePercent: 30,
 		HistoryFile:       filepath.Join(t.TempDir(), "shell_history"),
+		Launch:            persistentLaunch,
 	})
 	if err != nil {
 		t.Fatalf("BootstrapWorkspace() create error = %v", err)
@@ -56,6 +63,7 @@ func TestBootstrapWorkspace(t *testing.T) {
 		StartDir:          ".",
 		BottomPanePercent: 30,
 		HistoryFile:       filepath.Join(t.TempDir(), "shell_history"),
+		Launch:            persistentLaunch,
 	})
 	if err != nil {
 		t.Fatalf("BootstrapWorkspace() rediscovery error = %v", err)

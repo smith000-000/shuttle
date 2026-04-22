@@ -35,6 +35,27 @@ func TestSanitizeCapturedBodyStripsSemanticBootstrapNoise(t *testing.T) {
 	}
 }
 
+func TestSanitizeCapturedBodyStripsSemanticBootstrapNoiseForCustomPromptGlyphs(t *testing.T) {
+	body := strings.Join([]string{
+		"➜ shuttle git:(p2-runtime-integration) ✗ . '/Users/jsmith/.local/state/shuttle/",
+		"shell-integration/zsh-pane0.sh' >/dev/null 2>&1",
+		"➜ shuttle git:(p2-runtime-integration) ✗ ls",
+		"AGENTS.md",
+		"BACKLOG.md",
+	}, "\n")
+
+	got := sanitizeCapturedBody(body)
+	want := strings.Join([]string{
+		"➜ shuttle git:(p2-runtime-integration) ✗ ls",
+		"AGENTS.md",
+		"BACKLOG.md",
+	}, "\n")
+
+	if got != want {
+		t.Fatalf("sanitizeCapturedBody() = %q, want %q", got, want)
+	}
+}
+
 func TestSanitizeCapturedBodyStripsWrappedShuttleProtocolNoise(t *testing.T) {
 	body := `.sh'"'"' >/dev/null 2>&1')"; __shuttle_status=$?; printf '%s%s\n' '__SHUTTLE_E__
 :abc123:' "$__shuttle_status"
@@ -73,21 +94,17 @@ func TestSanitizeCapturedBodyStripsTruncatedShuttleStatusLeak(t *testing.T) {
 	}
 }
 
-func TestSanitizeDisplayBodyStripsTruncatedShuttleStatusLeak(t *testing.T) {
+func TestSanitizeCapturedBodyStripsTruncatedRuntimeCommandPathLeak(t *testing.T) {
 	body := strings.Join([]string{
-		"ttle_status\"",
-		"\x1b[31mtotal 212K\x1b[0m",
-		"-rw-rw-r-- 1 jsmith jsmith 19K agent-runtime-design.md",
+		"cmw0000gn/T/tmp.1vuqQHCnA7/runtime/co",
+		"total 212K",
 	}, "\n")
 
-	got := sanitizeDisplayBody(body)
-	want := strings.Join([]string{
-		"\x1b[31mtotal 212K\x1b[0m",
-		"-rw-rw-r-- 1 jsmith jsmith 19K agent-runtime-design.md",
-	}, "\n")
+	got := sanitizeCapturedBody(body)
+	want := "total 212K"
 
 	if got != want {
-		t.Fatalf("sanitizeDisplayBody() = %q, want %q", got, want)
+		t.Fatalf("sanitizeCapturedBody() = %q, want %q", got, want)
 	}
 }
 
@@ -107,25 +124,6 @@ func TestSanitizeCapturedBodyStripsWrappedSourcedCommandFragment(t *testing.T) {
 
 	if got != want {
 		t.Fatalf("sanitizeCapturedBody() = %q, want %q", got, want)
-	}
-}
-
-func TestSanitizeDisplayBodyStripsWrappedSourcedCommandFragment(t *testing.T) {
-	body := strings.Join([]string{
-		"jsmith@linuxdesktop ~/source/repos/aiterm % . '/r",
-		"status\"",
-		"\x1b[32mAGENTS.md\x1b[0m",
-		"BACKLOG.md",
-	}, "\n")
-
-	got := sanitizeDisplayBody(body)
-	want := strings.Join([]string{
-		"\x1b[32mAGENTS.md\x1b[0m",
-		"BACKLOG.md",
-	}, "\n")
-
-	if got != want {
-		t.Fatalf("sanitizeDisplayBody() = %q, want %q", got, want)
 	}
 }
 
@@ -259,6 +257,12 @@ func TestClassifyActiveMonitorStateTreatsFullscreenForegroundCommandAsInteractiv
 	}
 }
 
+func TestClassifyActiveMonitorStateTreatsFullscreenInteractiveCommandAsInteractiveFullscreen(t *testing.T) {
+	if got := classifyActiveMonitorState("nano foo.txt", ObservedShellState{CurrentPaneCommand: "zsh"}); got != MonitorStateInteractiveFullscreen {
+		t.Fatalf("classifyActiveMonitorState(nano foo.txt) = %s, want %s", got, MonitorStateInteractiveFullscreen)
+	}
+}
+
 func TestClassifyActiveMonitorStateTreatsAwaitingForegroundCommandAsAwaitingInput(t *testing.T) {
 	if got := classifyActiveMonitorState("wrapped-alias", ObservedShellState{CurrentPaneCommand: "sudo"}); got != MonitorStateAwaitingInput {
 		t.Fatalf("classifyActiveMonitorState(foreground sudo) = %s, want %s", got, MonitorStateAwaitingInput)
@@ -307,7 +311,7 @@ func TestShouldIgnoreLocalSemanticStateForRememberedNestedShell(t *testing.T) {
 	}
 }
 
-func TestCaptureSemanticShellStatePrefersOSCCaptureOverStateFile(t *testing.T) {
+func TestCaptureSemanticShellStatePrefersStateFileOverOSCCapture(t *testing.T) {
 	dir := t.TempDir()
 	client := &fakeSemanticPaneClient{
 		pane:    tmux.Pane{ID: "%0", CurrentCommand: "zsh", TTY: "/dev/pts/12"},
@@ -327,14 +331,14 @@ func TestCaptureSemanticShellStatePrefersOSCCaptureOverStateFile(t *testing.T) {
 	if !ok {
 		t.Fatal("expected semantic shell state")
 	}
-	if source != semanticSourceOSCCapture {
-		t.Fatalf("expected osc capture source, got %q", source)
+	if source != semanticSourceState {
+		t.Fatalf("expected state file source, got %q", source)
 	}
-	if state.Event != semanticEventCommand {
+	if state.Event != semanticEventPrompt {
 		t.Fatalf("expected command event, got %#v", state)
 	}
-	if state.Directory != "/workspace/project" {
-		t.Fatalf("expected osc capture cwd, got %#v", state)
+	if state.Directory != "/tmp/fallback" {
+		t.Fatalf("expected state file cwd, got %#v", state)
 	}
 }
 
@@ -471,7 +475,7 @@ func TestRunTrackedMonitorTailUsesCurrentCommandDelta(t *testing.T) {
 		EndPrefix: "__SHUTTLE_E__:cmd-1:",
 	}
 
-	observer.runTrackedMonitor(context.Background(), monitor, "%0", "pwd", ". '/run/user/1000/shuttle/commands/cmd-1.sh'", 250*time.Millisecond, before, before, markers, func() {})
+	observer.runTrackedMonitor(context.Background(), monitor, "%0", "pwd", ". '/run/user/1000/shuttle/commands/cmd-1.sh'", 250*time.Millisecond, before, markers, func() {})
 
 	result, err := monitor.Wait()
 	if err != nil {
@@ -534,20 +538,20 @@ func TestRunTrackedMonitorDisplayTailPreservesANSIAndStripsTransportNoise(t *tes
 		EndPrefix: "__SHUTTLE_E__:fb0ps:",
 	}
 
-	observer.runTrackedMonitor(context.Background(), monitor, "%0", "ls", ". '/run/user/1000/shuttle/commands/b69vq.sh'", 250*time.Millisecond, before, before, markers, func() {})
+	observer.runTrackedMonitor(context.Background(), monitor, "%0", "ls", ". '/run/user/1000/shuttle/commands/b69vq.sh'", 250*time.Millisecond, before, markers, func() {})
 
 	result, err := monitor.Wait()
 	if err != nil {
 		t.Fatalf("Wait() error = %v", err)
 	}
-	if !strings.Contains(result.DisplayCaptured, "\x1b[32mREADME.md\x1b[0m") {
-		t.Fatalf("expected ANSI-preserving display capture, got %q", result.DisplayCaptured)
+	if result.DisplayCaptured != "README.md" {
+		t.Fatalf("expected display capture to match sanitized command output, got %q", result.DisplayCaptured)
 	}
 	if strings.Contains(result.DisplayCaptured, "45ile.sh'") || strings.Contains(result.DisplayCaptured, "b69vq.sh") || strings.Contains(result.DisplayCaptured, "fb0ps") {
 		t.Fatalf("expected display capture to exclude transport chatter, got %q", result.DisplayCaptured)
 	}
 
-	sawANSITail := false
+	sawDisplayTail := false
 	for snapshot := range monitor.Updates() {
 		if strings.TrimSpace(snapshot.LatestDisplayTail) == "" {
 			continue
@@ -555,16 +559,16 @@ func TestRunTrackedMonitorDisplayTailPreservesANSIAndStripsTransportNoise(t *tes
 		if strings.Contains(snapshot.LatestDisplayTail, "b69vq.sh") || strings.Contains(snapshot.LatestDisplayTail, "fb0ps") {
 			t.Fatalf("expected live display tail to exclude transport chatter, got %q", snapshot.LatestDisplayTail)
 		}
-		if strings.Contains(snapshot.LatestDisplayTail, "\x1b[32mREADME.md\x1b[0m") {
-			sawANSITail = true
+		if snapshot.LatestDisplayTail == "README.md" {
+			sawDisplayTail = true
 		}
 	}
-	if !sawANSITail {
-		t.Fatal("expected a live ANSI display tail update")
+	if !sawDisplayTail {
+		t.Fatal("expected a live display tail update")
 	}
 }
 
-func TestRunTrackedMonitorDisplayTailFallsBackToAlignedANSIWhenEscapedCaptureMissesMarkers(t *testing.T) {
+func TestRunTrackedMonitorDisplayTailFallsBackToSanitizedOutputWhenEscapedCaptureMissesMarkers(t *testing.T) {
 	before := strings.Join([]string{
 		"jsmith@linuxdesktop ~/source/repos/aiterm git:(p2-runtime-integration) % ls",
 		"AGENTS.md",
@@ -598,20 +602,20 @@ func TestRunTrackedMonitorDisplayTailFallsBackToAlignedANSIWhenEscapedCaptureMis
 		EndPrefix: "__SHUTTLE_E__:fb0ps:",
 	}
 
-	observer.runTrackedMonitor(context.Background(), monitor, "%0", "ls", ". '/run/user/1000/shuttle/commands/b69vq.sh'", 250*time.Millisecond, before, before, markers, func() {})
+	observer.runTrackedMonitor(context.Background(), monitor, "%0", "ls", ". '/run/user/1000/shuttle/commands/b69vq.sh'", 250*time.Millisecond, before, markers, func() {})
 
 	result, err := monitor.Wait()
 	if err != nil {
 		t.Fatalf("Wait() error = %v", err)
 	}
-	if result.DisplayCaptured != "\x1b[32mREADME.md\x1b[0m" {
-		t.Fatalf("expected aligned ANSI display capture, got %q", result.DisplayCaptured)
+	if result.DisplayCaptured != "README.md" {
+		t.Fatalf("expected sanitized display capture, got %q", result.DisplayCaptured)
 	}
 	if strings.Contains(result.DisplayCaptured, "45ile.sh'") || strings.Contains(result.DisplayCaptured, "b69vq.sh") || strings.Contains(result.DisplayCaptured, "git:(p2-runtime-integration) %") {
 		t.Fatalf("expected display capture to exclude escaped fallback noise, got %q", result.DisplayCaptured)
 	}
 
-	sawANSITail := false
+	sawDisplayTail := false
 	for snapshot := range monitor.Updates() {
 		if strings.TrimSpace(snapshot.LatestDisplayTail) == "" {
 			continue
@@ -619,12 +623,12 @@ func TestRunTrackedMonitorDisplayTailFallsBackToAlignedANSIWhenEscapedCaptureMis
 		if strings.Contains(snapshot.LatestDisplayTail, "45ile.sh'") || strings.Contains(snapshot.LatestDisplayTail, "b69vq.sh") || strings.Contains(snapshot.LatestDisplayTail, "git:(p2-runtime-integration) %") {
 			t.Fatalf("expected live display tail to exclude escaped fallback noise, got %q", snapshot.LatestDisplayTail)
 		}
-		if snapshot.LatestDisplayTail == "\x1b[32mREADME.md\x1b[0m" {
-			sawANSITail = true
+		if snapshot.LatestDisplayTail == "README.md" {
+			sawDisplayTail = true
 		}
 	}
-	if !sawANSITail {
-		t.Fatal("expected live display tail to preserve aligned ANSI output")
+	if !sawDisplayTail {
+		t.Fatal("expected live display tail to use sanitized output")
 	}
 }
 
@@ -655,7 +659,7 @@ func TestRunTrackedMonitorDisplayTailDropsPromptOnlyEscapedFallbackNoise(t *test
 		EndPrefix: "__SHUTTLE_E__:cmd-1:",
 	}
 
-	observer.runTrackedMonitor(context.Background(), monitor, "%0", "cd foo", ". '/run/user/1000/shuttle/commands/k4m1h.sh'", 250*time.Millisecond, before, before, markers, func() {})
+	observer.runTrackedMonitor(context.Background(), monitor, "%0", "cd foo", ". '/run/user/1000/shuttle/commands/k4m1h.sh'", 250*time.Millisecond, before, markers, func() {})
 
 	result, err := monitor.Wait()
 	if err != nil {
@@ -673,67 +677,6 @@ func TestRunTrackedMonitorDisplayTailDropsPromptOnlyEscapedFallbackNoise(t *test
 			continue
 		}
 		t.Fatalf("expected prompt-only escaped fallback noise to be dropped, got %q", snapshot.LatestDisplayTail)
-	}
-}
-
-func TestDisplayTailStripsShuttleEchoResidual(t *testing.T) {
-	body := strings.Join([]string{
-		"45ile.sh'",
-		"\x1b[32mREADME.md\x1b[0m",
-	}, "\n")
-	command := ". '/run/user/1000/shuttle/commands/b69vq.sh'"
-
-	got := monitorDisplayTail(body, command)
-	if strings.TrimSpace(got) != "\x1b[32mREADME.md\x1b[0m" {
-		t.Fatalf("expected residual line to be dropped, got %q", got)
-	}
-}
-
-func TestRunTrackedMonitorCompletesOnSemanticCommandDoneWithoutPrompt(t *testing.T) {
-	before := "jsmith@linuxdesktop ~/source/repos/aiterm %"
-	after := strings.Join([]string{
-		before,
-		"jsmith@linuxdesktop ~/source/repos/aiterm % . '/run/user/1000/shuttle/commands/cmd-1.sh'",
-		"__SHUTTLE_B__:cmd-1",
-		"README.md",
-	}, "\n")
-	afterEscaped := strings.Join([]string{
-		before,
-		"\x1b]133;B\x1b\\",
-		"\x1b]133;C\x1b\\",
-		"\x1b[32mREADME.md\x1b[0m",
-		"\x1b]133;D;0\x1b\\",
-	}, "\n")
-	client := &fakeSemanticPaneClient{
-		pane:            tmux.Pane{ID: "%0", CurrentCommand: "zsh", TTY: "/dev/pts/28"},
-		captures:        []string{after},
-		escapedCaptures: []string{afterEscaped, afterEscaped},
-	}
-	observer := &Observer{client: client}
-	monitor := newTrackedCommandMonitor("cmd-1", "ls")
-	markers := protocol.Markers{
-		CommandID: "cmd-1",
-		BeginLine: "__SHUTTLE_B__:cmd-1",
-		EndPrefix: "__SHUTTLE_E__:cmd-1:",
-	}
-
-	observer.runTrackedMonitor(context.Background(), monitor, "%0", "ls", ". '/run/user/1000/shuttle/commands/cmd-1.sh'", 250*time.Millisecond, before, before, markers, func() {})
-
-	result, err := monitor.Wait()
-	if err != nil {
-		t.Fatalf("Wait() error = %v", err)
-	}
-	if result.Cause != CompletionCauseSemanticLifecycle {
-		t.Fatalf("expected semantic lifecycle cause, got %q", result.Cause)
-	}
-	if result.ExitCode != 0 || result.State != MonitorStateCompleted {
-		t.Fatalf("expected semantic completion with exit code 0, got %#v", result)
-	}
-	if result.Captured != "README.md" {
-		t.Fatalf("expected semantic completion to preserve command output, got %q", result.Captured)
-	}
-	if result.DisplayCaptured != "\x1b[32mREADME.md\x1b[0m" {
-		t.Fatalf("expected aligned ANSI display output, got %q", result.DisplayCaptured)
 	}
 }
 
@@ -1100,7 +1043,6 @@ func TestRunTrackedMonitorCompletesOnPromptReturnEvenWithNonPromptSemanticState(
 		". '/run/user/1000/shuttle/commands/cmd-1.sh'",
 		250*time.Millisecond,
 		shellTestProjectPrompt(t),
-		shellTestProjectPrompt(t),
 		markers,
 		func() {},
 	)
@@ -1147,7 +1089,7 @@ func TestCaptureRecentOutputRecoversFromRespawnedTopPane(t *testing.T) {
 	}
 }
 
-func TestCaptureRecentOutputDisplayPreservesANSI(t *testing.T) {
+func TestCaptureRecentOutputDisplayMatchesPlainOutput(t *testing.T) {
 	client := &fakeSemanticPaneClient{
 		capture: "red.txt",
 		escaped: "\x1b[31mred.txt\x1b[0m",
@@ -1158,8 +1100,8 @@ func TestCaptureRecentOutputDisplayPreservesANSI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CaptureRecentOutputDisplay() error = %v", err)
 	}
-	if !strings.Contains(display, "\x1b[31m") {
-		t.Fatalf("expected ANSI color in display capture, got %q", display)
+	if display != "red.txt" {
+		t.Fatalf("expected display capture to match sanitized plain output, got %q", display)
 	}
 
 	plain, err := observer.CaptureRecentOutput(context.Background(), "%0", 20)

@@ -22,6 +22,7 @@ const (
 	semanticEventCommand      semanticShellEvent = "command"
 	semanticEventCommandDone  semanticShellEvent = "command_done"
 	semanticShellStateVersion                    = 1
+	managedShellStateGrace                       = 500 * time.Millisecond
 )
 
 var semanticStateNow = time.Now
@@ -133,7 +134,7 @@ func parseSemanticShellState(raw string) (semanticShellState, bool) {
 
 func synthesizePromptContext(base PromptContext, state semanticShellState) PromptContext {
 	context := base
-	if context.User == "" || context.Host == "" {
+	if context.PromptLine() == "" {
 		context = GuessLocalContext(state.Directory)
 	}
 	if strings.TrimSpace(state.Directory) != "" {
@@ -167,6 +168,34 @@ func (o *Observer) ensureLocalShellIntegration(ctx context.Context, paneID strin
 		return false, err
 	}
 
+	observed, _, err := o.captureObservedShellStateOnce(ctx, paneID)
+	if err != nil {
+		observed = ObservedShellState{
+			PromptContext:        o.promptHint,
+			HasPromptContext:     o.promptHint.PromptLine() != "",
+			CurrentPaneCommand:   strings.TrimSpace(pane.CurrentCommand),
+			PaneTTY:              strings.TrimSpace(pane.TTY),
+			RememberedTransition: o.rememberedTransition(paneID),
+		}
+		observed.Location = inferShellLocation(observed.PromptContext, pane.CurrentCommand, observed.RememberedTransition)
+	}
+
+	return o.ensureLocalShellIntegrationForObservation(ctx, paneID, &pane, observed)
+}
+
+func (o *Observer) ensureLocalShellIntegrationForObservation(ctx context.Context, paneID string, pane *tmux.Pane, observed ObservedShellState) (bool, error) {
+	if strings.TrimSpace(o.stateDir) == "" {
+		return false, nil
+	}
+
+	if pane == nil {
+		info, err := o.paneInfo(ctx, paneID)
+		if err != nil {
+			return false, err
+		}
+		pane = &info
+	}
+
 	shellName := strings.TrimSpace(strings.ToLower(pane.CurrentCommand))
 	switch shellName {
 	case "bash", "zsh":
@@ -174,20 +203,32 @@ func (o *Observer) ensureLocalShellIntegration(ctx context.Context, paneID strin
 		return false, nil
 	}
 
-	observed, err := o.CaptureObservedShellState(ctx, paneID)
-	if err != nil {
-		observed = ObservedShellState{PromptContext: o.promptHint, HasPromptContext: o.promptHint.PromptLine() != ""}
-		observed.Location = inferShellLocation(observed.PromptContext, pane.CurrentCommand, o.rememberedTransition(paneID))
-	}
-	promptContext := observed.PromptContext
-	if !observed.HasPromptContext || promptContext.PromptLine() == "" || observed.Location.Kind == ShellLocationRemote {
-		return false, nil
-	}
 	if observed.HasSemanticState && observed.SemanticState.Shell == shellName {
 		return false, nil
 	}
+	if o.waitForManagedShellSemanticState(ctx, *pane, shellName) {
+		return false, nil
+	}
 
-	scriptPath, err := writeSemanticShellIntegrationScript(o.stateDir, pane, shellName)
+	promptContext := PromptContext{}
+	if observed.HasPromptContext && observed.PromptContext.PromptLine() != "" {
+		promptContext = observed.PromptContext
+	} else if o.promptHint.PromptLine() != "" {
+		promptContext = o.promptHint
+	}
+
+	location := observed.Location
+	if location.Kind == "" {
+		location = inferShellLocation(promptContext, pane.CurrentCommand, observed.RememberedTransition)
+	}
+	if location.Kind == ShellLocationRemote {
+		return false, nil
+	}
+	if promptContext.PromptLine() == "" && location.Kind == ShellLocationUnknown {
+		return false, nil
+	}
+
+	scriptPath, err := writeSemanticShellIntegrationScript(o.stateDir, *pane, shellName)
 	if err != nil {
 		return false, err
 	}
@@ -197,6 +238,54 @@ func (o *Observer) ensureLocalShellIntegration(ctx context.Context, paneID strin
 		return false, fmt.Errorf("send semantic shell integration command: %w", err)
 	}
 	return true, nil
+}
+
+func (o *Observer) waitForManagedShellSemanticState(ctx context.Context, pane tmux.Pane, shellName string) bool {
+	if strings.TrimSpace(o.stateDir) == "" || strings.TrimSpace(pane.TTY) == "" {
+		return false
+	}
+	if !o.managedLaunchProfileMatchesShell(shellName) {
+		return false
+	}
+
+	deadline := time.Now().Add(managedShellStateGrace)
+	for {
+		state, ok := readSemanticShellState(o.stateDir, pane.TTY)
+		if ok && state.Shell == shellName {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+}
+
+func (o *Observer) managedLaunchProfileMatchesShell(shellName string) bool {
+	shellName = strings.TrimSpace(strings.ToLower(shellName))
+	switch shellName {
+	case "bash", "zsh":
+	default:
+		return false
+	}
+
+	profiles := NormalizeLaunchProfiles(o.launchProfiles)
+	for _, profile := range []LaunchProfile{profiles.Persistent, profiles.Execution} {
+		if profile.Mode == LaunchModeInherit {
+			continue
+		}
+		switch normalizeShellType(string(profile.Shell)) {
+		case ShellTypeAuto:
+			return true
+		case ShellType(shellName):
+			return true
+		}
+	}
+	return false
 }
 
 func (o *Observer) runManagedSemanticInstall(ctx context.Context, paneID string, command string) error {

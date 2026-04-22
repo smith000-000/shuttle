@@ -33,6 +33,11 @@ func (m Model) handleSettingsMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.settingsRuntimeIdx = index
 			return m.applySettingsSelection()
 		}
+	case settingsStepShell:
+		if index, ok := m.settingsConfigFieldIndexAtMouse(msg.Y); ok && m.settingsConfig != nil {
+			m.settingsConfig.index = index
+			return m, nil
+		}
 	case settingsStepProviders:
 		if index, ok := m.settingsProviderIndexAtMouse(msg.Y); ok {
 			m.settingsProviderIdx = index

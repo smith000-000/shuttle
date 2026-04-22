@@ -10,6 +10,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"aiterm/internal/tuifeatures"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
@@ -30,6 +32,7 @@ func (m *Model) setInput(value string) {
 		m.clearExitConfirm()
 	}
 	m.recomputeCompletion()
+	m.syncDerivedState()
 }
 
 func (m *Model) clampCursor() {
@@ -74,6 +77,7 @@ func (m *Model) insertTextAtCursor(value string) {
 		m.clearExitConfirm()
 	}
 	m.recomputeCompletion()
+	m.syncDerivedState()
 }
 
 func sanitizePastedText(value string) string {
@@ -121,6 +125,7 @@ func (m *Model) backspaceAtCursor() {
 		m.clearExitConfirm()
 	}
 	m.recomputeCompletion()
+	m.syncDerivedState()
 }
 
 func (m *Model) deleteAtCursor() {
@@ -139,6 +144,7 @@ func (m *Model) deleteAtCursor() {
 		m.clearExitConfirm()
 	}
 	m.recomputeCompletion()
+	m.syncDerivedState()
 }
 
 func (m *Model) toggleOverwriteMode() {
@@ -248,6 +254,9 @@ func (m *Model) clearCompletion() bool {
 }
 
 func (m *Model) currentCompletionGhostText() string {
+	if m.featureDisabled(tuifeatures.CompletionGhost) {
+		return ""
+	}
 	if m.completion == nil || len(m.completion.Candidates) == 0 {
 		return ""
 	}
@@ -312,11 +321,15 @@ func (m *Model) computeCompletion() *composerCompletion {
 	var completion *composerCompletion
 	switch {
 	case m.editingProposal != nil || m.mode == ShellMode:
-		completion = m.computeShellCompletion(runes)
+		if m.featureEnabled(tuifeatures.ShellCompletion) {
+			completion = m.computeShellCompletion(runes)
+		}
 	case m.mode == AgentMode && m.refiningApproval == nil && m.refiningProposal == nil:
-		completion = m.computeSlashCompletion(runes)
+		if m.featureEnabled(tuifeatures.SlashCompletion) {
+			completion = m.computeSlashCompletion(runes)
+		}
 	}
-	if completion == nil && !(m.mode == AgentMode && strings.HasPrefix(m.input, "/")) {
+	if completion == nil && m.featureEnabled(tuifeatures.HistoryCompletion) && !(m.mode == AgentMode && strings.HasPrefix(m.input, "/")) {
 		completion = m.computeHistoryCompletion(runes)
 	}
 	if completion == nil || len(completion.Candidates) == 0 {
@@ -369,9 +382,9 @@ func (m *Model) computeShellCompletion(runes []rune) *composerCompletion {
 
 	var candidates []string
 	if start == 0 && !strings.Contains(fragment, "/") && !strings.HasPrefix(fragment, ".") && !strings.HasPrefix(fragment, "~") {
-		candidates = executableCompletionCandidates(fragment)
+		candidates = m.executableCompletionCandidates(fragment)
 	} else {
-		candidates = pathCompletionCandidates(m.currentWorkingDirectory(), fragment)
+		candidates = m.pathCompletionCandidates(m.currentWorkingDirectory(), fragment)
 	}
 	if len(candidates) == 0 {
 		return nil
@@ -443,6 +456,7 @@ func (m *Model) replaceCompletionFragment(candidate string) {
 		m.clearExitConfirm()
 	}
 	m.recomputeCompletion()
+	m.syncDerivedState()
 }
 
 func (m Model) currentWorkingDirectory() string {
@@ -500,10 +514,31 @@ func lastTokenStart(runes []rune) int {
 	return 0
 }
 
-func executableCompletionCandidates(prefix string) []string {
+func (m *Model) executableCompletionCandidates(prefix string) []string {
+	names := m.cachedExecutableCompletionNames()
+	if len(names) == 0 {
+		return nil
+	}
+	start := sort.SearchStrings(names, prefix)
+	candidates := make([]string, 0, 16)
+	for index := start; index < len(names); index++ {
+		name := names[index]
+		if !strings.HasPrefix(name, prefix) {
+			break
+		}
+		candidates = append(candidates, name)
+	}
+	return candidates
+}
+
+func (m *Model) cachedExecutableCompletionNames() []string {
 	pathValue := strings.TrimSpace(os.Getenv("PATH"))
 	if pathValue == "" {
 		return nil
+	}
+	cache := m.shellCompletionCache.executables
+	if cache.pathValue == pathValue && !cache.loadedAt.IsZero() && time.Since(cache.loadedAt) < executableCompletionCacheTTL {
+		return cache.names
 	}
 	seen := map[string]struct{}{}
 	candidates := []string{}
@@ -517,7 +552,7 @@ func executableCompletionCandidates(prefix string) []string {
 		}
 		for _, entry := range entries {
 			name := entry.Name()
-			if _, ok := seen[name]; ok || !strings.HasPrefix(name, prefix) {
+			if _, ok := seen[name]; ok {
 				continue
 			}
 			info, err := entry.Info()
@@ -529,10 +564,15 @@ func executableCompletionCandidates(prefix string) []string {
 		}
 	}
 	sort.Strings(candidates)
+	m.shellCompletionCache.executables = executableCompletionCache{
+		pathValue: pathValue,
+		loadedAt:  time.Now(),
+		names:     candidates,
+	}
 	return candidates
 }
 
-func pathCompletionCandidates(workingDir string, fragment string) []string {
+func (m *Model) pathCompletionCandidates(workingDir string, fragment string) []string {
 	searchDir := workingDir
 	prefixDir := ""
 	basePrefix := fragment
@@ -542,24 +582,53 @@ func pathCompletionCandidates(workingDir string, fragment string) []string {
 		searchDir = resolveCompletionDir(workingDir, strings.TrimSuffix(prefixDir, "/"))
 	}
 
-	entries, err := os.ReadDir(searchDir)
-	if err != nil {
+	entries := m.cachedDirectoryCompletionEntries(searchDir)
+	if len(entries) == 0 {
 		return nil
 	}
 	candidates := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		name := entry.Name()
+		name := entry.name
 		if !strings.HasPrefix(name, basePrefix) {
 			continue
 		}
 		candidate := prefixDir + name
-		if entry.IsDir() {
+		if entry.isDir {
 			candidate += "/"
 		}
 		candidates = append(candidates, candidate)
 	}
 	sort.Strings(candidates)
 	return candidates
+}
+
+func (m *Model) cachedDirectoryCompletionEntries(searchDir string) []pathCompletionEntry {
+	if searchDir == "" {
+		return nil
+	}
+	if cache, ok := m.shellCompletionCache.directories[searchDir]; ok && !cache.loadedAt.IsZero() && time.Since(cache.loadedAt) < directoryCompletionCacheTTL {
+		return cache.entries
+	}
+
+	entries, err := os.ReadDir(searchDir)
+	if err != nil {
+		return nil
+	}
+	cached := make([]pathCompletionEntry, 0, len(entries))
+	for _, entry := range entries {
+		cached = append(cached, pathCompletionEntry{
+			name:  entry.Name(),
+			isDir: entry.IsDir(),
+		})
+	}
+	if m.shellCompletionCache.directories == nil {
+		m.shellCompletionCache.directories = map[string]directoryCompletionCacheEntry{}
+	}
+	m.shellCompletionCache.directories[searchDir] = directoryCompletionCacheEntry{
+		loadedAt: time.Now(),
+		entries:  cached,
+	}
+	return cached
 }
 
 func resolveCompletionDir(workingDir string, fragment string) string {
@@ -622,14 +691,17 @@ func (m Model) exitConfirmActive() bool {
 	return !m.exitConfirmUntil.IsZero() && time.Now().Before(m.exitConfirmUntil)
 }
 
-func tickBusy() tea.Cmd {
-	return tea.Tick(120*time.Millisecond, func(t time.Time) tea.Msg {
+func tickBusyAfter(delay time.Duration) tea.Cmd {
+	if delay <= 0 {
+		return nil
+	}
+	return tea.Tick(delay, func(t time.Time) tea.Msg {
 		return busyTickMsg(t)
 	})
 }
 
-func tickShellContext() tea.Cmd {
-	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+func tickShellContextAfter(delay time.Duration) tea.Cmd {
+	return tea.Tick(delay, func(t time.Time) tea.Msg {
 		return shellContextPollTickMsg(t)
 	})
 }
@@ -670,6 +742,11 @@ type composerLine struct {
 }
 
 const composerMaxVisibleLines = 15
+
+const (
+	executableCompletionCacheTTL = 5 * time.Second
+	directoryCompletionCacheTTL  = 1 * time.Second
+)
 
 func composerDisplayLines(input string, cursor int, ghost string) []composerLine {
 	runes := []rune(input)

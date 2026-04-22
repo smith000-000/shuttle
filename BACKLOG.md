@@ -14,7 +14,7 @@ As of April 12, 2026, Shuttle has the core local-first product loop in place:
 - tracked shell observation with prompt-return monitoring, semantic shell signals, remote shell location tracking, and owned execution panes
 - native unified-diff proposal/apply flow for local and tracked-remote edits
 - provider switching and model selection with OpenAI-compatible HTTP providers, OpenRouter support, and a first-pass Codex CLI provider path
-- session-level approvals, `/new`, `/compact`, inspect-context support, persisted runtime selection through `F10`, and current transcript/status UI refinements
+- session-level approvals, `/new`, `/compact`, inspect-context support, persisted runtime selection through `F10`, per-target shell startup profiles through `F10`, and current transcript/status UI refinements
 - release packaging and installer groundwork
 - the first controller-owned external runtime seam behind `internal/agentruntime`
 
@@ -40,6 +40,7 @@ The old implementation plans were useful to get here, but most of them now descr
   - preserve parity across builtin and non-builtin runtimes for plans, proposals, approvals, patch handling, and recovery turns
 - Cursory manual smoke testing now shows both Codex runtime paths can at least answer ordinary prompts in the TUI.
 - Shell-tracking regressions introduced during the runtime work were hardened back down: prompt/cwd tracking across `cd`, transcript capture, and `KEYS>` exit behavior now have focused regression coverage.
+- Shuttle-owned PTYs now have deterministic shell-profile settings so the tracked shell and owned execution panes can keep the user shell family while reducing prompt/theme variance, and those managed shells preload Shuttle semantic hooks at startup instead of depending on per-command pane bootstrap.
 - Continue deepening the app-server runtime from live session-bound thread reuse into stronger failure handling, reconnect policy, and native compaction behavior before `auto` prefers it.
 
 ### P3

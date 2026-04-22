@@ -97,6 +97,33 @@ func TestEnvironmentArgsSortsKeys(t *testing.T) {
 	}
 }
 
+func TestMergeEnvironmentOverlaysLaunchEnv(t *testing.T) {
+	merged := mergeEnvironment(map[string]string{
+		"HISTFILE": "/tmp/history",
+		"PATH":     "/usr/bin",
+	}, map[string]string{
+		"PATH":    "/custom/bin",
+		"ZDOTDIR": "/tmp/zdotdir",
+	})
+	if merged["HISTFILE"] != "/tmp/history" {
+		t.Fatalf("expected HISTFILE to survive merge, got %#v", merged)
+	}
+	if merged["PATH"] != "/custom/bin" {
+		t.Fatalf("expected launch env PATH override, got %#v", merged)
+	}
+	if merged["ZDOTDIR"] != "/tmp/zdotdir" {
+		t.Fatalf("expected launch env to be added, got %#v", merged)
+	}
+}
+
+func TestAppendLaunchSpecAddsCommand(t *testing.T) {
+	args := appendLaunchSpec([]string{"new-session", "-d"}, LaunchSpec{Command: "exec /bin/zsh -i"})
+	expected := []string{"new-session", "-d", "exec /bin/zsh -i"}
+	if !reflect.DeepEqual(args, expected) {
+		t.Fatalf("expected %v, got %v", expected, args)
+	}
+}
+
 func TestShellHistoryEnvironment(t *testing.T) {
 	env := shellHistoryEnvironment("/tmp/shuttle-history")
 	if env["HISTFILE"] != "/tmp/shuttle-history" {
@@ -138,5 +165,39 @@ func TestSocketFlagArgsUsesSocketPath(t *testing.T) {
 	expected := []string{"-S", "/tmp/tmux-1000/custom"}
 	if !reflect.DeepEqual(args, expected) {
 		t.Fatalf("expected %v, got %v", expected, args)
+	}
+}
+
+func TestTmuxTraceArgsSummarizesCapturePane(t *testing.T) {
+	got := tmuxTraceArgs([]string{"capture-pane", "-p", "-J", "-t", "%0", "-S", "-200", "-e"})
+	want := "capture-pane target=%0 start=-200 escaped=true"
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestTmuxTraceArgsSummarizesListPanes(t *testing.T) {
+	got := tmuxTraceArgs([]string{"list-panes", "-t", "%0", "-F", paneFormat})
+	want := "list-panes target=%0"
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestTmuxTracePoliciesSuppressHotPathPreviews(t *testing.T) {
+	hot := []string{"capture-pane", "-p", "-J", "-t", "%0", "-S", "-80"}
+	if tmuxTraceStartEnabled(hot) {
+		t.Fatal("expected capture-pane start tracing to be suppressed")
+	}
+	if tmuxTraceSuccessPreviewEnabled(hot) {
+		t.Fatal("expected capture-pane success preview to be suppressed")
+	}
+
+	normal := []string{"rename-window", "-t", "@1", "shell"}
+	if !tmuxTraceStartEnabled(normal) {
+		t.Fatal("expected normal tmux command start tracing to remain enabled")
+	}
+	if !tmuxTraceSuccessPreviewEnabled(normal) {
+		t.Fatal("expected normal tmux command success preview to remain enabled")
 	}
 }

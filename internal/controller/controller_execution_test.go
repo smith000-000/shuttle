@@ -22,14 +22,13 @@ func TestFinalExecutionDisplayOutputStripsTrailingPromptFromDisplayCapture(t *te
 		PromptSymbol: "%",
 		RawLine:      "jsmith@linuxdesktop ~/source/repos/aiterm git:(p2-runtime-integration) %",
 	}
-	colorPrompt := "\x1b[36mjsmith@linuxdesktop\x1b[0m \x1b[32m~/source/repos/aiterm\x1b[0m git:(p2-runtime-integration) \x1b[33m%\x1b[0m"
 	result := shell.TrackedExecution{
-		DisplayCaptured: "\x1b[32mAGENTS.md\x1b[0m  \x1b[32mREADME.md\x1b[0m\n" + colorPrompt,
+		DisplayCaptured: "AGENTS.md  README.md\n" + prompt.RawLine,
 		ShellContext:    prompt,
 	}
 
 	got := finalExecutionDisplayOutput(result, nil)
-	want := "\x1b[32mAGENTS.md\x1b[0m  \x1b[32mREADME.md\x1b[0m"
+	want := "AGENTS.md  README.md"
 	if got != want {
 		t.Fatalf("expected trailing prompt to be stripped, got %q", got)
 	}
@@ -46,14 +45,14 @@ func TestFinalExecutionOutputFallbackStripsTrailingPromptFromCurrentTails(t *tes
 	}
 	current := &CommandExecution{
 		LatestOutputTail:  "AGENTS.md\n" + prompt.RawLine,
-		LatestDisplayTail: "\x1b[32mAGENTS.md\x1b[0m\n\x1b[36mjsmith@linuxdesktop\x1b[0m \x1b[32m~/source/repos/aiterm\x1b[0m git:(p2-runtime-integration) \x1b[33m%\x1b[0m",
+		LatestDisplayTail: "AGENTS.md\n" + prompt.RawLine,
 		ShellContextAfter: &prompt,
 	}
 
 	if got := finalExecutionSummaryOutput(shell.TrackedExecution{}, current); got != "AGENTS.md" {
 		t.Fatalf("expected summary tail prompt to be stripped, got %q", got)
 	}
-	if got := finalExecutionDisplayOutput(shell.TrackedExecution{}, current); got != "\x1b[32mAGENTS.md\x1b[0m" {
+	if got := finalExecutionDisplayOutput(shell.TrackedExecution{}, current); got != "AGENTS.md" {
 		t.Fatalf("expected display tail prompt to be stripped, got %q", got)
 	}
 }
@@ -78,7 +77,7 @@ func TestLocalControllerApplyMonitorSnapshotStripsTrailingPromptFromTails(t *tes
 
 	controller.applyMonitorSnapshot("cmd-1", shell.MonitorSnapshot{
 		LatestOutputTail:  "README.md\n" + prompt.RawLine,
-		LatestDisplayTail: "\x1b[32mREADME.md\x1b[0m\n\x1b[36mjsmith@linuxdesktop\x1b[0m \x1b[32m~/source/repos/aiterm/completed\x1b[0m git:(p2-runtime-integration) \x1b[33m%\x1b[0m",
+		LatestDisplayTail: "README.md\n" + prompt.RawLine,
 		ShellContext:      prompt,
 	})
 
@@ -91,7 +90,7 @@ func TestLocalControllerApplyMonitorSnapshotStripsTrailingPromptFromTails(t *tes
 	if execution.LatestOutputTail != "README.md" {
 		t.Fatalf("expected snapshot summary prompt to be stripped, got %q", execution.LatestOutputTail)
 	}
-	if execution.LatestDisplayTail != "\x1b[32mREADME.md\x1b[0m" {
+	if execution.LatestDisplayTail != "README.md" {
 		t.Fatalf("expected snapshot display prompt to be stripped, got %q", execution.LatestDisplayTail)
 	}
 }
@@ -2496,5 +2495,39 @@ func TestLocalControllerSubmitShellCommandPreservesMonitoredTailWhenCompletionCa
 	}
 	if controller.task.LastCommandResult == nil || !strings.Contains(controller.task.LastCommandResult.Summary, "docs/b.md") {
 		t.Fatalf("expected last command result to preserve monitored tail, got %#v", controller.task.LastCommandResult)
+	}
+}
+
+func TestLocalControllerSubmitShellCommandStartsFullscreenCommandsInFullscreenState(t *testing.T) {
+	monitor := newManualMonitor()
+	runner := &monitoringRunner{monitor: monitor, started: make(chan struct{}, 1)}
+	controller := New(nil, runner, nil, SessionContext{TrackedShell: TrackedShellTarget{PaneID: "%0"}})
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = controller.SubmitShellCommand(context.Background(), "nano foo.txt")
+		close(done)
+	}()
+
+	runner.waitForStart(t)
+	active := controller.ActiveExecution()
+	if active == nil {
+		t.Fatal("expected active execution")
+	}
+	if active.State != CommandExecutionInteractiveFullscreen {
+		t.Fatalf("expected fullscreen command to start in interactive_fullscreen, got %#v", active)
+	}
+
+	monitor.finish(shell.TrackedExecution{
+		CommandID: "cmd-1",
+		Command:   "nano foo.txt",
+		ExitCode:  0,
+		Captured:  "",
+	}, context.Canceled)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for command to finish")
 	}
 }

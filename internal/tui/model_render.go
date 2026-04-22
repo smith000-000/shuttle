@@ -10,6 +10,7 @@ import (
 	"aiterm/internal/controller"
 	"aiterm/internal/provider"
 	"aiterm/internal/shell"
+	"aiterm/internal/tuifeatures"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -168,6 +169,9 @@ func (m Model) currentShellContext() *shell.PromptContext {
 }
 
 func (m Model) renderActionCard(width int) string {
+	if m.featureDisabled(tuifeatures.ActionCard) {
+		return ""
+	}
 	if m.refiningApproval != nil {
 		body := []string{
 			m.refiningApproval.Title,
@@ -425,6 +429,9 @@ func (m Model) currentActionCardSpec() *actionCardSpec {
 }
 
 func (m Model) renderPlanCard(width int) string {
+	if m.featureDisabled(tuifeatures.PlanCard) {
+		return ""
+	}
 	if m.activePlan == nil {
 		return ""
 	}
@@ -462,6 +469,9 @@ func (m Model) renderPlanCard(width int) string {
 }
 
 func (m Model) renderActiveExecutionCard(width int) string {
+	if m.featureDisabled(tuifeatures.ExecutionCard) {
+		return ""
+	}
 	if m.activeExecution == nil {
 		return ""
 	}
@@ -593,6 +603,9 @@ func (m Model) renderComposer(width int) string {
 }
 
 func (m Model) renderFooter(width int) string {
+	if m.featureDisabled(tuifeatures.FooterHints) {
+		return ""
+	}
 	if m.detailOpen {
 		parts := []string{"[Esc] close", "[Up/Down] scroll", "[PgUp/PgDn] page", "[Home/End] bounds", "[F2] shell", "[Ctrl+C] quit"}
 		return m.styles.footer.Width(width).Render(strings.Join(parts, "  "))
@@ -603,24 +616,31 @@ func (m Model) renderFooter(width int) string {
 }
 
 func (m Model) renderStatusLine(width int) string {
-	left := m.renderShellContext()
+	if m.featureDisabled(tuifeatures.StatusLine) {
+		return ""
+	}
+	snapshot := m.statusSnapshotForRender()
+	left := ""
+	if m.featureEnabled(tuifeatures.ShellContext) {
+		left = snapshot.shellContext
+	}
 	rightParts := make([]string, 0, 7)
 	if m.exitConfirmActive() {
 		rightParts = append(rightParts, m.styles.statusDanger.Render("ctrl-c again to exit"))
 	}
-	if m.shellContext.Root {
+	if snapshot.root {
 		rightParts = append(rightParts, m.styles.statusRoot.Render("root"))
 	}
-	if m.shellContext.Remote {
+	if snapshot.remote {
 		rightParts = append(rightParts, m.styles.statusRemote.Render("remote"))
 	}
-	if approvalLabel := m.renderApprovalModeLabel(m.hasModelStatus()); approvalLabel != "" {
+	if approvalLabel := m.renderApprovalModeLabel(snapshot); approvalLabel != "" {
 		rightParts = append(rightParts, approvalLabel)
 	}
-	if modelStatus := m.renderModelStatus(); modelStatus != "" {
+	if modelStatus := m.renderModelStatus(snapshot); modelStatus != "" {
 		rightParts = append(rightParts, modelStatus)
 	}
-	if usageLabel := m.renderContextUsageLabel(); usageLabel != "" {
+	if usageLabel := m.renderContextUsageLabel(snapshot); usageLabel != "" {
 		rightParts = append(rightParts, usageLabel)
 	}
 	if busyLabel := m.renderBusyStatus(); busyLabel != "" {
@@ -652,30 +672,19 @@ func (m Model) renderStatusLine(width int) string {
 	return m.styles.status.Render(left + strings.Repeat(" ", padding) + right)
 }
 
-func (m Model) renderModelStatus() string {
-	label, providerLabel := m.statusModelLabel()
-	if label == "" {
+func (m Model) renderModelStatus(snapshot statusSnapshot) string {
+	if m.featureDisabled(tuifeatures.ModelStatus) {
 		return ""
 	}
-
-	modelText := label
-	if providerLabel != "" {
-		modelText = providerLabel + " / " + label
+	if strings.TrimSpace(snapshot.modelStatus) == "" {
+		return ""
 	}
-	if runtimeLabel := m.statusRuntimeLabel(); runtimeLabel != "" {
-		modelText = runtimeLabel + " | " + modelText
-	}
-	return m.styles.statusRemote.Render(modelText)
+	return m.styles.statusRemote.Render(snapshot.modelStatus)
 }
 
 func (m Model) statusRuntimeLabel() string {
 	selected := strings.TrimSpace(m.activeRuntimeType)
-	effective := ""
-	if selected != "" {
-		resolved := provider.ResolveRuntimeSelection(selected, m.activeRuntimeCommand)
-		selected = strings.TrimSpace(resolved.RequestedType)
-		effective = strings.TrimSpace(resolved.SelectedType)
-	}
+	effective := strings.TrimSpace(m.activeRuntimeEffectiveType)
 	if m.lastModelInfo != nil {
 		if lastSelected := strings.TrimSpace(m.lastModelInfo.SelectedRuntime); lastSelected != "" {
 			selected = lastSelected
@@ -693,15 +702,14 @@ func (m Model) statusRuntimeLabel() string {
 	return runtimeStatusLabel(selected, effective)
 }
 
-func (m Model) renderApprovalModeLabel(includeDefault bool) string {
-	if m.ctrl == nil {
+func (m Model) renderApprovalModeLabel(snapshot statusSnapshot) string {
+	if m.featureDisabled(tuifeatures.ApprovalLabel) {
 		return ""
 	}
-	mode := m.ctrl.ApprovalMode()
-	if mode != controller.ApprovalModeAuto && mode != controller.ApprovalModeDanger && !includeDefault {
+	if !snapshot.showApproval {
 		return ""
 	}
-	switch mode {
+	switch snapshot.approvalMode {
 	case controller.ApprovalModeAuto:
 		return m.styles.statusWarn.Render("auto")
 	case controller.ApprovalModeDanger:
@@ -733,31 +741,20 @@ func (m Model) statusModelLabel() (string, string) {
 	return label, settingsProviderLabel(m.activeProvider.Preset)
 }
 
-func (m Model) renderContextUsageLabel() string {
-	if m.ctrl == nil {
+func (m Model) renderContextUsageLabel(snapshot statusSnapshot) string {
+	if m.featureDisabled(tuifeatures.ContextUsage) {
 		return ""
 	}
-
-	usage := m.ctrl.EstimateContextUsage(m.contextUsagePrompt())
-	window := currentModelContextWindow(m.activeProvider)
-	if usage.ApproxPromptTokens <= 0 && window <= 0 {
+	if strings.TrimSpace(snapshot.contextUsageLabel) == "" {
 		return ""
 	}
-
-	if window <= 0 {
-		return m.styles.statusMuted.Render("~" + formatStatusTokenCount(usage.ApproxPromptTokens))
-	}
-	pct := 0.0
-	if window > 0 {
-		pct = float64(usage.ApproxPromptTokens) / float64(window)
-	}
-	style := m.contextUsageStyle(pct)
-	bar := renderContextASCIIBar(12, pct)
-	label := fmt.Sprintf("%s %s/%s", bar, formatStatusTokenCount(usage.ApproxPromptTokens), formatStatusTokenCount(window))
-	return style.Render(label)
+	return m.statusToneStyle(snapshot.contextUsageTone).Render(snapshot.contextUsageLabel)
 }
 
 func (m Model) renderBusyStatus() string {
+	if m.featureDisabled(tuifeatures.BusyIndicator) {
+		return ""
+	}
 	if !m.busy {
 		return ""
 	}
@@ -766,11 +763,6 @@ func (m Model) renderBusyStatus() string {
 		elapsed = time.Since(m.busyStartedAt)
 	}
 	return m.styles.statusBusy.Render(fmt.Sprintf("%s Working %s", busySpinnerFrame(m.busyStartedAt), formatBusyElapsed(elapsed)))
-}
-
-func (m Model) hasModelStatus() bool {
-	label, _ := m.statusModelLabel()
-	return label != ""
 }
 
 func (m Model) contextUsageStyle(pct float64) lipgloss.Style {
@@ -783,6 +775,97 @@ func (m Model) contextUsageStyle(pct float64) lipgloss.Style {
 		return m.styles.statusWarn
 	default:
 		return m.styles.statusDanger
+	}
+}
+
+func (m Model) statusToneStyle(tone statusSeverity) lipgloss.Style {
+	switch tone {
+	case statusSeverityConfirm:
+		return m.styles.statusConfirm
+	case statusSeverityWarn:
+		return m.styles.statusWarn
+	case statusSeverityDanger:
+		return m.styles.statusDanger
+	default:
+		return m.styles.statusMuted
+	}
+}
+
+func (m Model) statusSnapshotForRender() statusSnapshot {
+	return buildStatusSnapshot(m, m.statusSnapshot)
+}
+
+func buildStatusSnapshot(m Model, previous statusSnapshot) statusSnapshot {
+	snapshot := statusSnapshot{
+		valid:        true,
+		shellContext: strings.TrimSpace(m.shellContext.PromptLine()),
+		root:         m.shellContext.Root,
+		remote:       m.shellContext.Remote,
+		approvalMode: normalizeApprovalModeValue(m.approvalMode),
+	}
+
+	label, providerLabel := m.statusModelLabel()
+	if label != "" {
+		modelText := label
+		if providerLabel != "" {
+			modelText = providerLabel + " / " + label
+		}
+		if runtimeLabel := m.statusRuntimeLabel(); runtimeLabel != "" {
+			modelText = runtimeLabel + " | " + modelText
+		}
+		snapshot.modelStatus = modelText
+	}
+	snapshot.showApproval = snapshot.approvalMode == controller.ApprovalModeAuto || snapshot.approvalMode == controller.ApprovalModeDanger || strings.TrimSpace(snapshot.modelStatus) != ""
+
+	if m.featureDisabled(tuifeatures.ContextUsage) || m.ctrl == nil {
+		return snapshot
+	}
+
+	prompt := m.contextUsagePrompt()
+	window := currentModelContextWindow(m.activeProvider)
+	snapshot.contextUsagePrompt = prompt
+	snapshot.contextUsageWindow = window
+	snapshot.contextUsageVersion = m.contextUsageVersion
+	if previous.valid &&
+		previous.contextUsagePrompt == prompt &&
+		previous.contextUsageWindow == window &&
+		previous.contextUsageVersion == m.contextUsageVersion {
+		snapshot.contextUsageLabel = previous.contextUsageLabel
+		snapshot.contextUsageTone = previous.contextUsageTone
+		return snapshot
+	}
+
+	usage := m.ctrl.EstimateContextUsage(prompt)
+	if usage.ApproxPromptTokens <= 0 && window <= 0 {
+		return snapshot
+	}
+	if window <= 0 {
+		snapshot.contextUsageLabel = "~" + formatStatusTokenCount(usage.ApproxPromptTokens)
+		snapshot.contextUsageTone = statusSeverityMuted
+		return snapshot
+	}
+
+	pct := float64(usage.ApproxPromptTokens) / float64(window)
+	snapshot.contextUsageTone = statusSeverityForPercent(pct)
+	snapshot.contextUsageLabel = fmt.Sprintf(
+		"%s %s/%s",
+		renderContextASCIIBar(12, pct),
+		formatStatusTokenCount(usage.ApproxPromptTokens),
+		formatStatusTokenCount(window),
+	)
+	return snapshot
+}
+
+func statusSeverityForPercent(pct float64) statusSeverity {
+	switch {
+	case pct <= 0:
+		return statusSeverityMuted
+	case pct < 0.40:
+		return statusSeverityConfirm
+	case pct < 0.75:
+		return statusSeverityWarn
+	default:
+		return statusSeverityDanger
 	}
 }
 
@@ -878,6 +961,9 @@ func formatStatusTokenCount(value int) string {
 }
 
 func (m Model) renderShellTail(width int) string {
+	if m.featureDisabled(tuifeatures.ShellTail) {
+		return ""
+	}
 	if !m.showShellTail {
 		return ""
 	}
@@ -1053,35 +1139,19 @@ func (m Model) renderScreen(body string) string {
 	case len(lines) > height:
 		lines = lines[:height]
 	}
-
-	return m.styles.screen.Width(width).Height(height).Render(strings.Join(lines, "\n"))
+	var builder strings.Builder
+	for index, line := range lines {
+		builder.WriteString(padANSIWidth(line, width))
+		if index < len(lines)-1 {
+			builder.WriteByte('\n')
+		}
+	}
+	return builder.String()
 }
 
 func (m Model) resolvedTranscriptHeight(transcriptWidth int, screenHeight int, actionCard string, planCard string, activeExecutionCard string, statusLine string, shellTail string, composer string, footer string) int {
-	transcriptHeight := m.transcriptViewportHeight(actionCard, planCard, activeExecutionCard, statusLine, shellTail, composer, footer, screenHeight)
-	transcript := m.renderTranscript(transcriptWidth, transcriptHeight)
-	sections := []string{transcript}
-	if actionCard != "" {
-		sections = append(sections, actionCard)
-	}
-	if planCard != "" {
-		sections = append(sections, planCard)
-	}
-	if activeExecutionCard != "" {
-		sections = append(sections, activeExecutionCard)
-	}
-	if statusLine != "" {
-		sections = append(sections, statusLine)
-	}
-	if shellTail != "" {
-		sections = append(sections, shellTail)
-	}
-	sections = append(sections, composer, footer)
-	bodyHeight := lipgloss.Height(strings.Join(sections, "\n"))
-	if fillerHeight := screenHeight - bodyHeight; fillerHeight > 0 {
-		transcriptHeight += fillerHeight
-	}
-	return transcriptHeight
+	_ = transcriptWidth
+	return m.transcriptViewportHeight(actionCard, planCard, activeExecutionCard, statusLine, shellTail, composer, footer, screenHeight)
 }
 
 func (m Model) renderDetailView() string {
@@ -1234,6 +1304,10 @@ func (m Model) renderSettingsView() string {
 		lines = append(lines, m.styles.detailBody.Render("Runtime"))
 		lines = append(lines, m.styles.detailMeta.Render("Select the session-authoritative coding runtime, review how it resolves, and persist it for future sessions."))
 		lines = append(lines, m.renderSettingsRuntimes(contentWidth)...)
+	case settingsStepShell:
+		lines = append(lines, m.styles.detailBody.Render("Shell Settings"))
+		lines = append(lines, m.styles.detailMeta.Render("Control how Shuttle-created persistent and execution shells start up."))
+		lines = append(lines, m.renderSettingsShell(contentWidth)...)
 	case settingsStepProviders:
 		lines = append(lines, m.styles.detailBody.Render("Configure Providers"))
 		lines = append(lines, m.styles.detailMeta.Render("Edit provider settings and save them for future sessions."))
@@ -1359,7 +1433,7 @@ func (m Model) renderSettingsMenu(contentWidth int) []string {
 		lines = append(lines, m.renderSettingsRow(entry.label, index == m.settingsIndex, false, false))
 	}
 	if contentWidth > 0 {
-		lines = append(lines, m.styles.detailMeta.Render("Current runtime: "+currentRuntimeSummaryLine(m.activeRuntimeType, m.activeRuntimeCommand)))
+		lines = append(lines, m.styles.detailMeta.Render("Current runtime: "+m.activeRuntimeSummaryForRender()))
 		lines = append(lines, m.styles.detailMeta.Render("Current model: "+currentProviderModelLabel(m.activeProvider)))
 	}
 	return lines
@@ -1368,10 +1442,7 @@ func (m Model) renderSettingsMenu(contentWidth int) []string {
 func (m Model) renderSettingsApprovalModes(contentWidth int) []string {
 	entries := settingsApprovalEntries()
 	lines := make([]string, 0, len(entries)*3)
-	currentMode := controller.ApprovalModeConfirm
-	if m.ctrl != nil {
-		currentMode = m.ctrl.ApprovalMode()
-	}
+	currentMode := normalizeApprovalModeValue(m.approvalMode)
 	for index, entry := range entries {
 		current := entry.mode == currentMode
 		lines = append(lines, m.renderSettingsRow(entry.label, index == m.settingsApprovalIdx, current, false))
@@ -1404,10 +1475,38 @@ func (m Model) renderSettingsRuntimes(contentWidth int) []string {
 		prefix = "> "
 	}
 	lines = append(lines, m.renderSettingsRow(prefix+command, m.settingsRuntimeCommandFocus, false, false))
-	for _, line := range runtimeSettingsPreviewLines(m.activeRuntimeType, m.activeRuntimeCommand, selectedSettingsRuntimeType(m), m.settingsRuntimeCommand) {
+	for _, line := range m.settingsRuntimePreviewForRender() {
 		lines = append(lines, m.styles.detailMeta.Render(line))
 	}
 	return lines
+}
+
+func (m Model) activeRuntimeSummaryForRender() string {
+	if summary := strings.TrimSpace(m.activeRuntimeSummary); summary != "" {
+		return summary
+	}
+	return currentRuntimeSummaryLineForResolved(provider.ResolvedRuntime{
+		RequestedType: strings.TrimSpace(m.activeRuntimeType),
+		SelectedType:  strings.TrimSpace(m.activeRuntimeEffectiveType),
+		Command:       strings.TrimSpace(m.activeRuntimeCommand),
+	})
+}
+
+func (m Model) settingsRuntimePreviewForRender() []string {
+	if len(m.settingsRuntimePreview) > 0 {
+		return append([]string(nil), m.settingsRuntimePreview...)
+	}
+	if len(m.settingsRuntimeCandidates) == 0 {
+		return nil
+	}
+	return runtimeSettingsPreviewLinesWithCandidates(
+		m.activeRuntimeType,
+		m.activeRuntimeCommand,
+		selectedSettingsRuntimeType(m),
+		m.settingsRuntimeCommand,
+		m.settingsRuntimeCandidates,
+		false,
+	)
 }
 
 func (m Model) renderSettingsProviders(contentWidth int) []string {
@@ -1587,6 +1686,33 @@ func (m Model) renderSettingsConfig(contentWidth int) []string {
 	return lines
 }
 
+func (m Model) renderSettingsShell(contentWidth int) []string {
+	if m.settingsConfig == nil {
+		return nil
+	}
+	lines := make([]string, 0, len(m.settingsConfig.fields)+8)
+	if intro := strings.TrimSpace(m.settingsConfig.intro); intro != "" {
+		for _, line := range wrapParagraphs(intro, max(10, contentWidth)) {
+			lines = append(lines, m.styles.detailMeta.Render(line))
+		}
+		lines = append(lines, "")
+	}
+	for index, field := range m.settingsConfig.fields {
+		if field.hidden {
+			continue
+		}
+		value := settingsFieldDisplayValue(field)
+		lines = append(lines, m.renderSettingsRow(fmt.Sprintf("%s: %s", field.label, value), index == m.settingsConfig.index, false, false))
+	}
+	lines = append(lines, "")
+	for _, line := range shellSettingsSummaryLines(shell.NormalizeLaunchProfiles(resolveSettingsShellPreview(*m.settingsConfig))) {
+		for _, wrapped := range wrapParagraphs(line, max(10, contentWidth)) {
+			lines = append(lines, m.styles.detailMeta.Render(wrapped))
+		}
+	}
+	return lines
+}
+
 func (m Model) renderOnboardingProviders(contentWidth int) []string {
 	lines := make([]string, 0, len(m.onboardingChoices)*5)
 	for index, choice := range m.onboardingChoices {
@@ -1739,6 +1865,20 @@ func settingsChoiceOptionLabel(value string) string {
 		return "On"
 	case "off":
 		return "Off"
+	case "yes":
+		return "Yes"
+	case "no":
+		return "No"
+	case "managed-prompt":
+		return "Managed Prompt"
+	case "managed-minimal":
+		return "Managed Minimal"
+	case "auto":
+		return "Auto"
+	case "zsh":
+		return "Zsh"
+	case "bash":
+		return "Bash"
 	case "xhigh":
 		return "XHigh"
 	default:
@@ -1881,6 +2021,7 @@ func settingsMenuEntries() []settingsMenuEntry {
 	return []settingsMenuEntry{
 		{label: "Session Settings"},
 		{label: "Runtime"},
+		{label: "Shell Settings"},
 		{label: "Configure Providers"},
 	}
 }
@@ -1894,11 +2035,15 @@ func settingsApprovalEntries() []settingsApprovalEntry {
 }
 
 func settingsRuntimeEntries() []settingsRuntimeEntry {
+	return settingsRuntimeEntriesFromCandidates(provider.DetectRuntimeInstallCandidates())
+}
+
+func settingsRuntimeEntriesFromCandidates(candidates []provider.RuntimeInstallCandidate) []settingsRuntimeEntry {
 	entries := []settingsRuntimeEntry{
 		{label: runtimeLabel(provider.RuntimeAuto), runtimeType: provider.RuntimeAuto, detail: "Prefer the best installed authoritative runtime, then fall back to builtin when none are available."},
 		{label: runtimeLabel(provider.RuntimeBuiltin), runtimeType: provider.RuntimeBuiltin, detail: "Use Shuttle's built-in runtime path for every reasoning turn."},
 	}
-	for _, candidate := range provider.DetectRuntimeInstallCandidates() {
+	for _, candidate := range candidates {
 		if strings.TrimSpace(candidate.Runtime) == "" || strings.TrimSpace(candidate.Runtime) == provider.RuntimePi {
 			continue
 		}
@@ -1926,6 +2071,10 @@ func settingsRuntimeEntries() []settingsRuntimeEntry {
 
 func currentRuntimeSummaryLine(runtimeType string, runtimeCommand string) string {
 	resolved := provider.ResolveRuntimeSelection(runtimeType, runtimeCommand)
+	return currentRuntimeSummaryLineForResolved(resolved)
+}
+
+func currentRuntimeSummaryLineForResolved(resolved provider.ResolvedRuntime) string {
 	label := runtimeLabel(resolved.RequestedType)
 	if strings.TrimSpace(resolved.RequestedType) != strings.TrimSpace(resolved.SelectedType) && strings.TrimSpace(resolved.SelectedType) != "" {
 		label += " -> " + runtimeLabel(resolved.SelectedType)
@@ -1953,12 +2102,12 @@ func runtimeStatusLabel(selected string, effective string) string {
 
 func runtimeSwitchBanner(runtimeType string, runtimeCommand string) string {
 	resolved := provider.ResolveRuntimeSelection(runtimeType, runtimeCommand)
-	return "Active runtime switched to " + currentRuntimeSummaryLine(resolved.RequestedType, resolved.Command) + "."
+	return "Active runtime switched to " + currentRuntimeSummaryLineForResolved(resolved) + "."
 }
 
 func runtimeSwitchNotice(runtimeType string, runtimeCommand string) string {
 	resolved := provider.ResolveRuntimeSelection(runtimeType, runtimeCommand)
-	label := "Runtime switched to " + currentRuntimeSummaryLine(resolved.RequestedType, resolved.Command) + "."
+	label := "Runtime switched to " + currentRuntimeSummaryLineForResolved(resolved) + "."
 	if err := provider.ValidateResolvedRuntime(resolved); err != nil {
 		return label + " Validation note: " + err.Error()
 	}
@@ -1973,23 +2122,42 @@ func selectedSettingsRuntimeType(m Model) string {
 }
 
 func runtimeSettingsPreviewLines(activeRuntimeType string, activeRuntimeCommand string, selectedRuntimeType string, selectedRuntimeCommand string) []string {
+	return runtimeSettingsPreviewLinesWithCandidates(
+		activeRuntimeType,
+		activeRuntimeCommand,
+		selectedRuntimeType,
+		selectedRuntimeCommand,
+		provider.DetectRuntimeInstallCandidates(),
+		true,
+	)
+}
+
+func runtimeSettingsPreviewLinesWithCandidates(activeRuntimeType string, activeRuntimeCommand string, selectedRuntimeType string, selectedRuntimeCommand string, candidates []provider.RuntimeInstallCandidate, validateHealth bool) []string {
 	lines := []string{}
-	activeResolved := provider.ResolveRuntimeSelection(activeRuntimeType, activeRuntimeCommand)
-	selectedResolved := provider.ResolveRuntimeSelection(selectedRuntimeType, selectedRuntimeCommand)
-	lines = append(lines, "Current: "+currentRuntimeSummaryLine(activeResolved.RequestedType, activeResolved.Command))
-	lines = append(lines, "Preview: "+currentRuntimeSummaryLine(selectedResolved.RequestedType, selectedResolved.Command))
+	activeResolved := provider.ResolveRuntimeSelectionWithCandidates(activeRuntimeType, activeRuntimeCommand, candidates)
+	selectedResolved := provider.ResolveRuntimeSelectionWithCandidates(selectedRuntimeType, selectedRuntimeCommand, candidates)
+	lines = append(lines, "Current: "+currentRuntimeSummaryLineForResolved(activeResolved))
+	lines = append(lines, "Preview: "+currentRuntimeSummaryLineForResolved(selectedResolved))
 	if selectedResolved.AutoSelected && strings.TrimSpace(selectedResolved.SelectedType) != "" {
 		lines = append(lines, "Auto currently resolves to: "+runtimeLabel(selectedResolved.SelectedType))
 	}
-	if err := provider.ValidateResolvedRuntime(selectedResolved); err != nil {
-		lines = append(lines, "Health: unavailable - "+err.Error())
+	if validateHealth {
+		if err := provider.ValidateResolvedRuntime(selectedResolved); err != nil {
+			lines = append(lines, "Health: unavailable - "+err.Error())
+		} else {
+			lines = append(lines, "Health: ready")
+		}
 	} else {
-		lines = append(lines, "Health: ready")
+		lines = append(lines, "Health: pending validation while editing the command path.")
 	}
 	if command := strings.TrimSpace(selectedResolved.Command); command != "" {
 		lines = append(lines, "Effective command: "+command)
 	}
-	lines = append(lines, "Tab or Right Arrow focuses the command path. Enter applies the highlighted runtime with the current command path.")
+	if validateHealth {
+		lines = append(lines, "Tab or Right Arrow focuses the command path. Enter applies the highlighted runtime with the current command path.")
+	} else {
+		lines = append(lines, "Leave the command field or press Enter to validate the current command path.")
+	}
 	return lines
 }
 
@@ -2302,6 +2470,8 @@ func settingsFooter(width int, step settingsStep, m Model) string {
 			return "Enter set mode  Esc back  Up/Down move  F2 shell  F10 close"
 		case settingsStepRuntime:
 			return "Enter apply  Tab focus cmd  Esc back  Up/Down move  F2 shell  F10 close"
+		case settingsStepShell:
+			return "Enter save  Left/Right toggle  Tab next  Esc back  F2 shell  F10 close"
 		case settingsStepProviders:
 			return "Enter edit  Esc back  Up/Down move  F2 shell  F10 close"
 		case settingsStepProviderForm:
@@ -2316,6 +2486,8 @@ func settingsFooter(width int, step settingsStep, m Model) string {
 		return "Enter set session approval mode  Esc back  Up/Down move  F2 shell  F10 close"
 	case settingsStepRuntime:
 		return "Enter switch active runtime and persist it  Tab or Right Arrow focus command path  Left Arrow return to runtime list  Esc back  F2 shell  F10 close"
+	case settingsStepShell:
+		return "Enter save shell settings  Left/Right or Space toggle  Tab/Up/Down move  Esc back  F2 shell  F10 close"
 	case settingsStepProviders:
 		return "Enter edit provider settings  Esc back  Up/Down move  F2 shell  F10 close"
 	case settingsStepProviderForm:

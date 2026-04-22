@@ -17,6 +17,7 @@ type BootstrapOptions struct {
 	StartDir          string
 	BottomPanePercent int
 	HistoryFile       string
+	Launch            LaunchSpec
 }
 
 type Workspace struct {
@@ -30,6 +31,7 @@ type ShellSessionOptions struct {
 	SessionName string
 	StartDir    string
 	HistoryFile string
+	Launch      LaunchSpec
 }
 
 func BootstrapWorkspace(ctx context.Context, client *Client, options BootstrapOptions) (Workspace, bool, error) {
@@ -61,7 +63,7 @@ func BootstrapWorkspace(ctx context.Context, client *Client, options BootstrapOp
 	}
 
 	if !exists {
-		if err := client.NewDetachedSession(ctx, options.SessionName, options.StartDir, sessionEnv); err != nil {
+		if err := client.NewDetachedSession(ctx, options.SessionName, options.StartDir, sessionEnv, options.Launch); err != nil {
 			return Workspace{}, false, fmt.Errorf("create session: %w", err)
 		}
 
@@ -74,7 +76,7 @@ func BootstrapWorkspace(ctx context.Context, client *Client, options BootstrapOp
 			return Workspace{}, false, fmt.Errorf("expected 1 pane after new session, found %d", len(panes))
 		}
 
-		if err := client.SplitBottom(ctx, panes[0].ID, options.BottomPanePercent, options.StartDir); err != nil {
+		if err := client.SplitBottom(ctx, panes[0].ID, options.BottomPanePercent, options.StartDir, options.Launch); err != nil {
 			return Workspace{}, false, fmt.Errorf("split bottom pane: %w", err)
 		}
 
@@ -90,7 +92,7 @@ func BootstrapWorkspace(ctx context.Context, client *Client, options BootstrapOp
 		return Workspace{}, false, fmt.Errorf("list panes for workspace: %w", err)
 	}
 	if len(panes) == 1 {
-		if err := client.SplitBottom(ctx, panes[0].ID, options.BottomPanePercent, options.StartDir); err != nil {
+		if err := client.SplitBottom(ctx, panes[0].ID, options.BottomPanePercent, options.StartDir, options.Launch); err != nil {
 			return Workspace{}, false, fmt.Errorf("split bottom pane for existing session: %w", err)
 		}
 		panes, err = client.ListPanes(ctx, options.SessionName)
@@ -155,7 +157,7 @@ func BootstrapShellSession(ctx context.Context, client *Client, options ShellSes
 		return Pane{}, false, err
 	}
 	if !exists {
-		if err := client.NewDetachedSession(ctx, options.SessionName, options.StartDir, sessionEnv); err != nil {
+		if err := client.NewDetachedSession(ctx, options.SessionName, options.StartDir, sessionEnv, options.Launch); err != nil {
 			return Pane{}, false, fmt.Errorf("create session: %w", err)
 		}
 		created = true

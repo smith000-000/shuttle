@@ -22,7 +22,7 @@ func TestSelectTakeControlTargetSwitchesToPaneWindow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := client.NewDetachedSession(ctx, sessionName, t.TempDir(), nil); err != nil {
+	if err := client.NewDetachedSession(ctx, sessionName, t.TempDir(), nil, tmux.LaunchSpec{}); err != nil {
 		t.Fatalf("NewDetachedSession() error = %v", err)
 	}
 	t.Cleanup(func() {
@@ -35,15 +35,15 @@ func TestSelectTakeControlTargetSwitchesToPaneWindow(t *testing.T) {
 	if err != nil || len(rootPanes) == 0 {
 		t.Fatalf("ListPanes(root) error = %v panes=%#v", err, rootPanes)
 	}
-	if err := client.SplitBottom(ctx, rootPanes[0].ID, 30, t.TempDir()); err != nil {
+	if err := client.SplitBottom(ctx, rootPanes[0].ID, 30, t.TempDir(), tmux.LaunchSpec{}); err != nil {
 		t.Fatalf("SplitBottom(root) error = %v", err)
 	}
 
-	targetWindowPane, err := client.NewDetachedWindow(ctx, sessionName, t.TempDir(), nil)
+	targetWindowPane, err := client.NewDetachedWindow(ctx, sessionName, t.TempDir(), nil, tmux.LaunchSpec{})
 	if err != nil {
 		t.Fatalf("NewDetachedWindow() error = %v", err)
 	}
-	if err := client.SplitBottom(ctx, targetWindowPane.ID, 30, t.TempDir()); err != nil {
+	if err := client.SplitBottom(ctx, targetWindowPane.ID, 30, t.TempDir(), tmux.LaunchSpec{}); err != nil {
 		t.Fatalf("SplitBottom(target) error = %v", err)
 	}
 	targetPanes, err := client.ListPanes(ctx, targetWindowPane.WindowID)
@@ -98,7 +98,7 @@ func TestInstallTemporaryPaneWindowHookFiresWhenWindowCloses(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := client.NewDetachedSession(ctx, sessionName, t.TempDir(), nil); err != nil {
+	if err := client.NewDetachedSession(ctx, sessionName, t.TempDir(), nil, tmux.LaunchSpec{}); err != nil {
 		t.Fatalf("NewDetachedSession() error = %v", err)
 	}
 	t.Cleanup(func() {
@@ -107,7 +107,7 @@ func TestInstallTemporaryPaneWindowHookFiresWhenWindowCloses(t *testing.T) {
 		_ = client.KillSession(cleanupCtx, sessionName)
 	})
 
-	targetWindowPane, err := client.NewDetachedWindow(ctx, sessionName, t.TempDir(), nil)
+	targetWindowPane, err := client.NewDetachedWindow(ctx, sessionName, t.TempDir(), nil, tmux.LaunchSpec{})
 	if err != nil {
 		t.Fatalf("NewDetachedWindow() error = %v", err)
 	}

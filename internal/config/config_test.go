@@ -250,6 +250,51 @@ func TestParseTracksExplicitCLICommandFlag(t *testing.T) {
 	}
 }
 
+func TestParseTUIDisableFeaturesFromEnv(t *testing.T) {
+	t.Setenv("SHUTTLE_TUI_DISABLE", "shell-completion, completion-ghost")
+
+	cfg, err := Parse(nil)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	if !cfg.TUIDisabled.Disabled("shell-completion") {
+		t.Fatal("expected shell-completion to be disabled")
+	}
+	if !cfg.TUIDisabled.Disabled("completion-ghost") {
+		t.Fatal("expected completion-ghost to be disabled")
+	}
+	if cfg.TUIDisableRaw != "completion-ghost,shell-completion" {
+		t.Fatalf("expected canonical disable list, got %q", cfg.TUIDisableRaw)
+	}
+}
+
+func TestParseTUIDisableFeatureOverrideFromFlag(t *testing.T) {
+	t.Setenv("SHUTTLE_TUI_DISABLE", "shell-completion")
+
+	cfg, err := Parse([]string{"--tui-disable", "status-line"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	if cfg.TUIDisabled.Disabled("shell-completion") {
+		t.Fatal("did not expect env-provided shell-completion after explicit flag override")
+	}
+	if !cfg.TUIDisabled.Disabled("status-line") {
+		t.Fatal("expected status-line to be disabled")
+	}
+}
+
+func TestParseRejectsUnknownTUIDisableFeature(t *testing.T) {
+	_, err := Parse([]string{"--tui-disable", "made-up-feature"})
+	if err == nil {
+		t.Fatal("expected error for unknown feature")
+	}
+	if !strings.Contains(err.Error(), "unknown TUI disable feature") {
+		t.Fatalf("expected unknown feature error, got %v", err)
+	}
+}
+
 func TestParseEnablesTraceFromEnv(t *testing.T) {
 	t.Setenv("SHUTTLE_TRACE", "true")
 

@@ -64,11 +64,11 @@ func (o *Observer) semanticCollectors() []semanticCollector {
 	if collector := o.semanticStreamCollector(); collector != nil {
 		collectors = append(collectors, collector)
 	}
-	if escapedClient, ok := o.client.(escapedPaneClient); ok {
-		collectors = append(collectors, oscCaptureSemanticCollector{client: escapedClient})
-	}
 	if strings.TrimSpace(o.stateDir) != "" {
 		collectors = append(collectors, stateFileSemanticCollector{stateDir: o.stateDir})
+	}
+	if escapedClient, ok := o.client.(escapedPaneClient); ok {
+		collectors = append(collectors, oscCaptureSemanticCollector{client: escapedClient})
 	}
 	return collectors
 }

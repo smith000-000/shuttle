@@ -14,6 +14,7 @@ import (
 	"aiterm/internal/provider"
 	"aiterm/internal/shell"
 	"aiterm/internal/tmux"
+	"aiterm/internal/tuifeatures"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -36,6 +37,9 @@ func (m Model) refreshShellContextCmd() tea.Cmd {
 }
 
 func (m Model) pollShellTailCmd() tea.Cmd {
+	if m.featureDisabled(tuifeatures.ShellTail) {
+		return nil
+	}
 	if m.ctrl == nil || !m.showShellTail {
 		return nil
 	}
@@ -63,6 +67,9 @@ func (m Model) shouldAcceptPolledShellTail() bool {
 }
 
 func (m Model) pollActiveExecutionCmd() tea.Cmd {
+	if m.featureDisabled(tuifeatures.ExecutionPolling) {
+		return nil
+	}
 	if m.ctrl == nil {
 		return nil
 	}
@@ -78,6 +85,9 @@ func (m Model) pollActiveExecutionCmd() tea.Cmd {
 }
 
 func (m Model) pollActiveExecutionAfter(delay time.Duration) tea.Cmd {
+	if m.featureDisabled(tuifeatures.ExecutionPolling) {
+		return nil
+	}
 	if m.ctrl == nil {
 		return nil
 	}
@@ -90,6 +100,41 @@ func (m Model) pollActiveExecutionAfter(delay time.Duration) tea.Cmd {
 		events, execution, err := m.ctrl.RefreshActiveExecution(ctx)
 		return activeExecutionMsg{execution: execution, events: events, err: err, epoch: epoch}
 	})
+}
+
+func (m Model) busyRefreshCmds(now time.Time) []tea.Cmd {
+	cmds := []tea.Cmd{}
+	if cmd := m.tickBusyCmd(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	if cmd := m.maybeExecutionCheckInCmd(now); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	if m.showShellTail {
+		if cmd := m.pollShellTailCmd(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	if executionNeedsPolling(m.activeExecution) || m.shouldPreserveExecutionAfterHandoff() || m.shouldConfirmMissingActiveExecution() {
+		if cmd := m.pollActiveExecutionCmd(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	}
+	return cmds
+}
+
+func (m Model) tickShellContextCmd() tea.Cmd {
+	if m.featureDisabled(tuifeatures.ShellContextPolling) {
+		return nil
+	}
+	return tickShellContextAfter(m.shellContextPollInterval())
+}
+
+func (m Model) shellContextPollInterval() time.Duration {
+	if m.busy || executionNeedsPolling(m.activeExecution) || m.showShellTail || m.directShellPending || m.proposalRunPending || m.approvalInFlight || !m.handoffReturnGraceUntil.IsZero() {
+		return activeShellContextPollInterval
+	}
+	return idleShellContextPollInterval
 }
 
 func (m *Model) invalidateActiveExecutionPolls() {
@@ -517,11 +562,43 @@ func executionNeedsUserDrivenResume(execution *controller.CommandExecution) bool
 	}
 }
 
+func isTerminalExecutionState(state controller.CommandExecutionState) bool {
+	switch state {
+	case controller.CommandExecutionCompleted, controller.CommandExecutionFailed, controller.CommandExecutionCanceled, controller.CommandExecutionLost:
+		return true
+	default:
+		return false
+	}
+}
+
+func executionNeedsPolling(execution *controller.CommandExecution) bool {
+	return execution != nil && !isTerminalExecutionState(execution.State)
+}
+
+func shouldMirrorPolledShellTailIntoExecution(execution *controller.CommandExecution) bool {
+	if execution == nil {
+		return false
+	}
+	if isAgentOwnedExecution(execution.Origin) {
+		return true
+	}
+	switch execution.State {
+	case controller.CommandExecutionAwaitingInput, controller.CommandExecutionInteractiveFullscreen, controller.CommandExecutionHandoffActive:
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *Model) syncActiveExecution(execution *controller.CommandExecution) {
 	currentID := ""
 	previous := m.activeExecution
 	if m.activeExecution != nil {
 		currentID = m.activeExecution.ID
+	}
+
+	if execution != nil && isTerminalExecutionState(execution.State) {
+		execution = nil
 	}
 
 	if execution == nil {
@@ -1271,7 +1348,7 @@ func (m *Model) appendInterruptNotice(body string) {
 		return
 	}
 	pinned := m.isTranscriptPinned()
-	m.entries = append(m.entries, Entry{
+	m.appendTranscriptEntries(Entry{
 		Title: "system",
 		Body:  body,
 	})
@@ -1415,17 +1492,18 @@ func (m Model) currentSettingsProviderIndex() int {
 	return fallback
 }
 
-func currentSettingsApprovalIndex(ctrl controller.Controller) int {
-	mode := controller.ApprovalModeConfirm
-	if ctrl != nil {
-		mode = ctrl.ApprovalMode()
-	}
+func currentSettingsApprovalIndexForMode(mode controller.ApprovalMode) int {
+	mode = normalizeApprovalModeValue(mode)
 	for index, entry := range settingsApprovalEntries() {
 		if entry.mode == mode {
 			return index
 		}
 	}
 	return 0
+}
+
+func currentSettingsApprovalIndex(ctrl controller.Controller) int {
+	return currentSettingsApprovalIndexForMode(currentApprovalMode(ctrl))
 }
 
 func (m Model) currentSettingsRuntimeIndex() int {
@@ -1454,9 +1532,43 @@ func (m Model) currentSettingsModelIndex() int {
 	return 0
 }
 
+func (m *Model) invalidateTranscriptLayoutCache() {
+	m.transcriptLayoutCache = transcriptLayoutCache{}
+	m.transcriptRenderCache = transcriptRenderCache{}
+}
+
+func (m *Model) touchTranscriptContent() {
+	m.transcriptContentVersion++
+	m.invalidateTranscriptLayoutCache()
+}
+
+func (m *Model) appendTranscriptEntries(entries ...Entry) {
+	if len(entries) == 0 {
+		return
+	}
+	m.entries = append(m.entries, entries...)
+	m.touchTranscriptContent()
+}
+
+func (m *Model) setTranscriptEntries(entries []Entry) {
+	m.entries = append([]Entry(nil), entries...)
+	m.touchTranscriptContent()
+}
+
+func (m *Model) truncateTranscriptEntries(end int) {
+	if end < 0 {
+		end = 0
+	}
+	if end > len(m.entries) {
+		end = len(m.entries)
+	}
+	m.entries = m.entries[:end]
+	m.touchTranscriptContent()
+}
+
 func (m *Model) appendTranscriptEntry(entry Entry) {
 	pinned := m.isTranscriptPinned()
-	m.entries = append(m.entries, entry)
+	m.appendTranscriptEntries(entry)
 	if pinned {
 		m.scrollTranscriptToBottom()
 	} else {
@@ -1506,7 +1618,7 @@ func (m *Model) collapseCommandEntries(entries []Entry) []Entry {
 				lastIndex := len(m.entries) - 1
 				last := m.entries[lastIndex]
 				if last.Title == "shell" && strings.TrimSpace(last.Body) == command {
-					m.entries = m.entries[:lastIndex]
+					m.truncateTranscriptEntries(lastIndex)
 				}
 			}
 		}

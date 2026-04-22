@@ -221,22 +221,6 @@ func monitorTail(body string, command string) string {
 	return stringsJoin(lines, "\n")
 }
 
-func monitorDisplayTail(body string, command string) string {
-	displayBody := sanitizeDisplayBody(body)
-	displayBody = stripEchoedCommand(displayBody, command)
-	displayBody = stripDisplayCommandEchoResidualLines(displayBody, command)
-	if displayBody == "" {
-		return ""
-	}
-
-	lines := splitLines(displayBody)
-	if len(lines) > 40 {
-		lines = lines[len(lines)-40:]
-	}
-
-	return stringsJoin(lines, "\n")
-}
-
 func splitLines(value string) []string {
 	return strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
 }

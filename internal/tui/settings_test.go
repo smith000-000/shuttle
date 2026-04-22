@@ -53,6 +53,61 @@ func TestSlashProviderOpensConfigureProvidersSettings(t *testing.T) {
 	}
 }
 
+func TestSettingsMenuOpensShellSettings(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithShellSettings(shell.DefaultLaunchProfiles(), func(shell.LaunchProfiles) error {
+		return nil
+	})
+	model.settingsOpen = true
+	model.settingsStep = settingsStepMenu
+	model.settingsIndex = 2
+
+	updated, cmd := model.applySettingsSelection()
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatal("expected shell settings to open synchronously")
+	}
+	if model.settingsStep != settingsStepShell {
+		t.Fatalf("expected shell settings step, got %q", model.settingsStep)
+	}
+	if model.settingsConfig == nil {
+		t.Fatal("expected shell settings form")
+	}
+}
+
+func TestShellSettingsSavePersistsProfiles(t *testing.T) {
+	var saved shell.LaunchProfiles
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithShellSettings(shell.DefaultLaunchProfiles(), func(profiles shell.LaunchProfiles) error {
+		saved = profiles
+		return nil
+	})
+	model = model.openSettingsShellStep()
+	model.settingsOpen = true
+	model.settingsConfig.fields[settingsFieldIndex(t, model.settingsConfig, "persistent_source_rc")].value = shellSettingsNo
+	model.settingsConfig.fields[settingsFieldIndex(t, model.settingsConfig, "execution_mode")].value = string(shell.LaunchModeInherit)
+
+	updated, cmd := model.applySettingsSelection()
+	model = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected shell settings save command")
+	}
+	msg := cmd().(shellSettingsSavedMsg)
+	updated, _ = model.Update(msg)
+	model = updated.(Model)
+
+	if saved.Persistent.SourceUserRC {
+		t.Fatalf("expected persistent source rc to be disabled, got %#v", saved.Persistent)
+	}
+	if saved.Execution.Mode != shell.LaunchModeInherit {
+		t.Fatalf("expected execution inherit mode, got %#v", saved.Execution)
+	}
+	if model.settingsStep != settingsStepShell {
+		t.Fatalf("expected shell settings to stay open, got %q", model.settingsStep)
+	}
+	if !strings.Contains(model.settingsBanner, "Saved shell settings") {
+		t.Fatalf("expected save banner, got %q", model.settingsBanner)
+	}
+}
+
 func TestSlashModelOpensCurrentProviderDetailAndLoadsModels(t *testing.T) {
 	model := NewModel(fakeWorkspace(), &fakeController{})
 	model.mode = AgentMode
@@ -448,7 +503,7 @@ func TestF10OpensSettingsMenuWithSessionRuntimeAndConfigureProvidersEntries(t *t
 	model.width = 140
 	model.height = 40
 	view := model.View()
-	for _, fragment := range []string{"Session Settings", "Runtime", "Configure Providers"} {
+	for _, fragment := range []string{"Session Settings", "Runtime", "Shell Settings", "Configure Providers"} {
 		if !strings.Contains(view, fragment) {
 			t.Fatalf("expected settings menu entry %q in view %q", fragment, view)
 		}
@@ -617,6 +672,85 @@ func TestSettingsRuntimeSelectionPassesCurrentTrackedShellTarget(t *testing.T) {
 	}
 }
 
+func TestOpenSettingsDefersRuntimeDiscoveryUntilRuntimeStep(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5", BaseURL: "https://api.openai.com/v1"},
+		func() ([]provider.OnboardingCandidate, error) { return nil, nil },
+		nil,
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
+			return &fakeController{}, profile, nil
+		},
+		func(provider.Profile) error { return nil },
+	).WithRuntimeSettings(provider.RuntimeBuiltin, "", func(runtimeType string, runtimeCommand string, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, string, string, error) {
+		return &fakeController{}, runtimeType, runtimeCommand, nil
+	}, func(string, string) error { return nil })
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF10})
+	model = updated.(Model)
+	if len(model.settingsRuntimeCandidates) != 0 || len(model.settingsRuntimes) != 0 || len(model.settingsRuntimePreview) != 0 {
+		t.Fatalf("expected runtime settings to stay unloaded until the runtime step opens, got candidates=%d entries=%d preview=%d", len(model.settingsRuntimeCandidates), len(model.settingsRuntimes), len(model.settingsRuntimePreview))
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(Model)
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatal("expected runtime settings to open synchronously")
+	}
+	if model.settingsStep != settingsStepRuntime {
+		t.Fatalf("expected runtime step, got %q", model.settingsStep)
+	}
+	if len(model.settingsRuntimeCandidates) == 0 || len(model.settingsRuntimes) == 0 || len(model.settingsRuntimePreview) == 0 {
+		t.Fatalf("expected runtime step to load candidates and preview, got candidates=%d entries=%d preview=%d", len(model.settingsRuntimeCandidates), len(model.settingsRuntimes), len(model.settingsRuntimePreview))
+	}
+}
+
+func TestSettingsRuntimeCommandEditingDefersHealthValidationUntilBlur(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
+		provider.Profile{Preset: provider.PresetOpenAI, Name: "OpenAI Responses", Model: "gpt-5", BaseURL: "https://api.openai.com/v1"},
+		func() ([]provider.OnboardingCandidate, error) { return nil, nil },
+		nil,
+		func(profile provider.Profile, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, provider.Profile, error) {
+			return &fakeController{}, profile, nil
+		},
+		func(provider.Profile) error { return nil },
+	).WithRuntimeSettings(provider.RuntimeBuiltin, "", func(runtimeType string, runtimeCommand string, _ *shell.PromptContext, _ controller.TrackedShellTarget) (controller.Controller, string, string, error) {
+		return &fakeController{}, runtimeType, runtimeCommand, nil
+	}, func(string, string) error { return nil })
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF10})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(Model)
+	model.settingsRuntimeIdx = 2
+	model.refreshSettingsRuntimePreview(true)
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRight})
+	model = updated.(Model)
+	model.settingsRuntimeCommand = "/opt/codex"
+	model.refreshSettingsRuntimePreview(false)
+	view := model.View()
+	if !strings.Contains(view, "Health: pending validation while editing the command path.") {
+		t.Fatalf("expected pending validation hint while editing, got %q", view)
+	}
+	if !strings.Contains(view, "Leave the command field or press Enter to validate the current command path.") {
+		t.Fatalf("expected blur/enter validation hint, got %q", view)
+	}
+
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	model = updated.(Model)
+	view = model.View()
+	if strings.Contains(view, "pending validation while editing the command path") {
+		t.Fatalf("expected blur to trigger validation, got %q", view)
+	}
+	if !strings.Contains(view, "Health:") {
+		t.Fatalf("expected validated health line after blur, got %q", view)
+	}
+}
+
 func TestProviderDetailModelSelectionRunsTestFromModelField(t *testing.T) {
 	tested := provider.Profile{}
 	model := NewModel(fakeWorkspace(), &fakeController{}).WithProviderOnboarding(
@@ -686,6 +820,8 @@ func TestSettingsProviderListSwitchesProviderFromDetail(t *testing.T) {
 	model = updated.(Model)
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
 	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
+	model = updated.(Model)
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	model = updated.(Model)
 	if model.settingsStep != settingsStepProviders {
@@ -732,6 +868,8 @@ func TestSettingsProviderListEscReturnsToMenu(t *testing.T) {
 		func(provider.Profile) error { return nil },
 	)
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyF10})
+	model = updated.(Model)
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
 	model = updated.(Model)
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyDown})
 	model = updated.(Model)

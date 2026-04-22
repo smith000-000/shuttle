@@ -208,7 +208,7 @@ func (h *interactiveHarness) start() {
 		h.t.Fatalf("MkdirAll(gotmpdir) error = %v", err)
 	}
 
-	if err := h.outerClient.NewDetachedSession(ctx, h.outerSession, h.repoRoot, env); err != nil {
+	if err := h.outerClient.NewDetachedSession(ctx, h.outerSession, h.repoRoot, env, tmux.LaunchSpec{}); err != nil {
 		h.t.Fatalf("NewDetachedSession() error = %v", err)
 	}
 

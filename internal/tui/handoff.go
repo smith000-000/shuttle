@@ -279,6 +279,7 @@ func (c *tmuxTakeControlCommand) ensureWorkspace() error {
 	_, _, err = tmux.BootstrapShellSession(ctx, client, tmux.ShellSessionOptions{
 		SessionName: c.config.SessionName,
 		StartDir:    c.config.StartDir,
+		Launch:      tmux.LaunchSpec{},
 	})
 	if err != nil {
 		logging.TraceError("tui.take_control.ensure_session_error", err, "session", c.config.SessionName)

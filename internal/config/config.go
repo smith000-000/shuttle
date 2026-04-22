@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"aiterm/internal/tuifeatures"
 )
 
 const (
@@ -44,6 +46,8 @@ type Config struct {
 	Inject                        string
 	Track                         string
 	TUI                           bool
+	TUIDisableRaw                 string
+	TUIDisabled                   tuifeatures.Set
 	InjectEnter                   bool
 	ProviderType                  string
 	ProviderAuthMethod            string
@@ -56,6 +60,14 @@ type Config struct {
 	ProviderCLICommand            string
 	RuntimeType                   string
 	RuntimeCommand                string
+	PersistentShellMode           string
+	PersistentShellType           string
+	PersistentShellSourceRC       bool
+	PersistentShellInheritEnv     bool
+	ExecutionShellMode            string
+	ExecutionShellType            string
+	ExecutionShellSourceRC        bool
+	ExecutionShellInheritEnv      bool
 	AllowPlaintextProviderSecrets bool
 	ProviderFlagsSet              bool
 	RuntimeFlagsSet               bool
@@ -97,6 +109,7 @@ func Parse(args []string) (Config, error) {
 	}
 	tracePath := os.Getenv("SHUTTLE_TRACE_PATH")
 	traceConsent := envBool("SHUTTLE_TRACE_CONSENT")
+	tuiDisable := os.Getenv("SHUTTLE_TUI_DISABLE")
 	providerCLICommand := os.Getenv("SHUTTLE_CLI_COMMAND")
 	allowPlaintextProviderSecrets := envBool("SHUTTLE_ALLOW_PLAINTEXT_PROVIDER_SECRETS")
 
@@ -117,6 +130,7 @@ func Parse(args []string) (Config, error) {
 	fs.StringVar(&cfg.Inject, "inject", "", "inject a shell command into the top pane after bootstrap")
 	fs.StringVar(&cfg.Track, "track", "", "inject a tracked shell command into the top pane and wait for its result")
 	fs.BoolVar(&cfg.TUI, "tui", false, "run the minimal interactive TUI shell")
+	fs.StringVar(&cfg.TUIDisableRaw, "tui-disable", tuiDisable, "comma-separated TUI features to disable for diagnostics")
 	fs.BoolVar(&cfg.InjectEnter, "enter", true, "append Enter when injecting a command")
 	fs.StringVar(&cfg.ProviderType, "provider", providerType, "inference provider to use: mock, openai, openrouter, openwebui, anthropic, ollama, codex_cli, or custom")
 	fs.StringVar(&cfg.ProviderAuthMethod, "auth", providerAuthMethod, "auth method for the selected provider: auto, api_key, codex_login, inherited_env, or none")
@@ -190,6 +204,16 @@ func Parse(args []string) (Config, error) {
 	}
 	if err := validateTraceConfig(cfg.TraceMode, cfg.TraceConsent); err != nil {
 		return Config{}, err
+	}
+	disabledFeatures, err := tuifeatures.ParseDisabled(cfg.TUIDisableRaw)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.TUIDisabled = disabledFeatures
+	if len(cfg.TUIDisabled) > 0 {
+		cfg.TUIDisableRaw = strings.Join(cfg.TUIDisabled.Strings(), ",")
+	} else {
+		cfg.TUIDisableRaw = ""
 	}
 	cfg.ProviderType = normalizeProviderType(cfg.ProviderType)
 	cfg.RuntimeType = normalizeRuntimeType(cfg.RuntimeType)

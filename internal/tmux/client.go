@@ -35,6 +35,11 @@ type Pane struct {
 	TTY            string
 }
 
+type LaunchSpec struct {
+	Command string
+	Env     map[string]string
+}
+
 type Client struct {
 	binary     string
 	socketName string
@@ -93,16 +98,18 @@ func (c *Client) HasSession(ctx context.Context, sessionName string) (bool, erro
 	return false, err
 }
 
-func (c *Client) NewDetachedSession(ctx context.Context, sessionName string, startDir string, env map[string]string) error {
+func (c *Client) NewDetachedSession(ctx context.Context, sessionName string, startDir string, env map[string]string, launch LaunchSpec) error {
 	args := []string{"new-session", "-d", "-s", sessionName, "-c", startDir}
-	args = append(args, environmentArgs(env)...)
+	args = append(args, environmentArgs(mergeEnvironment(env, launch.Env))...)
+	args = appendLaunchSpec(args, launch)
 	_, err := c.run(ctx, args...)
 	return err
 }
 
-func (c *Client) NewDetachedWindow(ctx context.Context, sessionName string, startDir string, env map[string]string) (Pane, error) {
+func (c *Client) NewDetachedWindow(ctx context.Context, sessionName string, startDir string, env map[string]string, launch LaunchSpec) (Pane, error) {
 	args := []string{"new-window", "-d", "-t", sessionName, "-c", startDir, "-P", "-F", paneFormat}
-	args = append(args, environmentArgs(env)...)
+	args = append(args, environmentArgs(mergeEnvironment(env, launch.Env))...)
+	args = appendLaunchSpec(args, launch)
 	output, err := c.run(ctx, args...)
 	if err != nil {
 		return Pane{}, err
@@ -119,9 +126,12 @@ func (c *Client) NewDetachedWindow(ctx context.Context, sessionName string, star
 	return panes[0], nil
 }
 
-func (c *Client) SplitBottom(ctx context.Context, target string, percent int, startDir string) error {
+func (c *Client) SplitBottom(ctx context.Context, target string, percent int, startDir string, launch LaunchSpec) error {
 	size := strconv.Itoa(percent) + "%"
-	_, err := c.run(ctx, "split-window", "-v", "-l", size, "-t", target, "-c", startDir)
+	args := []string{"split-window", "-v", "-l", size, "-t", target, "-c", startDir}
+	args = append(args, environmentArgs(launch.Env)...)
+	args = appendLaunchSpec(args, launch)
+	_, err := c.run(ctx, args...)
 	return err
 }
 
@@ -270,12 +280,15 @@ func (c *Client) run(ctx context.Context, args ...string) (string, error) {
 	commandArgs := make([]string, 0, len(args)+2)
 	commandArgs = append(commandArgs, SocketFlagArgs(c.socketName)...)
 	commandArgs = append(commandArgs, args...)
+	traceArgs := tmuxTraceArgs(args)
 
-	logging.Trace(
-		"tmux.run.start",
-		"socket", c.socketName,
-		"args", strings.Join(args, " "),
-	)
+	if tmuxTraceStartEnabled(args) {
+		logging.Trace(
+			"tmux.run.start",
+			"socket", c.socketName,
+			"args", traceArgs,
+		)
+	}
 
 	command := exec.CommandContext(ctx, c.binary, commandArgs...)
 	output, err := command.CombinedOutput()
@@ -285,7 +298,7 @@ func (c *Client) run(ctx context.Context, args ...string) (string, error) {
 			"tmux.run.error",
 			err,
 			"socket", c.socketName,
-			"args", strings.Join(args, " "),
+			"args", traceArgs,
 			"duration_ms", time.Since(startedAt).Milliseconds(),
 			"output_preview", logging.Preview(trimmed, 600),
 			"output_len", len(trimmed),
@@ -297,16 +310,113 @@ func (c *Client) run(ctx context.Context, args ...string) (string, error) {
 		return "", fmt.Errorf("tmux %s: %w: %s", strings.Join(args, " "), err, trimmed)
 	}
 
-	logging.Trace(
-		"tmux.run.complete",
+	traceAttrs := []any{
 		"socket", c.socketName,
-		"args", strings.Join(args, " "),
+		"args", traceArgs,
 		"duration_ms", time.Since(startedAt).Milliseconds(),
-		"output_preview", logging.Preview(trimmed, 600),
 		"output_len", len(trimmed),
-	)
+	}
+	if tmuxTraceSuccessPreviewEnabled(args) {
+		traceAttrs = append(traceAttrs, "output_preview", logging.Preview(trimmed, 600))
+	}
+	logging.Trace("tmux.run.complete", traceAttrs...)
 
 	return trimmed, nil
+}
+
+func tmuxTraceStartEnabled(args []string) bool {
+	return !tmuxHotTraceCommand(args)
+}
+
+func tmuxTraceSuccessPreviewEnabled(args []string) bool {
+	return !tmuxHotTraceCommand(args)
+}
+
+func tmuxHotTraceCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "capture-pane", "list-panes", "has-session":
+		return true
+	default:
+		return false
+	}
+}
+
+func tmuxTraceArgs(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	switch args[0] {
+	case "capture-pane":
+		target := ""
+		startLine := ""
+		escaped := false
+		for index := 1; index < len(args); index++ {
+			switch args[index] {
+			case "-t":
+				if index+1 < len(args) {
+					target = args[index+1]
+					index++
+				}
+			case "-S":
+				if index+1 < len(args) {
+					startLine = args[index+1]
+					index++
+				}
+			case "-e":
+				escaped = true
+			}
+		}
+		parts := []string{"capture-pane"}
+		if target != "" {
+			parts = append(parts, "target="+target)
+		}
+		if startLine != "" {
+			parts = append(parts, "start="+startLine)
+		}
+		if escaped {
+			parts = append(parts, "escaped=true")
+		}
+		return strings.Join(parts, " ")
+	case "list-panes":
+		scope := ""
+		target := ""
+		for index := 1; index < len(args); index++ {
+			switch args[index] {
+			case "-a":
+				scope = "all"
+			case "-t":
+				if index+1 < len(args) {
+					target = args[index+1]
+					index++
+				}
+			}
+		}
+		parts := []string{"list-panes"}
+		if scope != "" {
+			parts = append(parts, "scope="+scope)
+		}
+		if target != "" {
+			parts = append(parts, "target="+target)
+		}
+		return strings.Join(parts, " ")
+	case "has-session":
+		target := ""
+		for index := 1; index < len(args); index++ {
+			if args[index] == "-t" && index+1 < len(args) {
+				target = args[index+1]
+				index++
+			}
+		}
+		if target == "" {
+			return "has-session"
+		}
+		return "has-session target=" + target
+	default:
+		return strings.Join(args, " ")
+	}
 }
 
 func parsePanesOutput(output string) ([]Pane, error) {
@@ -427,4 +537,25 @@ func environmentArgs(env map[string]string) []string {
 	}
 
 	return args
+}
+
+func mergeEnvironment(base map[string]string, overlay map[string]string) map[string]string {
+	if len(base) == 0 && len(overlay) == 0 {
+		return nil
+	}
+	merged := make(map[string]string, len(base)+len(overlay))
+	for key, value := range base {
+		merged[key] = value
+	}
+	for key, value := range overlay {
+		merged[key] = value
+	}
+	return merged
+}
+
+func appendLaunchSpec(args []string, launch LaunchSpec) []string {
+	if strings.TrimSpace(launch.Command) == "" {
+		return args
+	}
+	return append(args, launch.Command)
 }

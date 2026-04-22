@@ -38,12 +38,17 @@ func (o *Observer) CreateOwnedExecutionPane(ctx context.Context, startDir string
 		startDir = "."
 	}
 
-	pane, err := o.tmuxClient.NewDetachedWindow(ctx, o.sessionName, startDir, nil)
+	executionLaunch, launchErr := ExecutionLaunchSpec(o.stateDir, o.launchProfiles)
+	if launchErr != nil {
+		return OwnedExecutionPane{}, nil, launchErr
+	}
+
+	pane, err := o.tmuxClient.NewDetachedWindow(ctx, o.sessionName, startDir, nil, executionLaunch)
 	if err != nil && shouldRecoverObserverSession(err) {
 		if ensureErr := o.ensureSessionAvailable(ctx); ensureErr != nil {
 			return OwnedExecutionPane{}, nil, ensureErr
 		}
-		pane, err = o.tmuxClient.NewDetachedWindow(ctx, o.sessionName, startDir, nil)
+		pane, err = o.tmuxClient.NewDetachedWindow(ctx, o.sessionName, startDir, nil, executionLaunch)
 	}
 	if err != nil {
 		return OwnedExecutionPane{}, nil, err

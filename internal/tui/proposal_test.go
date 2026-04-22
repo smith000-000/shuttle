@@ -821,8 +821,12 @@ func TestDirectShellCommandDoesNotAutoContinueAgentLoop(t *testing.T) {
 	if ctrl.continueCalls != 0 {
 		t.Fatalf("expected no auto-continue call, got %d", ctrl.continueCalls)
 	}
-	if nextCmd != nil {
-		t.Fatal("expected no shell-tail refresh after direct shell result")
+	if nextCmd == nil {
+		t.Fatal("expected immediate shell-context refresh after direct shell result")
+	}
+	followUp := nextCmd()
+	if _, ok := followUp.(refreshedShellContextMsg); !ok {
+		t.Fatalf("expected refreshedShellContextMsg follow-up, got %T", followUp)
 	}
 	if model.showShellTail {
 		t.Fatal("expected shell-tail preview to clear after direct shell result")

@@ -220,6 +220,10 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.settingsModelListActive = false
 			m.settingsModelBrowseAll = false
 			m.settingsBanner = ""
+		case settingsStepShell:
+			m.settingsStep = settingsStepMenu
+			m.settingsConfig = nil
+			m.settingsBanner = ""
 		case settingsStepProviders:
 			m.settingsStep = settingsStepMenu
 			m.settingsBanner = ""
@@ -237,7 +241,10 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyLeft:
 		if m.settingsStep == settingsStepRuntime {
-			m.settingsRuntimeCommandFocus = false
+			if m.settingsRuntimeCommandFocus {
+				m.settingsRuntimeCommandFocus = false
+				m.refreshSettingsRuntimePreview(true)
+			}
 			return m, nil
 		}
 		if m.settingsStep == settingsStepProviderForm && m.isSettingsModelListFocused() {
@@ -247,7 +254,7 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.settingsModelInfo = false
 			return m, nil
 		}
-		if m.settingsStep == settingsStepProviderForm && m.isSettingsChoiceFieldFocused() {
+		if m.isSettingsConfigStep() && m.isSettingsChoiceFieldFocused() {
 			m.cycleSettingsChoiceField(-1)
 			return m, nil
 		}
@@ -255,6 +262,7 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyRight:
 		if m.settingsStep == settingsStepRuntime {
 			m.settingsRuntimeCommandFocus = true
+			m.refreshSettingsRuntimePreview(false)
 			return m, nil
 		}
 		if m.settingsStep == settingsStepProviderForm && m.isSettingsModelFieldFocused() {
@@ -263,7 +271,7 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if m.settingsStep == settingsStepProviderForm && m.isSettingsChoiceFieldFocused() {
+		if m.isSettingsConfigStep() && m.isSettingsChoiceFieldFocused() {
 			m.cycleSettingsChoiceField(1)
 			return m, nil
 		}
@@ -284,11 +292,14 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case settingsStepRuntime:
 			if m.settingsRuntimeIdx > 0 {
 				m.settingsRuntimeIdx--
+				m.refreshSettingsRuntimePreview(true)
 			}
 		case settingsStepProviders:
 			if m.settingsProviderIdx > 0 {
 				m.settingsProviderIdx--
 			}
+		case settingsStepShell:
+			m.moveSettingsFormSelection(-1)
 		case settingsStepProviderForm:
 			if m.isSettingsModelListFocused() {
 				if m.settingsModelIdx > 0 {
@@ -316,11 +327,14 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case settingsStepRuntime:
 			if m.settingsRuntimeIdx < len(m.settingsRuntimes)-1 {
 				m.settingsRuntimeIdx++
+				m.refreshSettingsRuntimePreview(true)
 			}
 		case settingsStepProviders:
 			if m.settingsProviderIdx < len(m.settingsProviders)-1 {
 				m.settingsProviderIdx++
 			}
+		case settingsStepShell:
+			m.moveSettingsFormSelection(1)
 		case settingsStepProviderForm:
 			if m.isSettingsModelListFocused() {
 				if m.settingsModelIdx < len(m.settingsModels)-1 {
@@ -335,9 +349,10 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyTab:
 		if m.settingsStep == settingsStepRuntime {
 			m.settingsRuntimeCommandFocus = !m.settingsRuntimeCommandFocus
+			m.refreshSettingsRuntimePreview(!m.settingsRuntimeCommandFocus)
 			return m, nil
 		}
-		if m.settingsStep == settingsStepProviderForm {
+		if m.isSettingsConfigStep() {
 			m.moveSettingsFormSelection(1)
 		}
 		return m, nil
@@ -363,10 +378,11 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.settingsStep == settingsStepRuntime && m.settingsRuntimeCommandFocus {
 			if len(m.settingsRuntimeCommand) > 0 {
 				m.settingsRuntimeCommand = m.settingsRuntimeCommand[:len(m.settingsRuntimeCommand)-1]
+				m.refreshSettingsRuntimePreview(false)
 			}
 			return m, nil
 		}
-		if m.settingsStep == settingsStepProviderForm {
+		if m.isSettingsConfigStep() {
 			if field := m.currentSettingsField(); field != nil && len(field.options) == 0 {
 				if len(field.value) > 0 {
 					field.value = field.value[:len(field.value)-1]
@@ -381,9 +397,10 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeySpace:
 		if m.settingsStep == settingsStepRuntime && m.settingsRuntimeCommandFocus {
 			m.settingsRuntimeCommand += " "
+			m.refreshSettingsRuntimePreview(false)
 			return m, nil
 		}
-		if m.settingsStep == settingsStepProviderForm {
+		if m.isSettingsConfigStep() {
 			if m.isSettingsChoiceFieldFocused() {
 				m.cycleSettingsChoiceField(1)
 				return m, nil
@@ -400,6 +417,10 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEnter:
 		if m.settingsStep == settingsStepRuntime {
 			return m.applySettingsSelection()
+		}
+		if m.settingsStep == settingsStepShell && m.isSettingsChoiceFieldFocused() {
+			m.cycleSettingsChoiceField(1)
+			return m, nil
 		}
 		if m.settingsStep == settingsStepProviderForm && m.isSettingsModelListFocused() {
 			updated, cmd := m.applySettingsSelection()
@@ -420,6 +441,7 @@ func (m Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	default:
 		if m.settingsStep == settingsStepRuntime && m.settingsRuntimeCommandFocus && !msg.Alt && msg.Type == tea.KeyRunes {
 			m.settingsRuntimeCommand += string(msg.Runes)
+			m.refreshSettingsRuntimePreview(false)
 			return m, nil
 		}
 		if m.settingsStep == settingsStepProviderForm && m.isSettingsModelFieldFocused() && msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && msg.Runes[0] == 'I' {
@@ -547,7 +569,7 @@ func (m Model) submitOnboardingConfig() (tea.Model, tea.Cmd) {
 
 	profile, err := m.resolveOnboardingFormProfile()
 	if err != nil {
-		m.entries = append(m.entries, Entry{
+		m.appendTranscriptEntries(Entry{
 			Title: "error",
 			Body:  fmt.Sprintf("provider onboarding: %v", err),
 		})
@@ -568,20 +590,21 @@ func (m Model) applySettingsSelection() (tea.Model, tea.Cmd) {
 	case settingsStepMenu:
 		if m.settingsIndex == 0 {
 			m.settingsStep = settingsStepSession
-			m.settingsApprovalIdx = currentSettingsApprovalIndex(m.ctrl)
+			m.settingsApprovalIdx = currentSettingsApprovalIndexForMode(m.approvalMode)
 			m.settingsBanner = ""
 			return m, nil
 		}
 		if m.settingsIndex == 1 {
-			m.settingsStep = settingsStepRuntime
-			m.settingsRuntimes = settingsRuntimeEntries()
-			m.settingsRuntimeIdx = m.currentSettingsRuntimeIndex()
-			m.settingsRuntimeCommand = m.activeRuntimeCommand
-			m.settingsRuntimeCommandFocus = false
+			m.openSettingsRuntimeStep()
 			m.settingsBanner = ""
 			return m, nil
 		}
 		if m.settingsIndex == 2 {
+			next := m.openSettingsShellStep()
+			next.settingsBanner = ""
+			return next, nil
+		}
+		if m.settingsIndex == 3 {
 			m.settingsStep = settingsStepProviders
 			m.settingsProviderIdx = m.currentSettingsProviderIndex()
 			m.settingsModelCatalog = nil
@@ -606,6 +629,8 @@ func (m Model) applySettingsSelection() (tea.Model, tea.Cmd) {
 		if m.ctrl == nil {
 			return m, nil
 		}
+		m.setApprovalMode(selected.mode)
+		m.settingsApprovalIdx = currentSettingsApprovalIndexForMode(m.approvalMode)
 		m.busy = true
 		m.busyStartedAt = time.Now()
 		return m, func() tea.Msg {
@@ -621,6 +646,8 @@ func (m Model) applySettingsSelection() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.switchRuntimeSelection(entry.runtimeType, strings.TrimSpace(m.settingsRuntimeCommand), settingsStepRuntime)
+	case settingsStepShell:
+		return m.saveShellSettings()
 	case settingsStepProviders:
 		if len(m.settingsProviders) == 0 {
 			return m, nil
@@ -711,6 +738,10 @@ func (m Model) currentSettingsField() *onboardingField {
 	return field
 }
 
+func (m Model) isSettingsConfigStep() bool {
+	return m.settingsStep == settingsStepProviderForm || m.settingsStep == settingsStepShell
+}
+
 func (m Model) settingsCurrentFieldKey() string {
 	field := m.currentSettingsField()
 	if field == nil {
@@ -721,7 +752,7 @@ func (m Model) settingsCurrentFieldKey() string {
 
 func (m Model) isSettingsChoiceFieldFocused() bool {
 	field := m.currentSettingsField()
-	return m.settingsStep == settingsStepProviderForm && field != nil && len(field.options) > 0
+	return m.isSettingsConfigStep() && field != nil && len(field.options) > 0
 }
 
 func (m Model) isSettingsModelFieldFocused() bool {
@@ -754,10 +785,41 @@ func (m *Model) applySettingsFormVisibility() {
 	if m.settingsConfig == nil {
 		return
 	}
-	applyProviderFormVisibility(m.settingsConfig)
+	if m.settingsStep == settingsStepProviderForm {
+		applyProviderFormVisibility(m.settingsConfig)
+	}
 	if m.isSettingsModelFieldFocused() {
 		m.settingsModelListActive = false
 		m.syncSettingsModelFilterFromConfig()
+	}
+}
+
+func (m Model) openSettingsShellStep() Model {
+	next := m
+	next.settingsStep = settingsStepShell
+	form := buildShellSettingsForm(next.activeShellProfiles)
+	next.settingsConfig = &form
+	next.settingsDetailReturnStep = settingsStepMenu
+	next.settingsBanner = ""
+	return next
+}
+
+func (m Model) saveShellSettings() (tea.Model, tea.Cmd) {
+	if m.settingsConfig == nil || m.saveShellProfiles == nil {
+		return m, nil
+	}
+	profiles, err := resolveShellSettingsForm(*m.settingsConfig)
+	if err != nil {
+		m.settingsBanner = fmt.Sprintf("Shell settings are invalid: %v", err)
+		return m, nil
+	}
+	m.busy = true
+	m.busyStartedAt = time.Now()
+	return m, func() tea.Msg {
+		return shellSettingsSavedMsg{
+			profiles: profiles,
+			err:      m.saveShellProfiles(profiles),
+		}
 	}
 }
 
@@ -862,7 +924,7 @@ func (m Model) saveSettingsProfile(activate bool) (tea.Model, tea.Cmd) {
 
 	profile, err := m.resolveSettingsFormProfile()
 	if err != nil {
-		m.entries = append(m.entries, Entry{
+		m.appendTranscriptEntries(Entry{
 			Title: "error",
 			Body:  fmt.Sprintf("provider settings: %v", err),
 		})

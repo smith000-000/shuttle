@@ -70,6 +70,10 @@ func DetectRuntimeInstallCandidates() []RuntimeInstallCandidate {
 }
 
 func ResolveRuntimeSelection(requestedType string, requestedCommand string) ResolvedRuntime {
+	return ResolveRuntimeSelectionWithCandidates(requestedType, requestedCommand, DetectRuntimeInstallCandidates())
+}
+
+func ResolveRuntimeSelectionWithCandidates(requestedType string, requestedCommand string, candidates []RuntimeInstallCandidate) ResolvedRuntime {
 	requestedType = normalizeRuntimeType(requestedType)
 	requestedCommand = strings.TrimSpace(requestedCommand)
 	resolved := ResolvedRuntime{RequestedType: requestedType, SelectedType: requestedType, Command: requestedCommand}
@@ -82,7 +86,7 @@ func ResolveRuntimeSelection(requestedType string, requestedCommand string) Reso
 
 	if requestedType == RuntimeAuto {
 		bestRank := -1
-		for _, candidate := range DetectRuntimeInstallCandidates() {
+		for _, candidate := range candidates {
 			if !candidate.Supported || !candidate.Installed {
 				continue
 			}
@@ -108,7 +112,7 @@ func ResolveRuntimeSelection(requestedType string, requestedCommand string) Reso
 	if resolved.Command != "" {
 		return resolved
 	}
-	for _, candidate := range DetectRuntimeInstallCandidates() {
+	for _, candidate := range candidates {
 		if candidate.Runtime != requestedType {
 			continue
 		}

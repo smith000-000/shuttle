@@ -77,6 +77,79 @@ func TestRunTrackedCommand(t *testing.T) {
 	}
 }
 
+func TestManagedShellProfilesKeepTrackedOutputAndContextTransitionsClean(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+
+	socketName := fmt.Sprintf("shuttle-track-managed-%d", time.Now().UnixNano())
+	sessionName := fmt.Sprintf("shuttle-track-managed-%d", time.Now().UnixNano())
+
+	client, err := tmux.NewClient(socketName)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	t.Cleanup(func() {
+		_ = client.KillSession(context.Background(), sessionName)
+	})
+
+	runtimeDir := t.TempDir()
+	launchProfiles := shell.DefaultLaunchProfiles()
+	persistentLaunch, err := shell.PersistentLaunchSpec(runtimeDir, launchProfiles)
+	if err != nil {
+		t.Fatalf("PersistentLaunchSpec() error = %v", err)
+	}
+
+	workspace, _, err := tmux.BootstrapWorkspace(ctx, client, tmux.BootstrapOptions{
+		SessionName:       sessionName,
+		StartDir:          "..",
+		BottomPanePercent: 30,
+		HistoryFile:       filepath.Join(t.TempDir(), "shell_history"),
+		Launch:            persistentLaunch,
+	})
+	if err != nil {
+		t.Fatalf("BootstrapWorkspace() error = %v", err)
+	}
+
+	observer := shell.NewObserver(client).WithStateDir(runtimeDir).WithLaunchProfiles(launchProfiles)
+
+	lsResult, err := observer.RunTrackedCommand(ctx, workspace.TopPane.ID, "ls", 10*time.Second)
+	if err != nil {
+		t.Fatalf("RunTrackedCommand(ls) error = %v", err)
+	}
+	if !strings.Contains(lsResult.Captured, "AGENTS.md") {
+		t.Fatalf("expected managed shell ls output to survive, got %q", lsResult.Captured)
+	}
+
+	lsSingleColumnResult, err := observer.RunTrackedCommand(ctx, workspace.TopPane.ID, "ls -1", 10*time.Second)
+	if err != nil {
+		t.Fatalf("RunTrackedCommand(ls -1) error = %v", err)
+	}
+	if !strings.Contains(lsSingleColumnResult.Captured, "AGENTS.md") {
+		t.Fatalf("expected managed shell ls -1 output to survive, got %q", lsSingleColumnResult.Captured)
+	}
+
+	cdResult, err := observer.RunTrackedCommand(ctx, workspace.TopPane.ID, "cd inprocess", shell.CommandTimeout("cd inprocess"))
+	if err != nil {
+		t.Fatalf("RunTrackedCommand(cd inprocess) error = %v", err)
+	}
+	if strings.Contains(cdResult.Captured, "shell-integration/") || strings.Contains(cdResult.Captured, "runtime/commands/") {
+		t.Fatalf("expected clean managed-shell context transition output, got %q", cdResult.Captured)
+	}
+
+	pwdResult, err := observer.RunTrackedCommand(ctx, workspace.TopPane.ID, "pwd", 10*time.Second)
+	if err != nil {
+		t.Fatalf("RunTrackedCommand(pwd) error = %v", err)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(pwdResult.Captured), "/inprocess") {
+		t.Fatalf("expected managed-shell cwd to update after cd, got %q", pwdResult.Captured)
+	}
+}
+
 func TestRunTrackedInteractiveCommand(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")

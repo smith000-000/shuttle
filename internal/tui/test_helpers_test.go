@@ -123,6 +123,10 @@ type fakeController struct {
 	refreshedShellContext    *shell.PromptContext
 	refreshShellContextErr   error
 	refreshShellContextCalls int
+	peekShellTailCalls       int
+	refreshActiveCalls       int
+	approvalModeCalls        int
+	contextUsageCalls        int
 }
 
 func (f *fakeController) SubmitAgentPrompt(_ context.Context, _ string) ([]controller.TranscriptEvent, error) {
@@ -356,6 +360,7 @@ func (f *fakeController) RefreshShellContext(_ context.Context) (*shell.PromptCo
 }
 
 func (f *fakeController) PeekShellTail(_ context.Context, _ int) (string, error) {
+	f.peekShellTailCalls++
 	if f.peekShellTail != "" {
 		return f.peekShellTail, nil
 	}
@@ -363,10 +368,12 @@ func (f *fakeController) PeekShellTail(_ context.Context, _ int) (string, error)
 }
 
 func (f *fakeController) EstimateContextUsage(_ string) controller.ContextWindowUsage {
+	f.contextUsageCalls++
 	return f.contextUsage
 }
 
 func (f *fakeController) ApprovalMode() controller.ApprovalMode {
+	f.approvalModeCalls++
 	if f.approvalMode == "" {
 		return controller.ApprovalModeConfirm
 	}
@@ -415,6 +422,7 @@ func (f *fakeController) ExecutionOverview() controller.ExecutionOverview {
 }
 
 func (f *fakeController) RefreshActiveExecution(_ context.Context) ([]controller.TranscriptEvent, *controller.CommandExecution, error) {
+	f.refreshActiveCalls++
 	var execution *controller.CommandExecution
 	if f.activeExecution != nil {
 		copy := *f.activeExecution

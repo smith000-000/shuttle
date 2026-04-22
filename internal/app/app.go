@@ -19,6 +19,7 @@ import (
 	"aiterm/internal/shell"
 	"aiterm/internal/tmux"
 	"aiterm/internal/tui"
+	"aiterm/internal/tuifeatures"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -46,11 +47,11 @@ type Result struct {
 }
 
 type runtimeStartupState struct {
-	runtime            agentruntime.Runtime
-	activeRuntimeType  string
-	activeRuntimeCmd   string
-	initialModelInfo   *controller.AgentModelInfo
-	initialTranscript  []tui.Entry
+	runtime           agentruntime.Runtime
+	activeRuntimeType string
+	activeRuntimeCmd  string
+	initialModelInfo  *controller.AgentModelInfo
+	initialTranscript []tui.Entry
 }
 
 func New(cfg config.Config, logger *slog.Logger) *App {
@@ -65,21 +66,6 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 		}
 	}
 	historyFile := filepath.Join(a.cfg.StateDir, "shell_history")
-	ensureWorkspace := func(ctx context.Context, client *tmux.Client, startDir string) error {
-		_, _, err := tmux.BootstrapShellSession(
-			ctx,
-			client,
-			tmux.ShellSessionOptions{
-				SessionName: a.cfg.SessionName,
-				StartDir:    startDir,
-				HistoryFile: historyFile,
-			},
-		)
-		if err != nil {
-			return err
-		}
-		return client.BindNoPrefixKey(ctx, tui.TakeControlKey, "detach-client")
-	}
 	logging.Trace(
 		"app.run.begin",
 		"workspace_id", a.cfg.WorkspaceID,
@@ -97,6 +83,31 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	runtimeCfg, err = agentruntime.ApplyStoredRuntimeConfig(runtimeCfg)
 	if err != nil {
 		return Result{}, fmt.Errorf("load stored runtime config: %w", err)
+	}
+	runtimeCfg, err = shell.ApplyStoredLaunchProfiles(runtimeCfg)
+	if err != nil {
+		return Result{}, fmt.Errorf("load stored shell settings: %w", err)
+	}
+	launchProfiles := shell.ConfigLaunchProfiles(runtimeCfg)
+	persistentLaunch, err := shell.PersistentLaunchSpec(runtimeCfg.RuntimeDir, launchProfiles)
+	if err != nil {
+		return Result{}, fmt.Errorf("prepare persistent shell launch profile: %w", err)
+	}
+	ensureWorkspace := func(ctx context.Context, client *tmux.Client, startDir string) error {
+		_, _, err := tmux.BootstrapShellSession(
+			ctx,
+			client,
+			tmux.ShellSessionOptions{
+				SessionName: a.cfg.SessionName,
+				StartDir:    startDir,
+				HistoryFile: historyFile,
+				Launch:      persistentLaunch,
+			},
+		)
+		if err != nil {
+			return err
+		}
+		return client.BindNoPrefixKey(ctx, tui.TakeControlKey, "detach-client")
 	}
 
 	client, err := tmux.NewClient(socketTarget)
@@ -121,6 +132,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			StartDir:          a.cfg.StartDir,
 			BottomPanePercent: 30,
 			HistoryFile:       historyFile,
+			Launch:            persistentLaunch,
 		},
 	)
 	if err != nil {
@@ -150,7 +162,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	}
 
 	if a.cfg.AgentPrompt != "" {
-		observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir).WithSessionName(workspace.SessionName).WithStartDir(runtimeCfg.StartDir).WithSessionEnsurer(func(ctx context.Context) error {
+		observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir).WithSessionName(workspace.SessionName).WithStartDir(runtimeCfg.StartDir).WithLaunchProfiles(launchProfiles).WithSessionEnsurer(func(ctx context.Context) error {
 			return ensureWorkspace(ctx, client, runtimeCfg.StartDir)
 		})
 		initialShellContext := initialPromptContext(ctx, observer, workspace.TopPane.ID, runtimeCfg.StartDir)
@@ -204,7 +216,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	}
 
 	if a.cfg.TUI {
-		observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir).WithSessionName(workspace.SessionName).WithStartDir(runtimeCfg.StartDir).WithSessionEnsurer(func(ctx context.Context) error {
+		observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir).WithSessionName(workspace.SessionName).WithStartDir(runtimeCfg.StartDir).WithLaunchProfiles(launchProfiles).WithSessionEnsurer(func(ctx context.Context) error {
 			return ensureWorkspace(ctx, client, runtimeCfg.StartDir)
 		})
 		if err := client.BindNoPrefixKey(ctx, tui.TakeControlKey, "detach-client"); err != nil {
@@ -305,7 +317,26 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 			runtimeCfg.RuntimeCommand = resolved.Command
 			return ctrl, runtimeCfg.RuntimeType, runtimeCfg.RuntimeCommand, nil
 		}
+		saveShellSettings := func(profiles shell.LaunchProfiles) error {
+			normalized := shell.NormalizeLaunchProfiles(profiles)
+			nextPersistentLaunch, err := shell.PersistentLaunchSpec(runtimeCfg.RuntimeDir, normalized)
+			if err != nil {
+				return err
+			}
+			if _, err := shell.ExecutionLaunchSpec(runtimeCfg.RuntimeDir, normalized); err != nil {
+				return err
+			}
+			if err := shell.SaveStoredLaunchProfiles(runtimeCfg.StateDir, normalized); err != nil {
+				return err
+			}
+			runtimeCfg = shell.ApplyLaunchProfilesToConfig(runtimeCfg, normalized)
+			launchProfiles = normalized
+			persistentLaunch = nextPersistentLaunch
+			observer.WithLaunchProfiles(normalized)
+			return nil
+		}
 		model := tui.NewModel(workspace, ctrl).
+			WithDisabledFeatures(a.cfg.TUIDisabled).
 			WithShellContext(initialShellContext).
 			WithTakeControl(socketTarget, workspace.SessionName, workspace.TopPane.ID, tui.TakeControlKey).
 			WithTakeControlStartDir(runtimeCfg.StartDir).
@@ -327,9 +358,14 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 				runtimeCfg.RuntimeCommand = resolved.Command
 				return agentruntime.SaveStoredRuntimeConfig(runtimeCfg.StateDir, runtimeCfg.RuntimeType, runtimeCfg.RuntimeCommand)
 			}).
+			WithShellSettings(launchProfiles, saveShellSettings).
 			WithInitialModelInfo(runtimeState.initialModelInfo).
 			WithInitialEntries(runtimeState.initialTranscript)
-		program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+		programOptions := []tea.ProgramOption{tea.WithAltScreen()}
+		if !a.cfg.TUIDisabled.Disabled(tuifeatures.Mouse) {
+			programOptions = append(programOptions, tea.WithMouseCellMotion())
+		}
+		program := tea.NewProgram(model, programOptions...)
 		finalModel, runErr := program.Run()
 		cleanupErr := cleanupTUISession(a.cfg, created, client, resolveCleanupSessionName(finalModel, workspace.SessionName))
 		if runErr != nil {
@@ -362,7 +398,7 @@ func (a *App) Run(ctx context.Context) (Result, error) {
 	}
 
 	if a.cfg.Track != "" {
-		observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir).WithSessionName(workspace.SessionName).WithStartDir(runtimeCfg.StartDir).WithSessionEnsurer(func(ctx context.Context) error {
+		observer := shell.NewObserver(client).WithStateDir(a.cfg.RuntimeDir).WithSessionName(workspace.SessionName).WithStartDir(runtimeCfg.StartDir).WithLaunchProfiles(launchProfiles).WithSessionEnsurer(func(ctx context.Context) error {
 			return ensureWorkspace(ctx, client, runtimeCfg.StartDir)
 		})
 		observer.WithPromptHint(shell.GuessLocalContext(a.cfg.StartDir))

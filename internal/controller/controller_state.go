@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"aiterm/internal/logging"
+	"aiterm/internal/shell"
 )
 
 func cloneCommandExecution(execution *CommandExecution) *CommandExecution {
@@ -191,7 +192,7 @@ func (c *LocalController) newExecutionLocked(command string, origin CommandOrigi
 		Origin:        origin,
 		TrackedShell:  c.session.TrackedShell,
 		OwnershipMode: CommandOwnershipExclusive,
-		State:         CommandExecutionRunning,
+		State:         predictedInitialExecutionState(command),
 		StartedAt:     time.Now(),
 	}
 	if c.session.CurrentShell != nil {
@@ -199,6 +200,17 @@ func (c *LocalController) newExecutionLocked(command string, origin CommandOrigi
 		execution.ShellContextBefore = &contextCopy
 	}
 	return execution
+}
+
+func predictedInitialExecutionState(command string) CommandExecutionState {
+	switch {
+	case shell.CommandSuggestsFullscreen(command):
+		return CommandExecutionInteractiveFullscreen
+	case shell.CommandSuggestsAwaitingInput(command):
+		return CommandExecutionAwaitingInput
+	default:
+		return CommandExecutionRunning
+	}
 }
 
 func (c *LocalController) bestEffortRecentOutputLocked() string {

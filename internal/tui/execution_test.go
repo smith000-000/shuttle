@@ -1933,6 +1933,222 @@ func TestActiveExecutionClearsAfterConfirmedMissingPolls(t *testing.T) {
 	}
 }
 
+func TestBusyRefreshCmdsSkipUnneededPollsWithoutVisibleShellTailOrExecution(t *testing.T) {
+	ctrl := &fakeController{}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.busy = true
+
+	cmds := model.busyRefreshCmds(time.Now())
+	if len(cmds) != 1 {
+		t.Fatalf("expected only the busy tick when no shell tail or execution is active, got %d command(s)", len(cmds))
+	}
+
+	if msg := cmds[0](); msg == nil {
+		t.Fatal("expected busy tick command to produce a message")
+	}
+	if ctrl.peekShellTailCalls != 0 {
+		t.Fatalf("expected no shell-tail polling, got %d call(s)", ctrl.peekShellTailCalls)
+	}
+	if ctrl.refreshActiveCalls != 0 {
+		t.Fatalf("expected no active-execution polling, got %d call(s)", ctrl.refreshActiveCalls)
+	}
+}
+
+func TestBusyRefreshCmdsPollVisibleShellTailAndActiveExecution(t *testing.T) {
+	ctrl := &fakeController{
+		activeExecution: &controller.CommandExecution{
+			ID:        "cmd-1",
+			Command:   "sleep 15",
+			Origin:    controller.CommandOriginUserShell,
+			State:     controller.CommandExecutionRunning,
+			StartedAt: time.Now(),
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.busy = true
+	model.showShellTail = true
+	model.activeExecution = ctrl.activeExecution
+
+	cmds := model.busyRefreshCmds(time.Now())
+	if len(cmds) != 3 {
+		t.Fatalf("expected busy tick plus shell-tail and active-execution polls, got %d command(s)", len(cmds))
+	}
+
+	for _, cmd := range cmds[1:] {
+		if cmd == nil {
+			t.Fatal("expected non-nil polling command")
+		}
+		_ = cmd()
+	}
+	if ctrl.peekShellTailCalls != 1 {
+		t.Fatalf("expected one shell-tail poll, got %d", ctrl.peekShellTailCalls)
+	}
+	if ctrl.refreshActiveCalls != 1 {
+		t.Fatalf("expected one active-execution poll, got %d", ctrl.refreshActiveCalls)
+	}
+}
+
+func TestBusyRefreshCmdsSkipTerminalExecutionStates(t *testing.T) {
+	ctrl := &fakeController{
+		activeExecution: &controller.CommandExecution{
+			ID:        "cmd-1",
+			Command:   "sleep 1",
+			Origin:    controller.CommandOriginUserShell,
+			State:     controller.CommandExecutionCompleted,
+			StartedAt: time.Now().Add(-time.Second),
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.activeExecution = ctrl.activeExecution
+
+	cmds := model.busyRefreshCmds(time.Now())
+	if len(cmds) != 0 {
+		t.Fatalf("expected no busy refresh commands for a terminal execution state, got %d", len(cmds))
+	}
+}
+
+func TestActiveExecutionMsgCommandResultClearsExecutionAndUpdatesShellContext(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "pwd",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now().Add(-time.Second),
+	}
+	model.showShellTail = true
+	model.liveShellTail = "working"
+
+	summary := controller.CommandResultSummary{
+		ExecutionID: "cmd-1",
+		Command:     "pwd",
+		Origin:      controller.CommandOriginUserShell,
+		State:       controller.CommandExecutionCompleted,
+		Summary:     "/Users/jsmith/source/shuttle",
+		ShellContext: &shell.PromptContext{
+			User:      "jsmith",
+			Host:      "macbook",
+			Directory: "/Users/jsmith/source/shuttle",
+		},
+	}
+
+	updated, _ := model.Update(activeExecutionMsg{
+		events: []controller.TranscriptEvent{
+			{Kind: controller.EventCommandResult, Payload: summary},
+		},
+		execution: &controller.CommandExecution{
+			ID:        "cmd-1",
+			Command:   "pwd",
+			Origin:    controller.CommandOriginUserShell,
+			State:     controller.CommandExecutionCompleted,
+			StartedAt: time.Now().Add(-time.Second),
+		},
+	})
+	next := updated.(Model)
+
+	if next.activeExecution != nil {
+		t.Fatalf("expected terminal execution poll to clear active execution, got %#v", next.activeExecution)
+	}
+	if next.showShellTail {
+		t.Fatal("expected command result to hide shell tail")
+	}
+	if next.lastCommandResult == nil || next.lastCommandResult.Summary != summary.Summary {
+		t.Fatalf("expected last command result to update, got %#v", next.lastCommandResult)
+	}
+	if next.shellContext.Directory != "/Users/jsmith/source/shuttle" {
+		t.Fatalf("expected shell context to update from poll events, got %#v", next.shellContext)
+	}
+}
+
+func TestControllerEventsCommandResultRefreshesShellContextImmediately(t *testing.T) {
+	ctrl := &fakeController{
+		refreshedShellContext: &shell.PromptContext{
+			User:      "jsmith",
+			Host:      "macbook",
+			Directory: "/Users/jsmith/source/shuttle/inprocess",
+		},
+	}
+	model := NewModel(fakeWorkspace(), ctrl)
+	model.directShellPending = true
+
+	updated, cmd := model.Update(controllerEventsMsg{
+		events: []controller.TranscriptEvent{
+			{
+				Kind: controller.EventCommandResult,
+				Payload: controller.CommandResultSummary{
+					ExecutionID: "cmd-1",
+					Command:     "cd inprocess",
+					Origin:      controller.CommandOriginUserShell,
+					State:       controller.CommandExecutionCompleted,
+					ExitCode:    0,
+					Summary:     "(no output)",
+				},
+			},
+		},
+	})
+	next := updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected immediate shell-context refresh command")
+	}
+	msg := cmd()
+	refreshed, ok := msg.(refreshedShellContextMsg)
+	if !ok {
+		t.Fatalf("expected refreshedShellContextMsg, got %T", msg)
+	}
+	if refreshed.context == nil || refreshed.context.Directory != "/Users/jsmith/source/shuttle/inprocess" {
+		t.Fatalf("expected refreshed shell context, got %#v", refreshed.context)
+	}
+	if ctrl.refreshShellContextCalls != 1 {
+		t.Fatalf("expected one refresh shell context call, got %d", ctrl.refreshShellContextCalls)
+	}
+	if next.shellContext.Directory != "" {
+		t.Fatalf("expected immediate update to come from follow-up refresh cmd, got %#v", next.shellContext)
+	}
+}
+
+func TestShellTailMsgDoesNotMirrorScrollbackIntoOrdinaryUserShellExecution(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.showShellTail = true
+	model.activeExecution = &controller.CommandExecution{
+		ID:        "cmd-1",
+		Command:   "ls",
+		Origin:    controller.CommandOriginUserShell,
+		State:     controller.CommandExecutionRunning,
+		StartedAt: time.Now(),
+	}
+
+	updated, _ := model.Update(shellTailMsg{tail: "old-output\nnew-output"})
+	next := updated.(Model)
+
+	if next.liveShellTail != "old-output\nnew-output" {
+		t.Fatalf("expected live shell tail to update, got %q", next.liveShellTail)
+	}
+	if next.activeExecution == nil {
+		t.Fatal("expected active execution to remain present")
+	}
+	if next.activeExecution.LatestOutputTail != "" {
+		t.Fatalf("expected ordinary user-shell execution tail to avoid mirrored scrollback, got %q", next.activeExecution.LatestOutputTail)
+	}
+}
+
+func TestSubmitSeedsFullscreenExecutionForDirectShellCommand(t *testing.T) {
+	model := NewModel(fakeWorkspace(), &fakeController{})
+	model.input = "nano foo.txt"
+
+	updated, _ := model.submit()
+	next := updated.(Model)
+
+	if next.activeExecution == nil {
+		t.Fatal("expected fullscreen command submit to seed active execution")
+	}
+	if next.activeExecution.State != controller.CommandExecutionInteractiveFullscreen {
+		t.Fatalf("expected seeded fullscreen state, got %#v", next.activeExecution)
+	}
+	if next.activeExecution.Command != "nano foo.txt" {
+		t.Fatalf("expected seeded command, got %#v", next.activeExecution)
+	}
+}
+
 func TestMaybeExecutionCheckInCmdChecksInForAgentOwnedExecution(t *testing.T) {
 	ctrl := &fakeController{
 		checkInEvents: []controller.TranscriptEvent{

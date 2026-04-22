@@ -8,6 +8,7 @@ import (
 	"aiterm/internal/controller"
 	"aiterm/internal/provider"
 	"aiterm/internal/shell"
+	"aiterm/internal/tuifeatures"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -26,13 +27,86 @@ func (m Model) transcriptLines(width int) []string {
 	return lines
 }
 
-func (m Model) transcriptDisplayLines(width int) []transcriptRenderLine {
+func (m *Model) transcriptDisplayLines(width int) []transcriptRenderLine {
+	key := transcriptLayoutCacheKey{
+		width:                width,
+		contentVersion:       m.transcriptContentVersion,
+		selectedEntry:        m.selectedEntry,
+		expandedCommandEntry: m.expandedCommandEntry,
+	}
+	if m.transcriptLayoutCache.valid && m.transcriptLayoutCache.key == key {
+		return m.transcriptLayoutCache.lines
+	}
+
+	if m.featureDisabled(tuifeatures.Transcript) {
+		lines := []transcriptRenderLine{{
+			text:       m.styles.bodySystem.Render("  transcript hidden for perf test"),
+			entryIndex: -1,
+			tagStart:   -1,
+			tagEnd:     -1,
+		}}
+		m.transcriptLayoutCache = transcriptLayoutCache{
+			key:   key,
+			lines: lines,
+			valid: true,
+		}
+		return lines
+	}
+
 	lines := make([]transcriptRenderLine, 0, len(m.entries)*2)
 	for index, entry := range m.entries {
 		lines = append(lines, m.renderEntryLines(index, entry, width)...)
 	}
 
+	m.transcriptLayoutCache = transcriptLayoutCache{
+		key:   key,
+		lines: lines,
+		valid: true,
+	}
 	return lines
+}
+
+func (m *Model) syncTranscriptCaches() {
+	width := m.currentTranscriptWidth()
+	key := transcriptLayoutCacheKey{
+		width:                width,
+		contentVersion:       m.transcriptContentVersion,
+		selectedEntry:        m.selectedEntry,
+		expandedCommandEntry: m.expandedCommandEntry,
+	}
+	if !m.transcriptLayoutCache.valid || m.transcriptLayoutCache.key != key {
+		m.transcriptDisplayLines(width)
+	}
+
+	if m.detailOpen {
+		return
+	}
+
+	height := m.currentTranscriptHeight()
+	start := m.transcriptWindowStartForDisplay(m.transcriptLayoutCache.lines, height)
+	renderKey := transcriptRenderCacheKey{
+		layout: key,
+		height: height,
+		start:  start,
+	}
+	if m.transcriptRenderCache.valid && m.transcriptRenderCache.key == renderKey {
+		return
+	}
+
+	displayLines := m.transcriptWindowDisplay(m.transcriptLayoutCache.lines, height)
+	lines := make([]string, 0, len(displayLines))
+	for _, line := range displayLines {
+		text := line.text
+		if text == "" {
+			text = strings.Repeat(" ", max(1, width))
+		}
+		lines = append(lines, m.styles.transcript.Width(width).MaxWidth(width).Render(text))
+	}
+	m.transcriptRenderCache = transcriptRenderCache{
+		key:   renderKey,
+		text:  strings.Join(lines, "\n"),
+		valid: true,
+	}
 }
 
 func (m Model) renderEntryLines(index int, entry Entry, width int) []transcriptRenderLine {
@@ -40,7 +114,7 @@ func (m Model) renderEntryLines(index int, entry Entry, width int) []transcriptR
 		return nil
 	}
 	prefix := "  "
-	if entry.Title == "result" && strings.TrimSpace(entry.Command) != "" {
+	if m.featureEnabled(tuifeatures.TranscriptChrome) && entry.Title == "result" && strings.TrimSpace(entry.Command) != "" {
 		return m.renderResultEntryLines(index, entry, width, prefix)
 	}
 
@@ -227,9 +301,25 @@ func (m Model) renderBodyStyle(entry Entry) lipgloss.Style {
 }
 
 func (m Model) renderTranscript(width int, height int) string {
-	displayLines := m.transcriptWindowDisplay(m.transcriptDisplayLines(width), height)
-	lines := make([]string, 0, len(displayLines))
-	for _, line := range displayLines {
+	displayLines := m.transcriptDisplayLines(width)
+	layoutKey := transcriptLayoutCacheKey{
+		width:                width,
+		contentVersion:       m.transcriptContentVersion,
+		selectedEntry:        m.selectedEntry,
+		expandedCommandEntry: m.expandedCommandEntry,
+	}
+	renderKey := transcriptRenderCacheKey{
+		layout: layoutKey,
+		height: height,
+		start:  m.transcriptWindowStartForDisplay(displayLines, height),
+	}
+	if m.transcriptRenderCache.valid && m.transcriptRenderCache.key == renderKey {
+		return m.transcriptRenderCache.text
+	}
+
+	windowLines := m.transcriptWindowDisplay(displayLines, height)
+	lines := make([]string, 0, len(windowLines))
+	for _, line := range windowLines {
 		text := line.text
 		if text == "" {
 			text = strings.Repeat(" ", max(1, width))
@@ -240,7 +330,13 @@ func (m Model) renderTranscript(width int, height int) string {
 }
 
 func (m Model) transcriptViewportHeight(actionCard string, planCard string, activeExecutionCard string, statusLine string, shellTail string, composer string, footer string, screenHeight int) int {
-	reservedHeight := lipgloss.Height(actionCard) + lipgloss.Height(planCard) + lipgloss.Height(activeExecutionCard) + lipgloss.Height(statusLine) + lipgloss.Height(shellTail) + lipgloss.Height(composer) + lipgloss.Height(footer)
+	reservedHeight := renderedSectionHeight(actionCard) +
+		renderedSectionHeight(planCard) +
+		renderedSectionHeight(activeExecutionCard) +
+		renderedSectionHeight(statusLine) +
+		renderedSectionHeight(shellTail) +
+		renderedSectionHeight(composer) +
+		renderedSectionHeight(footer)
 	transcriptChromeHeight := m.styles.transcript.GetVerticalFrameSize()
 	transcriptHeight := screenHeight - reservedHeight - transcriptChromeHeight
 	if transcriptHeight < 4 {
@@ -248,6 +344,13 @@ func (m Model) transcriptViewportHeight(actionCard string, planCard string, acti
 	}
 
 	return transcriptHeight
+}
+
+func renderedSectionHeight(value string) int {
+	if value == "" {
+		return 0
+	}
+	return lipgloss.Height(value)
 }
 
 func (m Model) transcriptWindow(lines []string, height int) []string {
@@ -278,17 +381,7 @@ func (m Model) transcriptWindow(lines []string, height int) []string {
 }
 
 func (m Model) transcriptWindowDisplay(lines []transcriptRenderLine, height int) []transcriptRenderLine {
-	start := m.transcriptScroll
-	maxStart := m.maxTranscriptScrollForDisplay(lines, height)
-	if m.transcriptFollow {
-		start = maxStart
-	}
-	if start > maxStart {
-		start = maxStart
-	}
-	if start < 0 {
-		start = 0
-	}
+	start := m.transcriptWindowStartForDisplay(lines, height)
 
 	end := start + height
 	if end > len(lines) {
@@ -305,6 +398,21 @@ func (m Model) transcriptWindowDisplay(lines []transcriptRenderLine, height int)
 	}
 
 	return window
+}
+
+func (m Model) transcriptWindowStartForDisplay(lines []transcriptRenderLine, height int) int {
+	start := m.transcriptScroll
+	maxStart := m.maxTranscriptScrollForDisplay(lines, height)
+	if m.transcriptFollow {
+		start = maxStart
+	}
+	if start > maxStart {
+		start = maxStart
+	}
+	if start < 0 {
+		start = 0
+	}
+	return start
 }
 
 func (m Model) maxTranscriptScroll() int {
@@ -330,6 +438,9 @@ func (m Model) maxTranscriptScrollFor(lines []string, height int) int {
 func (m Model) currentTranscriptHeight() int {
 	if m.detailOpen {
 		return max(4, m.height-4)
+	}
+	if m.featureDisabled(tuifeatures.Transcript) {
+		return 1
 	}
 
 	width := m.currentTranscriptWidth()
@@ -412,6 +523,9 @@ func (m *Model) selectNextEntry() {
 }
 
 func (m Model) rawTranscriptViewportHeight() int {
+	if m.featureDisabled(tuifeatures.Transcript) {
+		return 1
+	}
 	width := m.currentTranscriptWidth()
 	actionCard := m.renderActionCard(m.contentWidthFor(width, m.styles.actionCard))
 	planCard := m.renderPlanCard(m.contentWidthFor(width, m.styles.actionCard))
